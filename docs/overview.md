@@ -36,3 +36,39 @@ library responsible for:
 
 This means `vertex`, `vcx`, and `vcc` don't duplicate compiler internals. 
 They each speak to Compute Framework and let it do the heavy lifting.
+
+```
+vertex (.vs)  ─┐
+vcx    (.cpp) ─┼──▶  Compute Framework (IR + Builder)  ──▶  Native Output
+vcc    (.c)   ─┘
+```
+
+---
+
+## All Compilers Written In Modern C++
+
+All repos, including Compute Framework itself, are implemented in **modern C++** — 
+not the legacy toolchain they aim to replace, but clean contemporary C++ 
+compiled through Compute Framework itself once bootstrapped.
+
+---
+
+## Goals
+
+- **No CMake** — replaced by Vertex's integrated build system
+- **No vcpkg** — replaced by Vertex's native package manager
+- **No legacy g++/gcc dependency** — `vcc` and `vcx` handle C and C++ compilation
+- **One toolchain** — install Vertex, get everything
+
+---
+
+## File Extensions
+
+- `.vs` — Vertex source files
+- `.vsp` — Vertex package manifest (proposed)
+
+---
+
+## Status
+
+Early development. All repositories currently being scaffolded.
