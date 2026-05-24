@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/package",
+  "name": "vertex-lang",
+  "displayName": "Vertex Language Support",
+  "description": "Syntax highlighting for the Vertex programming language (spec 1.9)",
+  "version": "1.0.0",
+  "publisher": "vertex-language",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vertex-language/vertex"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "vertex",
+        "aliases": ["Vertex", "vertex"],
+        "extensions": [".vs"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vertex",
+        "scopeName": "source.vtx",
+        "path": "./syntaxes/vertex.tmLanguage.json"
+      }
+    ]
+  }
+}

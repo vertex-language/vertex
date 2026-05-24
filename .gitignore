@@ -1,0 +1,12 @@
+*.wat
+
+*.interp
+
+*.tokens
+
+*.jar
+
+*.vsix
+
+cmd/vertex/go.mod
+cmd/vertex/go.sum

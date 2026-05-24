@@ -1,0 +1,324 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Vertex",
+  "scopeName": "source.vtx",
+  "fileTypes": ["vs"],
+
+  "patterns": [
+    { "include": "#block-comment"      },
+    { "include": "#line-comment"       },
+    { "include": "#raw-string"         },
+    { "include": "#string"             },
+    { "include": "#numeric-literals"   },
+    { "include": "#postfix-builtins"   },
+    { "include": "#func-decl"          },
+    { "include": "#type-decl"          },
+    { "include": "#keywords-control"   },
+    { "include": "#keywords-decl"      },
+    { "include": "#keywords-modifier"  },
+    { "include": "#keywords-qualifier" },
+    { "include": "#keywords-ffi"       },
+    { "include": "#result-keywords"    },
+    { "include": "#primitive-types"    },
+    { "include": "#constants"          },
+    { "include": "#operators"          }
+  ],
+
+  "repository": {
+
+    "block-comment": {
+      "name": "comment.block.vtx",
+      "begin": "/\\*",
+      "end":   "\\*/",
+      "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.vtx" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.comment.end.vtx"   } }
+    },
+
+    "line-comment": {
+      "name": "comment.line.double-slash.vtx",
+      "begin": "//",
+      "end":   "$",
+      "beginCaptures": { "0": { "name": "punctuation.definition.comment.vtx" } }
+    },
+
+    "raw-string": {
+      "comment": "Backtick multiline string — §3 RAW_STRING_LIT",
+      "name": "string.quoted.other.vtx",
+      "begin": "`",
+      "end":   "`",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.vtx" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.vtx"   } }
+    },
+
+    "string": {
+      "comment": "Double-quoted string — §1 STRING_LIT",
+      "name": "string.quoted.double.vtx",
+      "begin": "\"",
+      "end":   "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.vtx" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.vtx"   } },
+      "patterns": [
+        { "name": "constant.character.escape.vtx", "match": "\\\\." }
+      ]
+    },
+
+    "numeric-literals": {
+      "comment": "All numeric forms from §1. More-specific patterns must precede their prefixes.",
+      "patterns": [
+        {
+          "comment": "Hex float — 0xFp2, 0xC.3p0",
+          "name": "constant.numeric.float.hex.vtx",
+          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*(\\.[0-9a-fA-F][0-9a-fA-F_]*)?[pP][+\\-]?[0-9][0-9_]*\\b"
+        },
+        {
+          "comment": "Hex integer — 0xFF",
+          "name": "constant.numeric.integer.hex.vtx",
+          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "comment": "Binary integer — 0b101010",
+          "name": "constant.numeric.integer.binary.vtx",
+          "match": "\\b0[bB][01][01_]*\\b"
+        },
+        {
+          "comment": "Octal integer — 0o52",
+          "name": "constant.numeric.integer.octal.vtx",
+          "match": "\\b0[oO][0-7][0-7_]*\\b"
+        },
+        {
+          "comment": "Decimal float with fraction — 3.14, 1_000.000_1e2",
+          "name": "constant.numeric.float.decimal.vtx",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+\\-]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "comment": "Decimal float exponent-only — 1e10",
+          "name": "constant.numeric.float.decimal.vtx",
+          "match": "\\b[0-9][0-9_]*[eE][+\\-]?[0-9][0-9_]*\\b"
+        },
+        {
+          "comment": "Decimal integer — 42, 1_000_000",
+          "name": "constant.numeric.integer.decimal.vtx",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "postfix-builtins": {
+      "comment": "Postfix execution model (§42) and native-interface intrinsics (§5–6).",
+      "patterns": [
+        {
+          "comment": "Postfix calls: .await(), .dispatch(), .spawn(), .fork(), .new(), .delete(), .try(), .any(), .sizeof(), .alignof(), .byteSize(), .send(), .receive(), .close()",
+          "match": "\\.(await|dispatch|spawn|fork|new|delete|try|any|sizeof|alignof|byteSize|send|receive|close)(?=\\s*\\()",
+          "captures": { "0": { "name": "support.function.builtin.vtx" } }
+        },
+        {
+          "comment": "Postfix properties: .len, .rawValue",
+          "match": "\\.(len|rawValue)\\b",
+          "captures": { "0": { "name": "support.variable.property.vtx" } }
+        }
+      ]
+    },
+
+    "func-decl": {
+      "comment": "Named function declaration — highlights keyword + name. Anonymous func(…) falls through to keywords-decl.",
+      "match": "\\b(func)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.function.vtx" },
+        "2": { "name": "entity.name.function.vtx" }
+      }
+    },
+
+    "type-decl": {
+      "comment": "Named type declarations — highlights keyword + name.",
+      "patterns": [
+        {
+          "match": "\\b(struct)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.struct.vtx" },
+            "2": { "name": "entity.name.type.struct.vtx" }
+          }
+        },
+        {
+          "match": "\\b(class)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.class.vtx" },
+            "2": { "name": "entity.name.type.class.vtx" }
+          }
+        },
+        {
+          "match": "\\b(enum)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.enum.vtx" },
+            "2": { "name": "entity.name.type.enum.vtx" }
+          }
+        },
+        {
+          "comment": "Type alias — type FILE = any opaque",
+          "match": "\\b(type)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.vtx" },
+            "2": { "name": "entity.name.type.alias.vtx" }
+          }
+        },
+        {
+          "comment": "Package declaration",
+          "match": "\\b(package)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.namespace.vtx" },
+            "2": { "name": "entity.name.namespace.vtx" }
+          }
+        },
+        {
+          "comment": "Build tag — build linux",
+          "match": "\\b(build)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\s*,\\s*[a-zA-Z_][a-zA-Z0-9_]*)*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.build.vtx" },
+            "2": { "name": "constant.other.build-tag.vtx" }
+          }
+        }
+      ]
+    },
+
+    "keywords-control": {
+      "comment": "Control-flow keywords — §16–18, §29, §35–40",
+      "name": "keyword.control.vtx",
+      "match": "\\b(break|case|continue|default|defer|else|fallthrough|for|if|in|return|switch|while)\\b"
+    },
+
+    "keywords-decl": {
+      "comment": "Declaration keywords — fallback for contexts where type-decl / func-decl do not fire (e.g. anonymous func types, import paths, weak let).",
+      "name": "keyword.declaration.vtx",
+      "match": "\\b(build|class|enum|func|import|let|package|struct|type|var|weak)\\b"
+    },
+
+    "keywords-modifier": {
+      "comment": "Storage modifiers: mut (mutable parameter/receiver), shared (GPU shared memory — §12.5)",
+      "name": "storage.modifier.vtx",
+      "match": "\\b(mut|shared)\\b"
+    },
+
+    "keywords-qualifier": {
+      "comment": "Function qualifiers — §19, §35–40",
+      "name": "keyword.other.qualifier.vtx",
+      "match": "\\b(async|gpu|process|thread)\\b"
+    },
+
+    "keywords-ffi": {
+      "comment": "FFI / pointer type keywords — §4 of native interface",
+      "name": "keyword.other.ffi.vtx",
+      "match": "\\b(any|channel|opaque)\\b"
+    },
+
+    "result-keywords": {
+      "comment": "Result type and its constructors — §37.3",
+      "patterns": [
+        {
+          "name": "support.type.vtx",
+          "match": "\\bResult\\b"
+        },
+        {
+          "name": "support.constant.result.vtx",
+          "match": "\\b(Ok|Err)\\b"
+        }
+      ]
+    },
+
+    "primitive-types": {
+      "comment": "Built-in primitive types — §3 / VertexLexer primitiveType rule. int must come after int8/int16/int32/int64 but word-boundary anchors handle this correctly.",
+      "name": "support.type.primitive.vtx",
+      "match": "\\b(bool|char|double|float|int8|int16|int32|int64|int|string|uint8|uint16|uint32|uint64|uint|void)\\b"
+    },
+
+    "constants": {
+      "comment": "Language constants — §1",
+      "name": "constant.language.vtx",
+      "match": "\\b(false|nil|true)\\b"
+    },
+
+    "operators": {
+      "comment": "All operators from VertexLexer. Multi-character tokens precede their single-character prefixes so the longer token wins at the same position.",
+      "patterns": [
+        {
+          "comment": "§8 Overflow arithmetic: &+  &-  &*  (before bare &)",
+          "name": "keyword.operator.overflow.vtx",
+          "match": "&[+\\-*]"
+        },
+        {
+          "comment": "§6 Compound assignment: +=  -=  *=  /=  %=  (before = and individual arithmetic)",
+          "name": "keyword.operator.assignment.compound.vtx",
+          "match": "[+\\-*/%]="
+        },
+        {
+          "comment": "§14 Identity: ===  !==  (before ==  !=)",
+          "name": "keyword.operator.identity.vtx",
+          "match": "===|!=="
+        },
+        {
+          "comment": "§9 Equality: ==  !=",
+          "name": "keyword.operator.equality.vtx",
+          "match": "==|!="
+        },
+        {
+          "comment": "§9 Ordered comparison with equals: >=  <=  (before > <)",
+          "name": "keyword.operator.comparison.vtx",
+          "match": "[><]="
+        },
+        {
+          "comment": "§7 Bit-shift: <<  >>  (before < >)",
+          "name": "keyword.operator.bitshift.vtx",
+          "match": "<<|>>"
+        },
+        {
+          "comment": "§10 Logical: &&  ||  (before bare & |)",
+          "name": "keyword.operator.logical.vtx",
+          "match": "&&|\\|\\|"
+        },
+        {
+          "comment": "Return-type arrow: ->  (before bare -)",
+          "name": "keyword.operator.arrow.vtx",
+          "match": "->"
+        },
+        {
+          "comment": "§13 Nil-coalescing: ??  (before bare ?)",
+          "name": "keyword.operator.nil-coalescing.vtx",
+          "match": "\\?\\?"
+        },
+        {
+          "comment": "§11 Range operators: ..<  ...  (before bare .)",
+          "name": "keyword.operator.range.vtx",
+          "match": "\\.\\.<|\\.\\.\\."
+        },
+        {
+          "comment": "§9 Bare comparison: >  <",
+          "name": "keyword.operator.comparison.vtx",
+          "match": "[><]"
+        },
+        {
+          "comment": "§7 Bitwise: &  |  ^  ~",
+          "name": "keyword.operator.bitwise.vtx",
+          "match": "[&|^~]"
+        },
+        {
+          "comment": "§5 Arithmetic: +  -  *  /  %",
+          "name": "keyword.operator.arithmetic.vtx",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "comment": "Plain assignment =  (negative lookbehind excludes all compound/comparison forms)",
+          "name": "keyword.operator.assignment.vtx",
+          "match": "(?<![=!<>+\\-*/%&|^])=(?!=)"
+        },
+        {
+          "comment": "§10 Logical NOT — !  (after !=  !==)",
+          "name": "keyword.operator.logical.not.vtx",
+          "match": "!(?!=)"
+        },
+        {
+          "comment": "§12 Ternary / §24 optional suffix — ?  (after ??)",
+          "name": "keyword.operator.optional.vtx",
+          "match": "\\?"
+        }
+      ]
+    }
+  }
+}
