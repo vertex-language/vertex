@@ -1,8 +1,8 @@
 package main
 build linux
-import "lib/c"
+import "linux/libc"
 
-class C : c {
+class C : libc {
     func printf(fmt: any char, ...) -> int
     func puts(s: any char) -> int
 }

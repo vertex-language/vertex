@@ -1,6 +1,6 @@
 package main
 build linux
-import "linux/syscalls"
+import "linux/kernel/syscalls"
 
 class Syscalls : syscalls {
     func write(fd: int, buf: any void, count: uint) -> int

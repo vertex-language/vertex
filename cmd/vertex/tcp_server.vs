@@ -1,9 +1,9 @@
 package main
-import "lib/c"
+import "linux/libc"
 
-class C : c {
-    func socket(domain: int, type: int, protocol: int) -> int
-    func bind(sockfd: int, addr: any opaque, addrlen: int) -> int
+class C : libc {
+    func socket(domain: int, sockType: int, protocol: int) -> int
+    func bind(sockfd: int, addr: any void, addrlen: int) -> int  // any void → ptr ✓
     func listen(sockfd: int, backlog: int) -> int
     func accept(sockfd: int, addr: mut any void, addrlen: mut any void) -> int
     func write(fd: int, buf: any void, count: int) -> int

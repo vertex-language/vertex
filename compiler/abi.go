@@ -35,15 +35,13 @@ func abiToken(t Type) string {
 }
 
 // needsABISuffix reports whether the @-suffix must be appended.
-// Only ptr and hptr tokens require the suffix; plain integer/float params do not.
+// We always suffix when there are any params or a non-void return,
+// so that every import has an unambiguous type signature.
 func needsABISuffix(params []Type, ret Type) bool {
-	for _, p := range params {
-		tok := abiToken(p)
-		if tok == "ptr" || tok == "hptr" {
-			return true
-		}
+	if len(params) > 0 {
+		return true
 	}
-	return ret != nil && abiToken(ret) == "hptr"
+	return ret != nil && ret.Kind() != KindVoid
 }
 
 // BuildImportName constructs the decorated wasm import name.
@@ -52,7 +50,8 @@ func needsABISuffix(params []Type, ret Type) bool {
 //
 //	write(fd i32, buf ptr, count i32) i32  → "write@i32.ptr.i32"
 //	fopen(path ptr, mode ptr) hptr         → "fopen@ptr.ptr:hptr"
-//	getpid() i32                           → "getpid"   (no suffix needed)
+//	getpid() i32                           → "getpid@:i32"
+//	socket(domain i32, type i32, proto i32) i32 → "socket@i32.i32.i32:i32"
 func BuildImportName(name string, params []Type, ret Type) string {
 	if !needsABISuffix(params, ret) {
 		return name
@@ -66,9 +65,9 @@ func BuildImportName(name string, params []Type, ret Type) string {
 		}
 		sb.WriteString(abiToken(p))
 	}
-	if ret != nil && ret.Kind() != KindVoid && abiToken(ret) == "hptr" {
+	if ret != nil && ret.Kind() != KindVoid {
 		sb.WriteByte(':')
-		sb.WriteString("hptr")
+		sb.WriteString(abiToken(ret))
 	}
 	return sb.String()
 }

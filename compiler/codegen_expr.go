@@ -250,13 +250,11 @@ func (fg *funcGen) genPostfix(recv parser.IExprContext, field string, args parse
 	switch field {
 	case "sizeof":
 		t := fg.resolveExprType(recv)
-		fg.body.Drop()
 		fg.body.I32Const(int32(SizeOf(t)))
 		return Int
 
 	case "alignof":
 		t := fg.resolveExprType(recv)
-		fg.body.Drop()
 		fg.body.I32Const(int32(AlignOf(t)))
 		return Int
 
