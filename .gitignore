@@ -10,3 +10,5 @@
 
 cmd/vertex/go.mod
 cmd/vertex/go.sum
+
+cmd/testing/

@@ -34,8 +34,29 @@ vertex -o myapp ./cmd/myapp
 vertex -wasm main.vs -o myapp.wasm
 
 # Cross-compile
-vertex -os linux -arch arm64 main.vs -o myapp_linux_arm64
+vertex -platform linux  -o myapp_linux  main.vs
+vertex -platform darwin -o myapp_darwin main.vs
+
+# Custom entry point
+vertex -entry start -wasm -o lib.wasm lib.vs
+
+# Disable dead-code elimination
+vertex -no-dce -o debug main.vs
 ```
+
+**All flags:**
+
+| Flag        | Default    | Meaning                                        |
+|-------------|------------|------------------------------------------------|
+| `-o`        | `a.out`    | Output file path                               |
+| `-wasm`     | off        | Emit `.wasm` module instead of a native binary |
+| `-platform` | `linux`    | Target platform: `linux`, `darwin`, `windows`  |
+| `-tags`     | —          | Comma-separated extra build tags               |
+| `-module`   | —          | Module path prefix                             |
+| `-root`     | source dir | Module root directory                          |
+| `-entry`    | `main`     | Entry-point function name                      |
+| `-no-dce`   | off        | Disable dead-code elimination                  |
+| `-v`        | —          | Print version and exit                         |
 
 ---
 
@@ -58,9 +79,28 @@ World!
 `
 
 // Numeric literals support underscores, binary, octal, and hex
-let mask  = 0xFF_00_FF
-let flags = 0b1010_0011
-let big   = 1_000_000
+let mask   = 0xFF_00_FF
+let flags  = 0b1010_0011
+let big    = 1_000_000
+let hfloat = 0xFp2      // hex float = 60.0
+```
+
+**Primitive types:**
+
+| Category | Types                                         |
+|----------|-----------------------------------------------|
+| Signed   | `int` `int8` `int16` `int32` `int64`          |
+| Unsigned | `uint` `uint8` `uint16` `uint32` `uint64`     |
+| Float    | `float` `double`                              |
+| Other    | `bool` `string` `char` `void`                 |
+
+**Numeric conversion** uses `targetType(value)` — no cast keyword:
+
+```swift
+let i: int   = 42
+let f: float = float(i)    // int → float, always safe
+let b: int8  = int8(i)     // narrowing — wraps on overflow
+let t: int   = int(3.99)   // float → int, truncates toward zero
 ```
 
 ---
@@ -76,23 +116,54 @@ struct Point {
     var y: int
 }
 
-class FileHandler {
-    var path: string
+class Animal {
+    var name: string
 }
 ```
 
-Classes are managed either manually or via opt-in reference counting:
+Struct literals use brace syntax — all field labels are required:
 
 ```swift
-// Manual — you call .delete(), deinit fires automatically
+let p = Point{x: 3, y: 4}
+var q = Point{x: 3, y: 4}
+q.y   = 10
+
+// Multiline — trailing comma valid
+let p = Point{
+    x: 3,
+    y: 4,
+}
+```
+
+Classes support manual lifetime management or opt-in reference counting:
+
+```swift
+// Manual — call .delete() explicitly; deinit fires automatically
 let a = Animal(name: "Rex")
 defer a.delete()
 
-// Reference counted — freed automatically when all owners go out of scope
+// Reference counted — freed when all owners go out of scope
 let a = Animal(name: "Rex").new()
 
 // Non-owning weak reference — does not increment the count
 weak let b = a   // b: Animal?
+if let animal = b {
+    // safe — animal: Animal within this scope
+}
+```
+
+`init` and `deinit` are reserved associated function names. `init` is called
+automatically after allocation; `deinit` fires when `.delete()` is called or
+when a ref-counted instance's count reaches zero.
+
+```swift
+func init(a: mut Animal, name: string) {
+    a.name = name
+}
+
+func deinit(a: mut Animal) {
+    // cleanup before memory is freed
+}
 ```
 
 ---
@@ -124,9 +195,33 @@ func reset(p: mut Point) {
     p.y = 0
 }
 
-var p = Point(3, 4)
+var p = Point{x: 3, y: 4}
 p.reset()
 ```
+
+To write a utility function that takes a known type without it acting as the
+receiver, place the known type at parameter index 1 or later.
+
+---
+
+### Enums
+
+```swift
+enum Direction { case north, south, east, west }
+
+enum Status: int {
+    case inactive = 0
+    case active   = 1
+    case pending  = 2
+}
+
+let raw = Status.active.rawValue          // 1
+let s   = Status(rawValue: 1)             // Status?
+```
+
+Raw value types are `int` or `string`. String raw values default to the case
+name if omitted. A switch over an enum with all cases covered needs no
+`default`.
 
 ---
 
@@ -146,7 +241,7 @@ if let user = findUser(id: 1) { }
 let name = findUser(id: -1) ?? defaultUser
 ```
 
-**Result** — when the caller must handle Ok or Err explicitly:
+**Result** — when the caller must handle `Ok` or `Err` explicitly:
 
 ```swift
 func parseInt(s: string) -> Result(int, string) {
@@ -172,6 +267,14 @@ func process(s: string) -> Result(int, string) {
 }
 ```
 
+**Choosing the right primitive:**
+
+| Situation                               | Use              |
+|-----------------------------------------|------------------|
+| Value may simply not exist              | `T?`             |
+| Caller needs value and error together   | `(T, E?)` tuple  |
+| Caller must handle Ok or Err explicitly | `Result(T, E)`   |
+
 ---
 
 ### Control Flow
@@ -193,11 +296,22 @@ case .active:
 case .inactive, .pending:
     // multiple values per case
 default:
-    // required unless switch is exhaustive
+    // required unless exhaustive
+}
+
+// explicit fallthrough
+switch x {
+case 0:
+    fallthrough
+case 1:
+    // reached from 0 or 1
+default:
+    // other
 }
 
 // for-in ranges and arrays
 for i in 0..<10 { }
+for i in 0...10 { }   // closed — includes 10
 for item in items { }
 
 // while
@@ -234,33 +348,35 @@ func identity<T>(value: T) -> T {
 struct Box<T> {
     var value: T
 }
+
+let b      = Box{value: 42}
+let result = identity(value: "hello")
 ```
 
 ---
 
-### Enums
+### Tuples
 
 ```swift
-enum Direction { case north, south, east, west }
+let pair  = (1, true)
+let point = (x: 10, y: 20)
 
-enum Status: int {
-    case inactive = 0
-    case active   = 1
-    case pending  = 2
+// Destructuring
+let (a, b) = pair
+
+// Function return
+func minMax(values: [int]) -> (min: int, max: int) {
+    return (0, 100)
 }
-
-let raw = Status.active.rawValue          // 1
-let s   = Status(rawValue: 1)             // Status?
+let (lo, hi) = minMax(values: [3, 1, 4])
 ```
-
-A switch over an enum with all cases covered needs no `default`.
 
 ---
 
 ### First-Class Functions and Anonymous Functions
 
 ```swift
-// Function types
+// Function type variable
 let double: func(int) -> int
 
 // Anonymous function
@@ -316,18 +432,107 @@ let val = ch.receive()
 ch.close()
 ```
 
+| Context   | Transport                       |
+|-----------|---------------------------------|
+| `async`   | shared memory, non-blocking     |
+| `thread`  | shared memory, lightweight      |
+| `process` | ring buffer, high-speed IPC     |
+
 ---
 
-### C Interop (FFI v2)
+### Native Interface
 
-Vertex binds to C libraries with zero overhead. `.any()` escapes a value to
-its raw memory address — no allocation, no copy.
+Vertex reaches outside the managed runtime through a unified three-part
+pattern: an **import path**, a **class declaration**, and a **package**.
+
+The import path is the single source of truth for how the compiler emits.
+Build tags are pure platform selectors — they never affect emission strategy.
+
+```swift
+package libc
+build linux
+import "lib/c"
+
+class C : c {
+    func fopen(path: any char, mode: any char) -> any opaque?
+    func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
+    func fclose(stream: mut any opaque) -> int
+    func printf(fmt: any char, ...) -> int
+}
+```
+
+**Import path → emission strategy:**
+
+| Prefix     | Strategy                                        |
+|------------|-------------------------------------------------|
+| `lib/`     | linked call — signatures validated at link time |
+| `linux/`   | inline syscall instruction, no linker           |
+| `darwin/`  | `objc_msgSend` + selector dispatch              |
+| `windows/` | vtable / COM slot dispatch                      |
+| `gpu/`     | PTX / shader kernel emission                    |
+| `metal/`   | hardware interrupt instruction, no linker       |
+
+**Build tags — platform selectors only:**
+
+| Tag       | Meaning                          |
+|-----------|----------------------------------|
+| `linux`   | compile this file for Linux      |
+| `darwin`  | compile this file for Darwin     |
+| `windows` | compile this file for Windows    |
+| `metal`   | compile this file for bare metal |
+
+Native class instances are zero-size compile-time dispatch surfaces — the
+backend removes them entirely at compile time, no allocation, no runtime
+overhead.
+
+**Multi-platform packages** use filename suffixes instead of explicit build
+tags:
+
+```
+tcp.vs          # all platforms — shared types and public API
+tcp_linux.vs    # import "linux/syscalls"
+tcp_darwin.vs   # import "darwin/objc/..."
+tcp_windows.vs  # import "windows/com/..."
+```
+
+---
+
+### Pointer Types and `.any()`
+
+`any` in type position declares a read-only raw pointer. `mut any` declares a
+mutable one. `.any()` is the postfix escape that produces a raw pointer from
+any value — zero cost, no allocation, no copy.
+
+**Type mapping:**
+
+| Vertex annotation      | C equivalent    |
+|------------------------|-----------------|
+| `name: any char`       | `const char*`   |
+| `name: mut any char`   | `char*`         |
+| `name: any void`       | `const void*`   |
+| `name: mut any void`   | `void*`         |
+| `name: any opaque`     | `const struct*` |
+| `name: mut any opaque` | `struct*`       |
+
+**`.any()` — what it produces:**
+
+| Value            | `.any()` type   |
+|------------------|-----------------|
+| `string`         | `const char*`   |
+| `[T]`            | `const T*`      |
+| `struct`         | `const struct*` |
+| `class instance` | `const struct*` |
+
+The returned pointer is valid only as long as the backing value is alive. For
+ref-counted instances, retain the owning reference for the full duration of any
+native call that holds the pointer.
+
+**C interop example:**
 
 ```swift
 extern "C" {
     func fopen(path: any char, mode: any char) -> mut any opaque?
     func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
-    func fread(ptr: mut any void, size: int, count: int, stream: mut any opaque) -> int
     func fclose(stream: mut any opaque) -> int
     func printf(fmt: any char, ...) -> int
 }
@@ -340,82 +545,145 @@ fwrite(data.any(), 1, data.byteSize(), f)
 printf("wrote %d bytes\n".any(), data.len)
 ```
 
-**Pointer type mapping:**
-
-| Vertex annotation      | C equivalent    |
-|------------------------|-----------------|
-| `name: any char`       | `const char*`   |
-| `name: mut any char`   | `char*`         |
-| `name: any void`       | `const void*`   |
-| `name: mut any void`   | `void*`         |
-| `name: any opaque`     | `const struct*` |
-| `name: mut any opaque` | `struct*`       |
-
-**Build tags** control linking and ABI:
-
-| Tag                 | Effect                                 |
-|---------------------|----------------------------------------|
-| `linux`             | linked call, C++ Itanium mangling      |
-| `linux, syscalls`   | inline syscall instruction, no linker  |
-| `darwin`            | linked call, C++ Itanium mangling      |
-| `darwin, objc`      | `objc_msgSend` + selector refs         |
-| `windows`           | linked call, C++ MSVC mangling         |
-| `windows, com`      | vtable slot offsets, positional        |
-
-Platform-specific files use filename suffixes — no explicit build tag needed:
-
-```
-tcp.vs          # all platforms
-tcp_linux.vs    # linux only
-tcp_darwin.vs   # darwin only
-tcp_windows.vs  # windows only
-```
-
-**Objective-C interop** (`build darwin, objc`):
+**Syscall example:**
 
 ```swift
-extern class NSString {
+package syscalls
+build linux
+import "linux/syscalls"
+
+class Syscalls : syscalls {
+    func write(fd: int, buf: any void, count: uint) -> int
+    func exit(status: int) -> int
+}
+```
+
+**Objective-C example:**
+
+```swift
+package foundation
+build darwin
+import "darwin/objc/foundation"
+
+class NSString : foundation {
     func length(s: NSString) -> int
     func UTF8String(s: NSString) -> any char
     func stringWithUTF8String(str: any char) -> NSString?
 }
 
-let ns  = NSString.stringWithUTF8String("hello".any())
-let len = ns.length()
+var ns  = foundation.NSString()
+let str = ns.stringWithUTF8String("hello".any())
+let len = ns.length(str)
 ```
 
-**COM interop** (`build windows, com`):
+**COM / vtable example:**
 
 ```swift
-extern class IUnknown {
+package d3d11
+build windows
+import "windows/com/d3d11"
+
+class IUnknown : d3d11 {
     func QueryInterface(obj: IUnknown, riid: any opaque, ppv: mut any opaque) -> int
     func AddRef(obj: IUnknown) -> uint
     func Release(obj: IUnknown) -> uint
 }
 
-extern class ID3D11Device : IUnknown {
-    func CreateBuffer(d: ID3D11Device, desc: mut any opaque, init: mut any opaque, ppBuffer: mut any opaque) -> int
+class ID3D11Device : IUnknown {
+    func CreateBuffer(
+        d: ID3D11Device, desc: mut any opaque,
+        init: mut any opaque, ppBuffer: mut any opaque) -> int
 }
+```
+
+**Bare metal example:**
+
+```swift
+package bios
+build metal
+import "metal/int10h"
+
+class Int10h : int10h {
+    func set_video_mode(mode: uint8)
+    func set_cursor_pos(page: uint8, row: uint8, col: uint8)
+    func write_tty(char: uint8, page: uint8, color: uint8)
+}
+
+var b = bios.Int10h()
+b.set_video_mode(0x03)
+b.set_cursor_pos(0, 0, 0)
+b.write_tty(0x41, 0, 0x07)
 ```
 
 ---
 
-### Postfix Reference
+### Type Intrinsics
 
-| Postfix                                 | Meaning                               |
-|-----------------------------------------|---------------------------------------|
-| `.new()`                                | opt class instance into ref counting  |
-| `.delete()`                             | manually free a class instance        |
-| `.any()`                                | escape value to raw C pointer         |
-| `.try()`                                | propagate Result error upward         |
-| `.await()`                              | suspend until async function resolves |
-| `.spawn()` / `.spawn(threads:)`         | run on OS thread(s)                   |
-| `.fork()` / `.fork(processes:)`         | run in isolated process(es)           |
-| `.dispatch()` / `.dispatch(gpu:, mem:)` | run on GPU                            |
-| `.sizeof()`                             | compile-time size of type in bytes    |
-| `.alignof()`                            | compile-time alignment in bytes       |
-| `.byteSize()`                           | runtime byte length of an array       |
-| `.len`                                  | element count of an array             |
+```swift
+SockAddrIn.sizeof()     // compile-time size in bytes — called on type name
+SockAddrIn.alignof()    // compile-time alignment in bytes
+
+let data: [float] = [0.0, 1.0, 2.0]
+data.byteSize()         // runtime byte length of array instance
+data.len                // element count
+```
+
+---
+
+### Type Aliases
+
+```swift
+type FILE    = any opaque
+type size_t  = uint64
+type errno_t = int
+```
+
+Aliases are resolved at compile time and may only appear at package level.
+
+---
+
+## Postfix Reference
+
+| Postfix                                  | Meaning                               |
+|------------------------------------------|---------------------------------------|
+| `.new()`                                 | opt class instance into ref counting  |
+| `.delete()`                              | manually free a class instance        |
+| `.any()`                                 | escape value to raw C pointer         |
+| `.try()`                                 | propagate Result error upward         |
+| `.await()`                               | suspend until async function resolves |
+| `.spawn()` / `.spawn(threads: n)`        | run on OS thread(s)                   |
+| `.fork()` / `.fork(processes: n)`        | run in isolated process(es)           |
+| `.dispatch()` / `.dispatch(gpu: n, mem:n)` | run on GPU                          |
+| `.sizeof()`                              | compile-time size of type in bytes    |
+| `.alignof()`                             | compile-time alignment in bytes       |
+| `.byteSize()`                            | runtime byte length of an array       |
+| `.len`                                   | element count of an array             |
+
+---
+
+## Out of Scope in 1.9
+
+| Feature                                       | Status   |
+|-----------------------------------------------|----------|
+| Inheritance                                   | Removed  |
+| String interpolation `\()`                    | Removed  |
+| `_` parameter labels                          | Removed  |
+| `self` keyword                                | Removed  |
+| `static` keyword                              | Removed  |
+| Methods inside structs or classes             | Removed  |
+| `mutating` keyword                            | Removed  |
+| Protocols                                     | Removed  |
+| Extensions                                    | Removed  |
+| `try` / `throws` / `do-catch`                | Removed  |
+| Nested structs or classes                     | Removed  |
+| Generic constraints (`where T:`)              | Deferred |
+| Enums with associated values                  | Deferred |
+| Access control                                | Deferred |
+| `async let` / `TaskGroup` concurrency         | Deferred |
+| `actor` keyword                               | Deferred |
+| `select` over multiple channels               | Deferred |
+| Labeled `break` / `continue`                  | Deferred |
+| GPU grid/block control                        | Deferred |
 
 ---
 
