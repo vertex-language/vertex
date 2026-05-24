@@ -35,7 +35,8 @@ func (fg *funcGen) genExpr(ctx parser.IExprContext) Type {
 	if len(exprs) == 1 &&
 		ctx.ArgList() == nil &&
 		ctx.DOT() == nil &&
-		ctx.LBRACKET() == nil {
+		ctx.LBRACKET() == nil &&
+		ctx.LPAREN() == nil {
 
 		switch {
 		case ctx.MINUS() != nil:
@@ -63,8 +64,10 @@ func (fg *funcGen) genExpr(ctx parser.IExprContext) Type {
 		return fg.genPostfix(exprs[0], field, ctx.ArgList())
 	}
 
-	// ── Function call: expr(args), no dot ───────────────────────────────────
-	if ctx.ArgList() != nil && ctx.DOT() == nil && len(exprs) == 1 {
+	// ── Function call: expr(args) or expr() ─────────────────────────────────
+	// argList is optional in the grammar (expr LPAREN argList? RPAREN), so
+	// ArgList() is nil for zero-argument calls. Gate on LPAREN instead.
+	if ctx.LPAREN() != nil && ctx.DOT() == nil && len(exprs) == 1 {
 		return fg.genCall(exprs[0], ctx.ArgList())
 	}
 
@@ -393,16 +396,35 @@ func (fg *funcGen) genCall(funcExpr parser.IExprContext, args parser.IArgListCon
 
 	sym := fg.cg.scope.Lookup(name)
 	if sym == nil {
-		for _, arg := range args.AllArg() {
-			fg.genExpr(arg.Expr())
-			fg.body.Drop()
+		if args != nil {
+			for _, arg := range args.AllArg() {
+				fg.genExpr(arg.Expr())
+				fg.body.Drop()
+			}
 		}
 		fg.body.I32Const(0)
 		return Void
 	}
 
-	for _, arg := range args.AllArg() {
-		fg.genExpr(arg.Expr())
+	// ── Type constructor: NativeClass() ─────────────────────────────────────
+	// Native classes are zero-size dispatch surfaces; no wasm call is emitted.
+	// Push a placeholder i32(0) and return the concrete type so the caller's
+	// local.set and subsequent method-call type resolution both work correctly.
+	if sym.Kind == SymType {
+		if args != nil {
+			for _, arg := range args.AllArg() {
+				fg.genExpr(arg.Expr())
+				fg.body.Drop()
+			}
+		}
+		fg.body.I32Const(0)
+		return sym.Type
+	}
+
+	if args != nil {
+		for _, arg := range args.AllArg() {
+			fg.genExpr(arg.Expr())
+		}
 	}
 	fg.body.Call(sym.FuncIdx)
 

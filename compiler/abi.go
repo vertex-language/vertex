@@ -1,3 +1,4 @@
+// abi.go
 package compiler
 
 import (
@@ -25,8 +26,7 @@ func abiToken(t Type) string {
 		}
 		return "ptr"
 	case KindString:
-		// strings passed to C as const char* → ptr
-		return "ptr"
+		return "ptr" // const char* on the C side
 	case KindArray, KindStruct, KindClass:
 		return "ptr"
 	default:
@@ -34,8 +34,8 @@ func abiToken(t Type) string {
 	}
 }
 
-// needsABISuffix returns true when at least one token is ptr or hptr,
-// or the return is hptr.
+// needsABISuffix reports whether the @-suffix must be appended.
+// Only ptr and hptr tokens require the suffix; plain integer/float params do not.
 func needsABISuffix(params []Type, ret Type) bool {
 	for _, p := range params {
 		tok := abiToken(p)
@@ -43,14 +43,16 @@ func needsABISuffix(params []Type, ret Type) bool {
 			return true
 		}
 	}
-	if ret != nil && abiToken(ret) == "hptr" {
-		return true
-	}
-	return false
+	return ret != nil && abiToken(ret) == "hptr"
 }
 
-// BuildImportName builds the decorated import name, e.g. "write@i32.ptr.i32"
-// or "fopen@ptr.ptr:hptr".
+// BuildImportName constructs the decorated wasm import name.
+//
+// Examples matching the ABI reference:
+//
+//	write(fd i32, buf ptr, count i32) i32  → "write@i32.ptr.i32"
+//	fopen(path ptr, mode ptr) hptr         → "fopen@ptr.ptr:hptr"
+//	getpid() i32                           → "getpid"   (no suffix needed)
 func BuildImportName(name string, params []Type, ret Type) string {
 	if !needsABISuffix(params, ret) {
 		return name
@@ -71,20 +73,21 @@ func BuildImportName(name string, params []Type, ret Type) string {
 	return sb.String()
 }
 
-// ExportName builds the export name for a qualified function.
-// e.g. "vectorAdd@cuda:ptr.ptr.i32"
+// ExportName builds the export name for a qualified (non-CPU) function.
+//
+// Concurrency exports:
+//
+//	"worker@thread:ptr.i32"
+//	"handler@async"
+//	"task@process:i32"
+//
+// GPU kernel exports:
+//
+//	"vectorAdd@cuda:ptr.ptr.i32"
+//	"tileConv@msl:ptr.ptr.i32"
+//	"histogram@vulkan:ptr.i32"
 func ExportName(name string, qual FuncQual, params []Type) string {
-	suffix := ""
-	switch qual {
-	case QualAsync:
-		suffix = "@async"
-	case QualThread:
-		suffix = "@thread"
-	case QualProcess:
-		suffix = "@process"
-	case QualGPU:
-		suffix = "@cuda" // default GPU target
-	}
+	suffix := qualSuffix(qual)
 	if suffix == "" {
 		return name
 	}
@@ -104,6 +107,26 @@ func ExportName(name string, qual FuncQual, params []Type) string {
 	return sb.String()
 }
 
+// qualSuffix maps a FuncQual to its ABI export suffix string.
+func qualSuffix(q FuncQual) string {
+	switch q {
+	case QualAsync:
+		return "@async"
+	case QualThread:
+		return "@thread"
+	case QualProcess:
+		return "@process"
+	case QualCUDA:
+		return "@cuda"
+	case QualVulkan:
+		return "@vulkan"
+	case QualMSL:
+		return "@msl"
+	default:
+		return ""
+	}
+}
+
 // ToWasmVal converts a WasmKind to wasm.ValType.
 func ToWasmVal(w WasmKind) wasm.ValType {
 	switch w {
@@ -118,7 +141,7 @@ func ToWasmVal(w WasmKind) wasm.ValType {
 	}
 }
 
-// ParamsToWasm converts Vertex param types to wasm.ValType slice.
+// ParamsToWasm converts Vertex param types to a wasm.ValType slice.
 func ParamsToWasm(types []Type) []wasm.ValType {
 	var out []wasm.ValType
 	for _, t := range types {
@@ -129,7 +152,7 @@ func ParamsToWasm(types []Type) []wasm.ValType {
 	return out
 }
 
-// RetToWasm converts a Vertex return type to wasm results slice.
+// RetToWasm converts a Vertex return type to a wasm results slice.
 func RetToWasm(t Type) []wasm.ValType {
 	if t == nil || t.Kind() == KindVoid {
 		return nil

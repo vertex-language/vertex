@@ -1,3 +1,4 @@
+// importer.go
 package compiler
 
 import (
@@ -11,19 +12,17 @@ import (
 type ImportKind int
 
 const (
-	ImportLib     ImportKind = iota // "lib/..."     → linked C library
-	ImportLinux                      // "linux/..."   → inline syscall
-	ImportDarwin                     // "darwin/..."  → objc_msgSend dispatch
-	ImportWindows                    // "windows/..." → COM vtable dispatch
-	ImportGPU                        // "gpu/..."     → PTX / shader kernel
-	ImportMetal                      // "metal/..."   → bare metal interrupt
+	ImportLib     ImportKind = iota // "lib/..."     → vcpkg-fetched C library
+	ImportLinux                      // "linux/..."   → Linux syscall / libc
+	ImportDarwin                     // "darwin/..."  → macOS libSystem
+	ImportWindows                    // "windows/..." → Windows system DLL
+	ImportGPU                        // "gpu/..."     → PTX / SPIR-V / MSL kernel
+	ImportHW                         // "hw/..."      → bare-metal BIOS / UEFI
 	ImportModule                     // "github.com/..." → Vertex package
 	ImportLocal                      // "./..." or "../..." → relative path
 )
 
 // nativePrefixes maps import path prefixes to their ImportKind.
-// Order matters: longer prefixes must not shadow shorter ones here, but
-// since each prefix is distinct this is just a linear scan.
 var nativePrefixes = []struct {
 	prefix string
 	kind   ImportKind
@@ -33,7 +32,7 @@ var nativePrefixes = []struct {
 	{"darwin/",  ImportDarwin},
 	{"windows/", ImportWindows},
 	{"gpu/",     ImportGPU},
-	{"metal/",   ImportMetal},
+	{"hw/",      ImportHW},
 }
 
 // Import is a parsed import declaration.
@@ -41,13 +40,13 @@ type Import struct {
 	Raw       string
 	Kind      ImportKind
 	Prefix    string // routing prefix without trailing slash, e.g. "lib", "linux", "gpu"
-	Namespace string // last path segment — matches the class parent name, e.g. "sdl2", "syscalls"
+	Namespace string // last path segment, e.g. "sdl2", "syscalls", "int10h"
 }
 
 // IsNative reports whether this import binds to a native class.
 func (imp *Import) IsNative() bool {
 	switch imp.Kind {
-	case ImportLib, ImportLinux, ImportDarwin, ImportWindows, ImportGPU, ImportMetal:
+	case ImportLib, ImportLinux, ImportDarwin, ImportWindows, ImportGPU, ImportHW:
 		return true
 	}
 	return false
@@ -61,9 +60,6 @@ func ParseImportPath(path string) *Import {
 		if strings.HasPrefix(path, p.prefix) {
 			imp.Kind = p.kind
 			imp.Prefix = strings.TrimSuffix(p.prefix, "/")
-			// Namespace is the last segment of everything after the prefix.
-			// "lib/sdl2"            → "sdl2"
-			// "darwin/objc/foundation" → "foundation"
 			rest := strings.TrimPrefix(path, p.prefix)
 			parts := strings.Split(rest, "/")
 			imp.Namespace = parts[len(parts)-1]
@@ -81,20 +77,17 @@ func ParseImportPath(path string) *Import {
 }
 
 // WasmModule returns the wasm import module string for this import.
-//   lib/sdl2              → "sdl2"
-//   linux/syscalls        → "linux:syscalls"
-//   darwin/objc/foundation → "darwin:objc:foundation"
-//   gpu/cuda              → "gpu:cuda"
+//
+// The new ABI contract is simple: the raw import path IS the wasm module name.
+//
+//	"linux/kernel/syscalls" → "linux/kernel/syscalls"
+//	"linux/libc"            → "linux/libc"
+//	"lib/sdl2"              → "lib/sdl2"
+//	"gpu/cuda"              → "gpu/cuda"
+//	"hw/bios/int10h"        → "hw/bios/int10h"
+//	"hw/uefi/boot_services" → "hw/uefi/boot_services"
 func (imp *Import) WasmModule(_ *BuildTags) string {
-	switch imp.Kind {
-	case ImportLib:
-		// For linked libraries the bare namespace is the module name.
-		return imp.Namespace
-	default:
-		// For all other native strategies embed the full routing path.
-		rest := strings.TrimPrefix(imp.Raw, imp.Prefix+"/")
-		return imp.Prefix + ":" + strings.ReplaceAll(rest, "/", ":")
-	}
+	return imp.Raw
 }
 
 // Resolver resolves import paths to .vs source files.
@@ -113,7 +106,7 @@ func (r *Resolver) ResolveFiles(importPath, fromDir string) ([]string, error) {
 	imp := ParseImportPath(importPath)
 
 	switch imp.Kind {
-	case ImportLib, ImportLinux, ImportDarwin, ImportWindows, ImportGPU, ImportMetal:
+	case ImportLib, ImportLinux, ImportDarwin, ImportWindows, ImportGPU, ImportHW:
 		return nil, nil // native interface; no .vs files
 
 	case ImportLocal:

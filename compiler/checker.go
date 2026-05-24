@@ -1,3 +1,4 @@
+// checker.go
 package compiler
 
 import (
@@ -45,7 +46,6 @@ func (c *checker) collectTopLevel(ctx parser.ITopLevelDeclContext, sf *SourceFil
 	case ctx.ClassDecl() != nil:
 		cd := ctx.ClassDecl()
 		if cd.COLON() != nil {
-			// ': parentName' present → native class
 			c.collectNativeClass(cd, sf, tags)
 		} else {
 			c.collectClass(cd)
@@ -85,7 +85,6 @@ func (c *checker) collectStruct(ctx parser.IStructDeclContext) {
 // ── Class (regular) ──────────────────────────────────────────────────────────
 
 func (c *checker) collectClass(ctx parser.IClassDeclContext) {
-	// ID(0) = class name; no parent (no COLON).
 	name := ctx.AllID()[0].GetText()
 	ct := &ClassType{Name: name}
 	for _, member := range ctx.AllClassMember() {
@@ -109,6 +108,8 @@ func (c *checker) collectNativeClass(ctx parser.IClassDeclContext, sf *SourceFil
 	className := ids[0].GetText()
 	parentName := ids[1].GetText()
 
+	// Resolve the wasm module name from the file's native import.
+	// WasmModule now returns the raw import path directly, e.g. "linux/libc".
 	module := parentName
 	for _, imp := range sf.Imports {
 		if imp.IsNative() && imp.Namespace == parentName {
@@ -252,16 +253,13 @@ func (c *checker) collectTypeAlias(ctx parser.ITypeAliasDeclContext) {
 //
 // §26 — Associated functions: if the first parameter's type is a concrete
 // struct or non-native class that is already registered, the function is
-// also registered under "TypeName.funcName" so dot-call syntax works:
-//
-//	func describe(p: Point) { … }   →   p.describe()
+// also registered under "TypeName.funcName" so dot-call syntax works.
 func (c *checker) collectFuncDecl(ctx parser.IFuncDeclContext) {
 	name := ctx.ID().GetText()
 	sig := c.funcDeclSig(ctx)
 	ft := &FuncType{Sig: sig}
 	c.scope.Define(&Symbol{Name: name, Kind: SymFunc, Type: ft})
 
-	// §26: register as associated function when the receiver type is known.
 	if len(sig.Params) > 0 {
 		typeName := receiverTypeName(sig.Params[0])
 		if typeName != "" {
@@ -303,20 +301,28 @@ func (c *checker) funcDeclSig(ctx parser.IFuncDeclContext) *FuncSig {
 	if rt := ctx.ReturnType(); rt != nil && rt.Type_() != nil {
 		ret = c.resolveType(rt.Type_())
 	}
-	qual := QualNone
-	if fq := ctx.FuncQualifier(); fq != nil {
-		switch {
-		case fq.ASYNC() != nil:
-			qual = QualAsync
-		case fq.THREAD() != nil:
-			qual = QualThread
-		case fq.PROCESS() != nil:
-			qual = QualProcess
-		case fq.GPU() != nil:
-			qual = QualGPU
-		}
-	}
+	qual := c.resolveFuncQual(ctx.FuncQualifier())
 	return &FuncSig{Params: params, Ret: ret, Muts: muts, Qual: qual}
+}
+
+// resolveFuncQual maps the grammar's FuncQualifier token to a FuncQual.
+// The three GPU backends (cuda/vulkan/msl) are now distinct qualifiers that
+// map directly to the ABI export suffixes @cuda, @vulkan, @msl.
+func (c *checker) resolveFuncQual(fq parser.IFuncQualifierContext) FuncQual {
+	if fq == nil {
+		return QualNone
+	}
+	switch {
+	case fq.ASYNC() != nil:
+		return QualAsync
+	case fq.THREAD() != nil:
+		return QualThread
+	case fq.PROCESS() != nil:
+		return QualProcess
+	case fq.GPU() != nil:
+		return QualCUDA
+	}
+	return QualNone
 }
 
 // ── Type resolution ───────────────────────────────────────────────────────────

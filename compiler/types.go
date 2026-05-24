@@ -1,3 +1,4 @@
+// types.go
 package compiler
 
 import "fmt"
@@ -213,14 +214,19 @@ func (e *EnumType) String() string  { return e.Name }
 
 // ── FuncSig ──────────────────────────────────────────────────────────────────
 
+// FuncQual describes the execution model of a function export.
+// The three GPU variants map directly to the ABI export suffixes
+// @cuda, @vulkan, and @msl rather than collapsing into a single QualGPU.
 type FuncQual int
 
 const (
 	QualNone    FuncQual = iota
-	QualAsync
-	QualThread
-	QualProcess
-	QualGPU
+	QualAsync            // @async  — stackful coroutine
+	QualThread           // @thread — OS thread via clone(2)
+	QualProcess          // @process — child process via fork(2)
+	QualCUDA             // @cuda   — PTX / NVIDIA
+	QualVulkan           // @vulkan — SPIR-V / AMD + CPU fallback
+	QualMSL              // @msl    — Apple Metal (macOS only)
 )
 
 type FuncSig struct {
@@ -260,8 +266,6 @@ func (c *ChannelType) String() string  { return "channel " + c.Elem.String() }
 // ── Layout helpers ───────────────────────────────────────────────────────────
 
 // SizeOf returns the byte size of a type in linear memory.
-// Struct and class types return their actual computed size so that nested
-// value-type fields are laid out correctly by LayoutStruct.
 func SizeOf(t Type) int {
 	switch t.Kind() {
 	case KindVoid:
@@ -288,7 +292,6 @@ func SizeOf(t Type) int {
 }
 
 // AlignOf returns the required alignment of a type.
-// For structs the alignment is the maximum alignment of any field.
 func AlignOf(t Type) int {
 	switch t.Kind() {
 	case KindBool, KindInt8, KindUint8:
