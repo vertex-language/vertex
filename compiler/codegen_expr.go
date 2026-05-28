@@ -104,10 +104,6 @@ func (fg *funcGen) genPrimary(ctx parser.IPrimaryContext) Type {
 	case ctx.Literal() != nil:
 		return fg.genPrimaryLiteral(ctx.Literal())
 
-	// StructLiteralExpr must be checked BEFORE the bare ID case because
-	// the grammar rule `structLiteralExpr : ID LBRACE …` also starts with an
-	// identifier. ANTLR places the struct literal in its own sub-context, so
-	// PrimaryContext.ID() is nil when StructLiteralExpr() is non-nil.
 	case ctx.StructLiteralExpr() != nil:
 		return fg.genStructLiteralExpr(ctx.StructLiteralExpr())
 
@@ -130,8 +126,13 @@ func (fg *funcGen) genPrimary(ctx parser.IPrimaryContext) Type {
 		return fg.genArrayLit(ctx.ArrayLiteralExpr())
 
 	case ctx.ArrayConstructExpr() != nil:
+		ac := ctx.ArrayConstructExpr()
+		elemType := ResolveType(ac.Type_(), fg.cg.scope)
+		// If this construct was the RHS of a var decl, genVarDecl already
+		// frame-allocated and zero-filled it; nothing to emit here.
+		// In any other expression position we fall back to a null pointer.
 		fg.body.I32Const(0)
-		return &ArrayType{Elem: Void}
+		return &ArrayType{Elem: elemType}
 
 	case ctx.AnonFuncExpr() != nil:
 		fg.body.I32Const(0)

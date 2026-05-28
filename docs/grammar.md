@@ -1,6 +1,6 @@
 # Vertex Language Grammar
 
-## Specification 1.9
+## Specification 2.0
 
 ---
 
@@ -429,51 +429,261 @@ for n in nums {
 
 ---
 
-## 22. Arrays (literal + index + mutation)
+## 22. Arrays
+
+### 22.1 Fixed Arrays
+
+Fixed arrays are stack-allocated with a known size at compile time.
 
 ```swift
-// Literal
-let nums  = [1, 2, 3]
+// zero-filled, fixed size — short form (zero implied)
+var buf  = [uint8](1024)
+var nums = [int](5)
+
+// zero-filled, fixed size — long form
+var buf  = [uint8](repeating: 0, count: 1024)
+var nums = [int](repeating: 0, count: 5)
+
+// non-zero fill — long form required
+var mask = [uint8](repeating: 0xFF, count: 64)
+
+// literal
 let flags = [0xFF, 0x00, 0xAB]
+let typed: [uint8] = [1, 2, 3]
 
-// Typed literal
-let typed: [int] = [1, 2, 3]
-
-// Trailing comma — valid in multi-line literals
+// trailing comma — valid in multi-line literals
 let bytes: [uint8] = [
     0xFF,
     0x00,
     0xAB,
 ]
 
-// Empty array
+// empty
 var a = [int]()
 var b: [int] = []
 
-// Repeating initializer
-let zeros  = [int](repeating: 0,  count: 5)
-let blanks = [string](repeating: "", count: 3)
-
-// Nested (multidimensional)
+// nested (multidimensional)
 let matrix = [[1, 2], [3, 4]]
 let grid: [[float]] = [
     [0.0, 1.0],
     [1.0, 0.0],
 ]
 
-// Read / Write
+// read / write
 let first = nums[0]
-
-var items = [10, 20, 30]
-items[0] = 99
+nums[0] = 99
 ```
 
 **Rules:**
 
+* `[T](n)` allocates `n` elements of type `T`, all zero-filled. Prefer this form when the fill value is zero.
+* `[T](repeating: v, count: n)` allocates `n` elements all set to `v`. Required when the fill value is not zero.
+* Size must be a compile-time integer literal.
 * Subscript read is valid on both `let` and `var` bindings.
 * Subscript write requires the array binding to be `var`.
-* Index bounds are not checked at compile time; an out-of-bounds access is a
-  runtime error.
+* Index bounds are not checked at compile time — out-of-bounds is a runtime error.
+
+---
+
+### 22.2 Growable Arrays
+
+Growable arrays are heap-allocated and must be freed with `.delete()`.
+
+```swift
+// empty
+var items = [int]()
+defer items.delete()
+
+// pre-allocated capacity
+var items = [int](capacity: 64)
+defer items.delete()
+```
+
+**Rules:**
+
+* `[T]()` creates an empty growable array.
+* `[T](capacity: n)` pre-allocates `n` slots without setting length.
+* The caller is responsible for calling `.delete()` — failing to do so is a
+  memory leak.
+* `defer items.delete()` is the recommended pattern.
+
+---
+
+### 22.3 Add / Remove
+
+```swift
+items.push(42)           // add to end
+items.unshift(0)         // add to front
+
+let last  = items.pop()  // remove from end,   returns T?
+let first = items.shift() // remove from front, returns T?
+```
+
+**Rules:**
+
+* `push` and `unshift` grow the array automatically.
+* `pop` and `shift` return `T?` — `nil` if the array is empty.
+
+---
+
+### 22.4 Access
+
+```swift
+let n    = items.length  // element count
+let x    = items[0]      // subscript read
+items[0] = 99            // subscript write
+```
+
+---
+
+### 22.5 Search
+
+```swift
+let idx = items.indexOf(42)      // int  (-1 if not found)
+let has = items.includes(42)     // bool
+
+let val = items.find(func(x: int) -> bool {
+    return x > 10
+})                               // T?
+
+let i = items.findIndex(func(x: int) -> bool {
+    return x > 10
+})                               // int  (-1 if not found)
+```
+
+---
+
+### 22.6 In-Place Mutation
+
+These methods mutate the array without allocating — no `.delete()` needed on
+the result.
+
+```swift
+items.sort(func(a: int, b: int) -> int {
+    return a - b
+})
+
+items.reverse()
+
+items.fill(0)
+items.fill(0, from: 1, to: 3)
+```
+
+---
+
+### 22.7 Methods That Return a New Array
+
+These methods allocate a new array — the caller must call `.delete()` on the
+result.
+
+```swift
+var doubled = items.map(func(x: int) -> int {
+    return x * 2
+})
+defer doubled.delete()
+
+var evens = items.filter(func(x: int) -> bool {
+    return x % 2 == 0
+})
+defer evens.delete()
+
+var sub = items.slice(1, 3)
+defer sub.delete()
+
+var all = a.concat(b)
+defer all.delete()
+```
+
+---
+
+### 22.8 Iteration
+
+```swift
+items.forEach(func(x: int) {
+    // process each element
+})
+```
+
+---
+
+### 22.9 Struct Arrays
+
+Structs are copied by value on push — consistent with Vertex value semantics.
+
+```swift
+struct Vec2 {
+    x: float
+    y: float
+}
+
+struct Player {
+    id:       int
+    position: Vec2
+    health:   int
+}
+
+var players = [Player]()
+defer players.delete()
+
+players.push(Player{
+    id:       1,
+    position: Vec2{x: 0.0, y: 0.0},
+    health:   100,
+})
+
+players.push(Player{
+    id:       2,
+    position: Vec2{x: 10.0, y: 5.0},
+    health:   80,
+})
+
+// field access and mutation
+let hp        = players[0].health
+players[0].health = 50
+let x         = players[0].position.x
+
+// search
+let idx = players.findIndex(func(p: Player) -> bool {
+    return p.id == 2
+})
+
+let found = players.find(func(p: Player) -> bool {
+    return p.health < 100
+})
+
+// sort by health
+players.sort(func(a: Player, b: Player) -> int {
+    return a.health - b.health
+})
+
+// filter — new array, must delete
+var alive = players.filter(func(p: Player) -> bool {
+    return p.health > 0
+})
+defer alive.delete()
+
+// map to ids — new array, must delete
+var ids = players.map(func(p: Player) -> int {
+    return p.id
+})
+defer ids.delete()
+
+// iterate
+players.forEach(func(p: Player) {
+    // process each player
+})
+```
+
+---
+
+### 22.10 Memory Rules
+
+| Method                                              | Allocates | Action required         |
+|-----------------------------------------------------|-----------|-------------------------|
+| `push` `unshift` `fill` `sort` `reverse`            | no        | nothing                 |
+| `pop` `shift`                                       | no        | nothing                 |
+| `map` `filter` `slice` `concat`                     | yes       | `defer result.delete()` |
+| construction `[T]()` `[T](capacity:)`               | yes       | `defer items.delete()`  |
 
 ---
 
@@ -512,8 +722,8 @@ if let val = maybe {
 
 ```swift
 struct Point {
-    let x: int
-    var y: int
+    x: int
+    y: int
 }
 
 let p  = Point{x: 3, y: 4}
@@ -537,8 +747,8 @@ let p = Point{
 
 ```swift
 struct Line {
-    var start: Point
-    var end: Point
+    start: Point
+    end:   Point
 }
 
 let l = Line{
@@ -549,6 +759,10 @@ let l = Line{
 
 **Rules:**
 
+* Struct fields are declared as `name: type` — no `let` or `var` keyword.
+* Mutability is determined entirely by the binding at the declaration site.
+* A `let` binding freezes all fields — no field may be reassigned.
+* A `var` binding opens all fields — any field may be reassigned.
 * Struct literals use brace syntax: `TypeName{field: value, ...}`.
 * All field labels are required — positional initialization is not supported.
 * Fields may appear in any order inside the literal.
@@ -558,9 +772,6 @@ let l = Line{
   `switch` statements. Wrap in parentheses to disambiguate:
   `if (Point{x: 1, y: 2} == p) { }`.
 * Structs are pure data — no instance methods, no protocols, no inheritance.
-* Fields declared `let` cannot be reassigned after the struct is initialized.
-* Fields declared `var` can be reassigned only when the enclosing binding is
-  `var`.
 * A struct may contain fields whose type is another struct.
 * Assignment always produces a full copy.
 * Structs may not contain class fields that imply ownership semantics.
@@ -570,37 +781,33 @@ let l = Line{
 
 ---
 
-## 26. Associated Functions (index-0 receiver)
+## 26. Associated Functions (Receiver Syntax)
 
-A function whose first parameter type is a known struct or class is implicitly
-an associated function of that type.
+A function declared with a receiver argument immediately preceding the function name is an associated function of the receiver's type.
 
 ```swift
-func describe(p: Point) {
+func (p: Point) describe() {
     let n = p.x
 }
 
-func reset(p: mut Point) {
+func (p: mut Point) reset() {
     p.x = 0
     p.y = 0
 }
 
 p.describe()
 p.reset()
+
 ```
 
 **Rules:**
 
-* The first parameter at index 0 whose type is a known struct or class is the
-  receiver.
-* `mut` before the receiver type marks the receiver as mutable. The caller
-  must pass a `var` binding prefixed with `&`.
-* Associated functions are ordinary functions and follow all rules in §19.
-* Any function whose first parameter type is a known struct or class is
-  implicitly associated with that type — there is no free-function escape hatch
-  at index 0.
-* To write a utility function that takes a known type without it acting as the
-  receiver, place the known type at index 1 or later.
+* The receiver is declared in its own set of parentheses immediately after the `func` keyword and before the function name: `func (receiverName: Type) functionName(params)`.
+* The receiver name is chosen by the developer — `p`, `node`, `rect`, or any valid identifier. Following standard conventions, this is usually a short 1-to-2 letter abbreviation of the type.
+* `mut` before the receiver type marks the receiver as mutable. The caller must invoke the method on a `var` binding (the compiler handles the mutable reference automatically via dot-notation).
+* Associated functions are ordinary functions under the hood and follow all standard function rules in §19.
+* `self` and `this` are entirely absent from the language grammar. Developers must explicitly name the receiver.
+* To write a utility function that takes a known type without associating it as a method, simply place the type in the standard parameter list instead of using the receiver block.
 
 ---
 
@@ -677,36 +884,37 @@ enum Planet: string {
 
 ```swift
 class Animal {
-    var name: string
+    name: string
 }
 
-func init(a: mut Animal, name: string) {
+func (a: mut Animal) init(name: string) {
     a.name = name
 }
 
-func deinit(a: mut Animal) {
+func (a: mut Animal) deinit() {
     // runs before memory is freed
 }
 
 let a = Animal(name: "Rex")
 a.delete()
+
 ```
 
 **Rules:**
 
-* Classes are heap allocated — the runtime cost is exactly what the programmer
-  pays.
+* Class fields are declared as `name: type` — no `let` or `var` keyword.
+* Mutability is determined entirely by the binding at the declaration site.
+* A `let` binding freezes all fields — no field may be reassigned.
+* A `var` binding opens all fields — any field may be reassigned.
+* Classes are heap allocated — the runtime cost is exactly what the programmer pays.
 * Assignment passes a reference — two variables may point to the same object.
 * Identity operators `===` and `!==` compare references, not values.
 * Inheritance is not supported — classes are standalone types.
 * A class may contain fields whose type is a struct.
-* `init` is a reserved associated function name called automatically after
-  allocation. Its first parameter must be the instance, typed `mut`.
-* `deinit` is a reserved associated function name. It runs automatically when
-  `.delete()` is called. Its first parameter must be the instance, typed `mut`.
+* `init` is a reserved associated function name called automatically after allocation. It must be declared using the receiver syntax and the receiver must be typed `mut` (e.g., `func (a: mut Animal) init()`).
+* `deinit` is a reserved associated function name. It runs automatically when `.delete()` is called. It must be declared using the receiver syntax and the receiver must be typed `mut` (e.g., `func (a: mut Animal) deinit()`).
 * Neither `init` nor `deinit` may be called directly.
-* If no `func init` is declared, the compiler provides a default memberwise
-  initializer.
+* If no `func init` is declared, the compiler provides a default memberwise initializer.
 * The programmer is responsible for calling `.delete()` on class instances.
 * Failing to call `.delete()` on a class instance is a memory leak.
 * Class definitions may not appear inside other class or struct definitions.
@@ -788,7 +996,7 @@ func identity<T>(value: T) -> T {
 }
 
 struct Box<T> {
-    var value: T
+    value: T
 }
 
 let b      = Box{value: 42}
@@ -936,6 +1144,90 @@ run(n: &total, f: func(n: mut int) {
 
 ---
 
+## 33.1 Anonymous Concurrent Functions
+
+An anonymous function may carry an execution qualifier between its parameter
+list and body. The qualifier position is identical to named functions — no new
+rule is introduced.
+
+```swift
+// async
+func(params) async -> ReturnType { body }(args).await()
+
+// thread
+func(params) thread -> ReturnType { body }(args).spawn()
+func(params) thread -> ReturnType { body }(args).spawn(threads: n)
+
+// process
+func(params) process -> ReturnType { body }(args).fork()
+func(params) process -> ReturnType { body }(args).fork(processes: n)
+
+// gpu — results via .dispatch() only, no chan
+func(params) gpu -> ReturnType { body }(args).dispatch()
+func(params) gpu -> ReturnType { body }(args).dispatch(gpu: n, mem: n)
+```
+
+**Examples:**
+
+```swift
+// thread — inline parallel workload
+let results = float.channel(size: 64)
+
+func(data: [float], out: chan float) thread {
+    for chunk in data {
+        out.send(process(chunk))
+    }
+    out.close()
+}(dataset, results).spawn()
+
+// process — isolated compute feeding a channel
+func(data: [float], out: chan float) process {
+    for chunk in data {
+        out.send(heavyCompute(chunk))
+    }
+    out.close()
+}(dataset, results).fork()
+
+// async — inline async task
+let user = func(id: int) async -> User {
+    return fetchUser(id: id)
+}(userId).await()
+
+// gpu — inline kernel dispatch
+let output = func(a: [float], b: [float]) gpu -> [float] {
+    return vectorAdd(a: a, b: b)
+}(x, y).dispatch()
+```
+
+**Qualifier and postfix pairing:**
+
+| Qualifier | Postfix                                     | `chan` valid |
+|-----------|---------------------------------------------|-------------|
+| `async`   | `.await()`                                  | yes         |
+| `thread`  | `.spawn()` / `.spawn(threads: n)`           | yes         |
+| `process` | `.fork()` / `.fork(processes: n)`           | yes         |
+| `gpu`     | `.dispatch()` / `.dispatch(gpu: n, mem: n)` | no          |
+
+**Rules:**
+
+* The qualifier sits between the parameter list and the return arrow —
+  identical to named functions.
+* The trailing `(args)` is the call site — arguments are passed explicitly,
+  not captured.
+* The execution postfix must match the qualifier.
+* All rules from §35, §38, §39, and §40 apply — the anonymous form changes
+  nothing about execution semantics.
+* Values from the enclosing scope are captured by value at creation (§33).
+* To pass mutable state, use explicit `mut` parameters and pass `var` bindings
+  prefixed with `&` — capture alone cannot produce writeback.
+* `chan` parameters are valid in `async`, `thread`, and `process` functions
+  only — passing a `chan` to a `gpu` function is a compile error.
+* GPU functions communicate exclusively through their `.dispatch()` return
+  value — the channel model does not map onto GPU execution.
+
+---
+
+
 ## 35. Async / Await
 
 ```swift
@@ -1071,11 +1363,11 @@ func process(s: string) -> Result(int, string) {
 
 ### 37.4 Choosing the Right Primitive
 
-| Situation                               | Use           |
-|-----------------------------------------|---------------|
-| Value may simply not exist              | `T?`          |
+| Situation                               | Use             |
+|-----------------------------------------|-----------------|
+| Value may simply not exist              | `T?`            |
 | Caller needs value and error together   | `(T, E?)` tuple |
-| Caller must handle Ok or Err explicitly | `Result(T, E)` |
+| Caller must handle Ok or Err explicitly | `Result(T, E)`  |
 
 ---
 
@@ -1139,18 +1431,42 @@ let result = isolatedWork(data: x).fork(processes: 4)
 
 ## 41. Channels
 
-```swift
-let ch: channel float = Channel()
-let ch: channel float = Channel(size: 8)
+`.channel()` is a type-level postfix intrinsic. It constructs a channel that
+carries values of the receiver type. `chan` is the type modifier used in
+annotations and parameter lists.
 
-ch.send(42.0)
-let val = ch.receive()
+```swift
+// unbuffered — blocks sender until receiver is ready
+let ch = string.channel()
+
+// buffered — blocks sender only when buffer is full
+let ch = string.channel(size: 32)
+
+// annotated binding — type is inferred from construction, annotation optional
+let ch: chan string = string.channel(size: 32)
+
+// parameter annotation
+func renderLoop(ch: chan rtp.Packet, ctx: canvas.Context) thread { }
+```
+
+**Operations — blocking:**
+
+```swift
+ch.send(value)          // waits if full or no receiver ready
+let val = ch.receive()  // waits until a value is available
 ch.close()
+```
+
+**Operations — non-blocking:**
+
+```swift
+let ok  = ch.trySend(value)  // bool — false if full or no receiver ready
+let val = ch.tryReceive()    // T?   — nil if channel is empty
 ```
 
 **Runtime transport by context:**
 
-| context   | transport                        |
+| Context   | Transport                        |
 |-----------|----------------------------------|
 | `async`   | shared memory, non-blocking      |
 | `thread`  | shared memory, lightweight       |
@@ -1158,37 +1474,60 @@ ch.close()
 
 **Rules:**
 
-* `channel T` is the type — `Channel()` is the constructor.
-* Unbuffered channels block the sender until the receiver is ready.
-* Buffered channels block the sender only when the buffer is full.
-* `.send()`, `.receive()`, and `.close()` are the only valid operations.
-* Calling `.send()` on a closed channel is a runtime error.
-* `.receive()` on a closed, empty channel is a runtime error.
+* `.channel()` is only valid on type names, not instances.
+* `size` must be a compile-time integer literal greater than zero.
+* Omitting `size` produces an unbuffered channel.
+* `chan` is the type modifier for annotations and parameter lists.
+* The inferred type of a `.channel()` binding is the channel — annotation
+  is not required.
+* `.send()` blocks when the buffer is full or the channel is unbuffered and no
+  receiver is ready.
+* `.receive()` blocks until a value is available.
+* `.trySend()` returns `false` immediately if the channel cannot accept the
+  value — it never blocks.
+* `.tryReceive()` returns `nil` immediately if no value is available — it
+  never blocks.
+* `.send()` or `.trySend()` on a closed channel is a runtime error.
+* `.receive()` or `.tryReceive()` on a closed, empty channel is a runtime
+  error.
+* `.close()` has no non-blocking variant — it always completes immediately.
+
+**Operation summary:**
+
+| Method          | Blocking | Returns | Behaviour                          |
+|-----------------|----------|---------|------------------------------------|
+| `.send(value)`  | yes      | `void`  | waits until value is accepted      |
+| `.receive()`    | yes      | `T`     | waits until value is available     |
+| `.trySend()`    | no       | `bool`  | false if full or no receiver ready |
+| `.tryReceive()` | no       | `T?`    | nil if channel is empty            |
+| `.close()`      | no       | `void`  | always completes immediately       |
 
 ---
 
 ## 42. Postfix Execution Model — Summary
 
-| keyword   | postfix                                     | meaning                     |
-|-----------|---------------------------------------------|-----------------------------|
-| `async`   | `.await()`                                  | suspend until done          |
-| `thread`  | `.spawn()` / `.spawn(threads: n)`           | shared memory parallel      |
-| `process` | `.fork()` / `.fork(processes: n)`           | isolated memory parallel    |
-| `gpu`     | `.dispatch()` / `.dispatch(gpu: n, mem: n)` | gpu device execution        |
-| —         | `.new()`                                    | opt class into ref counting |
-| —         | `.delete()`                                 | manually free class instance|
-| —         | `.try()`                                    | propagate Result error      |
+| Keyword   | Postfix                                     | Meaning                      |
+|-----------|---------------------------------------------|------------------------------|
+| `async`   | `.await()`                                  | suspend until done           |
+| `thread`  | `.spawn()` / `.spawn(threads: n)`           | shared memory parallel       |
+| `process` | `.fork()` / `.fork(processes: n)`           | isolated memory parallel     |
+| `gpu`     | `.dispatch()` / `.dispatch(gpu: n, mem: n)` | gpu device execution         |
+| —         | `.channel()`                                | construct unbuffered channel |
+| —         | `.channel(size: n)`                         | construct buffered channel   |
+| —         | `.new()`                                    | opt class into ref counting  |
+| —         | `.delete()`                                 | manually free class instance |
+| —         | `.try()`                                    | propagate Result error       |
 
 ---
 
-## Explicitly Out of Scope in 1.9
+## Explicitly Out of Scope in 2.0
 
 | Feature                                      | Status   |
 |----------------------------------------------|----------|
 | Inheritance                                  | Removed  |
 | String interpolation `\()`                   | Removed  |
 | `_` parameter labels                         | Removed  |
-| `self` keyword                               | Removed  |
+| `self` as implicit keyword or reserved identifier | Removed  |
 | `static` keyword                             | Removed  |
 | Methods inside structs or classes            | Removed  |
 | `mutating` keyword                           | Removed  |

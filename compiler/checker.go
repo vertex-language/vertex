@@ -8,7 +8,6 @@ import (
 	"github.com/vertex-language/vertex/parser"
 )
 
-// checker performs pass 1: collect all declarations into the global scope.
 type checker struct {
 	pkg    *Package
 	scope  *Scope
@@ -24,7 +23,6 @@ func newChecker(pkg *Package, defaultTags *BuildTags) *checker {
 	}
 }
 
-// Run collects all top-level declarations across all files.
 func (c *checker) Run() *Scope {
 	for _, sf := range c.pkg.Files {
 		tags := c.tags
@@ -71,10 +69,11 @@ func (c *checker) collectStruct(ctx parser.IStructDeclContext) {
 	name := ctx.ID().GetText()
 	st := &StructType{Name: name}
 	for _, sf := range ctx.AllStructField() {
+		// ← 2.0: fields have no let/var keyword; mutability is determined by
+		// the binding at the declaration site, not the field definition.
 		f := &StructField{
-			Name:    sf.ID().GetText(),
-			Mutable: sf.VAR() != nil,
-			Type:    c.resolveType(sf.Type_()),
+			Name: sf.ID().GetText(),
+			Type: c.resolveType(sf.Type_()),
 		}
 		st.Fields = append(st.Fields, f)
 	}
@@ -89,10 +88,10 @@ func (c *checker) collectClass(ctx parser.IClassDeclContext) {
 	ct := &ClassType{Name: name}
 	for _, member := range ctx.AllClassMember() {
 		if cf := member.ClassField(); cf != nil {
+			// ← 2.0: class fields also have no let/var keyword.
 			f := &StructField{
-				Name:    cf.ID().GetText(),
-				Mutable: cf.VAR() != nil,
-				Type:    c.resolveType(cf.Type_()),
+				Name: cf.ID().GetText(),
+				Type: c.resolveType(cf.Type_()),
 			}
 			ct.Fields = append(ct.Fields, f)
 		}
@@ -108,8 +107,6 @@ func (c *checker) collectNativeClass(ctx parser.IClassDeclContext, sf *SourceFil
 	className := ids[0].GetText()
 	parentName := ids[1].GetText()
 
-	// Resolve the wasm module name from the file's native import.
-	// WasmModule now returns the raw import path directly, e.g. "linux/libc".
 	module := parentName
 	for _, imp := range sf.Imports {
 		if imp.IsNative() && imp.Namespace == parentName {
@@ -251,17 +248,16 @@ func (c *checker) collectTypeAlias(ctx parser.ITypeAliasDeclContext) {
 
 // collectFuncDecl registers the function in the global scope.
 //
-// §26 — Associated functions: if the first parameter's type is a concrete
-// struct or non-native class that is already registered, the function is
-// also registered under "TypeName.funcName" so dot-call syntax works.
+// §26 — Associated functions / receivers: if a receiver block is present,
+// the function is also registered under "TypeName.funcName" so dot-call syntax works.
 func (c *checker) collectFuncDecl(ctx parser.IFuncDeclContext) {
 	name := ctx.ID().GetText()
 	sig := c.funcDeclSig(ctx)
 	ft := &FuncType{Sig: sig}
 	c.scope.Define(&Symbol{Name: name, Kind: SymFunc, Type: ft})
 
-	if len(sig.Params) > 0 {
-		typeName := receiverTypeName(sig.Params[0])
+	if rec := ctx.Receiver(); rec != nil {
+		typeName := receiverTypeName(c.resolveType(rec.Type_()))
 		if typeName != "" {
 			c.scope.Define(&Symbol{
 				Name: typeName + "." + name,
@@ -272,8 +268,6 @@ func (c *checker) collectFuncDecl(ctx parser.IFuncDeclContext) {
 	}
 }
 
-// receiverTypeName returns the type name if t is a concrete struct or
-// non-native class, otherwise "".
 func receiverTypeName(t Type) string {
 	switch v := t.(type) {
 	case *StructType:
@@ -291,6 +285,13 @@ func receiverTypeName(t Type) string {
 func (c *checker) funcDeclSig(ctx parser.IFuncDeclContext) *FuncSig {
 	var params []Type
 	var muts []bool
+
+	// ← 2.0: Check for an isolated receiver block and prepend it to the parameter list.
+	if rec := ctx.Receiver(); rec != nil {
+		params = append(params, c.resolveType(rec.Type_()))
+		muts = append(muts, rec.MUT() != nil)
+	}
+
 	if pl := ctx.ParamList(); pl != nil {
 		for _, p := range pl.AllParam() {
 			params = append(params, c.resolveType(p.Type_()))
@@ -305,9 +306,6 @@ func (c *checker) funcDeclSig(ctx parser.IFuncDeclContext) *FuncSig {
 	return &FuncSig{Params: params, Ret: ret, Muts: muts, Qual: qual}
 }
 
-// resolveFuncQual maps the grammar's FuncQualifier token to a FuncQual.
-// The three GPU backends (cuda/vulkan/msl) are now distinct qualifiers that
-// map directly to the ABI export suffixes @cuda, @vulkan, @msl.
 func (c *checker) resolveFuncQual(fq parser.IFuncQualifierContext) FuncQual {
 	if fq == nil {
 		return QualNone
@@ -384,7 +382,7 @@ func ResolveType(ctx parser.ITypeContext, scope *Scope) Type {
 		}
 		return &ResultType{Ok: ok, Err: errT}
 	}
-	if ctx.CHANNEL() != nil {
+	if ctx.CHAN() != nil {
 		subs := ctx.AllType_()
 		if len(subs) > 0 {
 			return &ChannelType{Elem: ResolveType(subs[0], scope)}
@@ -393,8 +391,10 @@ func ResolveType(ctx parser.ITypeContext, scope *Scope) Type {
 	}
 	if ctx.ID() != nil {
 		name := ctx.ID().GetText()
-		if sym := scope.Lookup(name); sym != nil && sym.Kind == SymType {
-			return sym.Type
+		if scope != nil {
+			if sym := scope.Lookup(name); sym != nil && sym.Kind == SymType {
+				return sym.Type
+			}
 		}
 		return &NamedType{Name: name}
 	}

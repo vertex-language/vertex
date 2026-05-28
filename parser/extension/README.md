@@ -1,7 +1,7 @@
 # Vertex Language Support
 
 Syntax highlighting for the [Vertex programming language](https://github.com/vertex-language/vertex)
-(specification 1.9).
+(specification 2.0).
 
 ## File Extension
 

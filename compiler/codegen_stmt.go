@@ -1,3 +1,4 @@
+// codegen_stmt.go
 package compiler
 
 import (
@@ -7,23 +8,18 @@ import (
 	"github.com/vertex-language/vertex/parser"
 )
 
-// funcGen holds the mutable state for generating a single function body.
 type funcGen struct {
 	cg     *CodeGen
 	sig    *FuncSig
 	scope  *Scope
 	body   *wasm.FunctionBody
 
-	// Local variable tracking
-	localCount uint32
-	localTypes []wasm.ValType // wasm type of each local (params first, then vars)
-	paramCount uint32
+	localCount  uint32
+	localTypes  []wasm.ValType
+	paramCount  uint32
 
-	// Struct frame: name → linear-memory address
 	frameAllocs map[string]int32
-
-	// Loop label depth for break/continue
-	loopDepth int
+	loopDepth   int
 }
 
 func (fg *funcGen) newLocal(t Type) uint32 {
@@ -61,8 +57,6 @@ func (fg *funcGen) declareLocals(body *wasm.FunctionBody) {
 
 // ── Struct-literal helpers ────────────────────────────────────────────────────
 
-// structLiteralOf extracts the IStructLiteralExprContext from an expression
-// if it is a direct struct-literal primary, otherwise returns nil.
 func structLiteralOf(expr parser.IExprContext) parser.IStructLiteralExprContext {
 	if expr == nil {
 		return nil
@@ -74,9 +68,6 @@ func structLiteralOf(expr parser.IExprContext) parser.IStructLiteralExprContext 
 	return p.StructLiteralExpr()
 }
 
-// inferStructType returns the struct/class type when:
-//   - declared is already a struct/class, OR
-//   - expr is a struct literal whose type name resolves in scope.
 func inferStructType(declared Type, expr parser.IExprContext, scope *Scope) Type {
 	if declared != nil && (declared.Kind() == KindStruct || declared.Kind() == KindClass) {
 		return declared
@@ -92,8 +83,6 @@ func inferStructType(declared Type, expr parser.IExprContext, scope *Scope) Type
 
 // ── Pre-scan ──────────────────────────────────────────────────────────────────
 
-// preScanBlock walks a block recursively, pre-allocating linear-memory frame
-// slots for every struct/class variable declaration it encounters.
 func (fg *funcGen) preScanBlock(ctx parser.IBlockContext) {
 	if ctx == nil {
 		return
@@ -102,7 +91,6 @@ func (fg *funcGen) preScanBlock(ctx parser.IBlockContext) {
 		if vd := stmt.VarDeclStmt(); vd != nil {
 			fg.preScanVarDecl(vd)
 		}
-		// Recurse into control-flow blocks so nested struct vars get frame slots.
 		if is := stmt.IfStmt(); is != nil {
 			fg.preScanBlock(is.Block())
 			for _, eic := range is.AllElseIfClause() {
@@ -120,7 +108,6 @@ func (fg *funcGen) preScanBlock(ctx parser.IBlockContext) {
 		}
 		if sw := stmt.SwitchStmt(); sw != nil {
 			for _, sc := range sw.AllSwitchCase() {
-				// SwitchCase doesn't have its own block; stmts are inline.
 				for _, s := range sc.AllStmt() {
 					if vd := s.VarDeclStmt(); vd != nil {
 						fg.preScanVarDecl(vd)
@@ -144,21 +131,27 @@ func (fg *funcGen) preScanVarDecl(ctx parser.IVarDeclStmtContext) {
 	}
 	name := ctx.ID().GetText()
 
-	// Resolve declared type; if absent try to infer from a struct literal.
 	var declared Type
 	if ctx.Type_() != nil {
 		declared = ResolveType(ctx.Type_(), fg.cg.scope)
 	}
+
 	t := inferStructType(declared, ctx.Expr(), fg.cg.scope)
-	if t == nil {
+	if t != nil {
+		size := SizeOf(t)
+		if size <= 0 {
+			return
+		}
+		fg.frameAllocs[name] = fg.cg.allocFrame(size)
 		return
 	}
-	size := SizeOf(t)
-	if size <= 0 {
-		return
+
+	if ac := arrayConstructOf(ctx.Expr()); ac != nil {
+		size := resolveArrayConstructSize(ac)
+		if size > 0 {
+			fg.frameAllocs[name] = fg.cg.allocFrame(size)
+		}
 	}
-	addr := fg.cg.allocFrame(size)
-	fg.frameAllocs[name] = addr
 }
 
 // ── Block ─────────────────────────────────────────────────────────────────────
@@ -217,9 +210,6 @@ func (fg *funcGen) genVarDecl(ctx parser.IVarDeclStmtContext) {
 		declType = ResolveType(ctx.Type_(), fg.cg.scope)
 	}
 
-	// Lazily allocate a frame slot if the pre-scan missed this variable
-	// (e.g. it lives inside a deeply nested block that preScanBlock now covers,
-	// but add a safety net here anyway).
 	if _, preAlloced := fg.frameAllocs[name]; !preAlloced {
 		t := inferStructType(declType, ctx.Expr(), fg.cg.scope)
 		if t != nil {
@@ -233,24 +223,50 @@ func (fg *funcGen) genVarDecl(ctx parser.IVarDeclStmtContext) {
 		}
 	}
 
-	// ── Struct / class variable stored in linear memory ───────────────────
+	// ── fixed-size array in frame ─────────────────────────────────────────
 	if addr, ok := fg.frameAllocs[name]; ok {
-		// Resolve the concrete type if it was inferred from the literal.
+		if ac := arrayConstructOf(ctx.Expr()); ac != nil {
+			size := resolveArrayConstructSize(ac)
+			elemType := ResolveType(ac.Type_(), fg.cg.scope)
+
+			// zero-fill word by word (correct for both short and long form)
+			for off := 0; off < size; off += 4 {
+				fg.body.I32Const(addr + int32(off))
+				fg.body.I32Const(0)
+				fg.body.I32Store(2, 0)
+			}
+
+			ptrLocal := fg.newLocal(Int)
+			fg.body.I32Const(addr)
+			fg.body.LocalSet(ptrLocal)
+
+			fg.scope.Define(&Symbol{
+				Name:     name,
+				Kind:     SymVar,
+				Type:     &ArrayType{Elem: elemType},
+				LocalIdx: ptrLocal,
+				Mutable:  mutable,
+				IsFrame:  true,
+				FrameOff: addr,
+			})
+			return
+		}
+	}
+
+	// ── struct / class variable stored in linear memory ───────────────────
+	if addr, ok := fg.frameAllocs[name]; ok {
 		if declType == nil || declType.Kind() == KindVoid {
 			declType = inferStructType(nil, ctx.Expr(), fg.cg.scope)
 		}
 
-		// Store the frame base address in a wasm local for field-access codegen.
 		ptrLocal := fg.newLocal(Int)
 		fg.body.I32Const(addr)
 		fg.body.LocalSet(ptrLocal)
 
 		if ctx.Expr() != nil {
 			if sl := structLiteralOf(ctx.Expr()); sl != nil {
-				// Struct literal: initialise each field individually.
 				fg.genStructLitFields(addr, sl, declType)
 			} else {
-				// Any other expression must produce a struct address; memcopy.
 				srcType := fg.genExpr(ctx.Expr())
 				fg.emitStructMemcopy(addr, srcType)
 			}
@@ -268,7 +284,7 @@ func (fg *funcGen) genVarDecl(ctx parser.IVarDeclStmtContext) {
 		return
 	}
 
-	// ── Regular scalar local ───────────────────────────────────────────────
+	// ── regular scalar local ──────────────────────────────────────────────
 	valType := Type(Int)
 	if declType != nil && declType.Kind() != KindVoid {
 		valType = declType
@@ -289,17 +305,74 @@ func (fg *funcGen) genVarDecl(ctx parser.IVarDeclStmtContext) {
 	}
 }
 
-// genStructLitFields stores each named field of a struct literal into linear
-// memory starting at addr. Nested struct literals are handled recursively.
+func arrayConstructOf(expr parser.IExprContext) parser.IArrayConstructExprContext {
+	if expr == nil {
+		return nil
+	}
+	p := expr.Primary()
+	if p == nil {
+		return nil
+	}
+	return p.ArrayConstructExpr()
+}
+
+// resolveArrayConstructSize returns the total byte size of the array.
 //
-// WebAssembly store instruction order:  [addr] [value] i32.store
-// The base address is encoded as an i32.const; the field offset is the
-// instruction's static immediate, so we never need to compute addr+offset
-// at runtime.
+// Handles all four construction forms (§22.1, §22.2):
+//
+//	[T]()                        — empty growable, no frame allocation
+//	[T](n)                       — short form: fixed, n elements, zero-filled
+//	[T](capacity: n)             — growable with hint, no frame allocation
+//	[T](repeating: v, count: n)  — long form: fixed, n elements
+func resolveArrayConstructSize(ac parser.IArrayConstructExprContext) int {
+	elemType := ResolveType(ac.Type_(), nil)
+	elemSize := SizeOf(elemType)
+	if elemSize <= 0 {
+		elemSize = 1
+	}
+	ids := ac.AllID()
+	exprs := ac.AllExpr()
+
+	// ← 2.0: short form [T](n) — single unlabelled count expression,
+	// always zero-fills (no repeating value).
+	if len(ids) == 0 && len(exprs) == 1 {
+		if n := literalIntExpr(exprs[0]); n > 0 {
+			return elemSize * n
+		}
+	}
+
+	// Long form [T](repeating: v, count: n) — find the "count" label.
+	for i, id := range ids {
+		if id.GetText() == "count" && i < len(exprs) {
+			if n := literalIntExpr(exprs[i]); n > 0 {
+				return elemSize * n
+			}
+		}
+	}
+	return 0
+}
+
+func literalIntExpr(expr parser.IExprContext) int {
+	if expr == nil {
+		return 0
+	}
+	p := expr.Primary()
+	if p == nil || p.Literal() == nil {
+		return 0
+	}
+	lit := p.Literal()
+	if lit.DEC_INT_LIT() != nil {
+		v, err := strconv.Atoi(lit.DEC_INT_LIT().GetText())
+		if err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
 func (fg *funcGen) genStructLitFields(addr int32, ctx parser.IStructLiteralExprContext, t Type) {
 	st, ok := t.(*StructType)
 	if !ok {
-		// Also handle ClassType (non-native classes with value fields)
 		if ct, ok2 := t.(*ClassType); ok2 {
 			fg.genClassLitFields(addr, ctx, ct)
 		}
@@ -312,23 +385,18 @@ func (fg *funcGen) genStructLitFields(addr int32, ctx parser.IStructLiteralExprC
 		if f == nil {
 			continue
 		}
-
-		// Nested struct literal: recurse into the sub-region.
 		if f.Type.Kind() == KindStruct {
 			if nestedSL := structLiteralOf(init.Expr()); nestedSL != nil {
 				fg.genStructLitFields(addr+int32(f.Offset), nestedSL, f.Type)
 				continue
 			}
 		}
-
-		// Scalar or non-literal expression: push addr, push value, store.
 		fg.body.I32Const(addr)
 		fg.genExpr(init.Expr())
 		fg.emitStore(f.Type, uint32(f.Offset))
 	}
 }
 
-// genClassLitFields is the same as genStructLitFields but for ClassType.
 func (fg *funcGen) genClassLitFields(addr int32, ctx parser.IStructLiteralExprContext, ct *ClassType) {
 	for _, init := range ctx.AllStructFieldInit() {
 		fieldName := init.ID().GetText()
@@ -353,15 +421,13 @@ func (fg *funcGen) genClassLitFields(addr int32, ctx parser.IStructLiteralExprCo
 func (fg *funcGen) genAssign(ctx parser.IAssignStmtContext) {
 	lv := ctx.Lvalue()
 
-	// ── Struct field or array element via lvalue chain: base.field = expr ──
 	if lv.DOT() != nil || lv.LBRACKET() != nil {
-		fieldType := fg.genLvalueAddr(lv) // pushes full address onto stack
-		fg.genExpr(ctx.Expr())            // pushes value
+		fieldType := fg.genLvalueAddr(lv)
+		fg.genExpr(ctx.Expr())
 		fg.emitStore(fieldType, 0)
 		return
 	}
 
-	// ── Simple identifier ───────────────────────────────────────────────────
 	name := lv.ID().GetText()
 	sym := fg.scope.Lookup(name)
 	if sym == nil {
@@ -369,7 +435,6 @@ func (fg *funcGen) genAssign(ctx parser.IAssignStmtContext) {
 	}
 
 	if sym.IsFrame {
-		// Struct variable: either re-init from a literal or memcopy.
 		if sl := structLiteralOf(ctx.Expr()); sl != nil {
 			fg.genStructLitFields(sym.FrameOff, sl, sym.Type)
 		} else {
@@ -395,23 +460,16 @@ func lvalueName(ctx parser.ILvalueContext) string {
 func (fg *funcGen) genCompoundAssign(ctx parser.ICompoundAssignStmtContext) {
 	lv := ctx.Lvalue()
 
-	// ── Struct field compound assign: base.field op= expr ──────────────────
 	if lv.DOT() != nil || lv.LBRACKET() != nil {
 		fieldType := fg.genLvalueAddr(lv)
 		addrLocal := fg.newLocal(Int)
 		fg.body.LocalSet(addrLocal)
 
-		// Load current value.
 		fg.body.LocalGet(addrLocal)
 		fg.emitLoad(fieldType, 0)
-
-		// Evaluate RHS.
 		fg.genExpr(ctx.Expr())
-
-		// Apply operator.
 		fg.applyCompoundOp(ctx.CompoundOp(), fieldType)
 
-		// Store result: need [addr][val] — save result, load addr, load result.
 		valLocal := fg.newLocal(fieldType)
 		fg.body.LocalSet(valLocal)
 		fg.body.LocalGet(addrLocal)
@@ -420,7 +478,6 @@ func (fg *funcGen) genCompoundAssign(ctx parser.ICompoundAssignStmtContext) {
 		return
 	}
 
-	// ── Simple variable ─────────────────────────────────────────────────────
 	name := lvalueName(lv)
 	sym := fg.scope.Lookup(name)
 	if sym == nil {
@@ -449,18 +506,12 @@ func (fg *funcGen) applyCompoundOp(op parser.ICompoundOpContext, t Type) {
 
 // ── Lvalue address resolution ─────────────────────────────────────────────────
 
-// genLvalueAddr pushes the byte address of the lvalue onto the wasm stack and
-// returns the Type of the location (used to select the right store instruction).
-//
-// Only lvalues rooted in frame-allocated struct variables are addressable.
 func (fg *funcGen) genLvalueAddr(ctx parser.ILvalueContext) Type {
 	if ctx.DOT() != nil {
-		// Recurse: get address of base, then add field offset.
 		baseType := fg.genLvalueAddr(ctx.Lvalue())
 		return fg.resolveFieldAddr(baseType, ctx.ID().GetText())
 	}
 	if ctx.LBRACKET() != nil {
-		// array[index]: base_addr + index * elemSize
 		baseType := fg.genLvalueAddr(ctx.Lvalue())
 		elemType := Void
 		if at, ok := baseType.(*ArrayType); ok {
@@ -472,7 +523,6 @@ func (fg *funcGen) genLvalueAddr(ctx parser.ILvalueContext) Type {
 		fg.body.I32Add()
 		return elemType
 	}
-	// Base case: simple identifier.
 	name := ctx.ID().GetText()
 	sym := fg.scope.Lookup(name)
 	if sym == nil {
@@ -483,14 +533,10 @@ func (fg *funcGen) genLvalueAddr(ctx parser.ILvalueContext) Type {
 		fg.body.I32Const(sym.FrameOff)
 		return sym.Type
 	}
-	// Non-frame scalar — not truly addressable, but surface the value so
-	// callers can handle it (e.g. a pointer passed to a function).
 	fg.body.LocalGet(sym.LocalIdx)
 	return sym.Type
 }
 
-// resolveFieldAddr consumes the base address on the wasm stack, adds the
-// named field's byte offset, and returns the field's type.
 func (fg *funcGen) resolveFieldAddr(base Type, fieldName string) Type {
 	var fields []*StructField
 	switch v := base.(type) {
@@ -519,8 +565,6 @@ func (fg *funcGen) resolveFieldAddr(base Type, fieldName string) Type {
 
 // ── Load / store helpers ──────────────────────────────────────────────────────
 
-// emitLoad emits the wasm load instruction for type t.
-// The memory address must already be on the stack; offset is a static immediate.
 func (fg *funcGen) emitLoad(t Type, offset uint32) {
 	switch t.Wasm() {
 	case WasmI64:
@@ -541,8 +585,6 @@ func (fg *funcGen) emitLoad(t Type, offset uint32) {
 	}
 }
 
-// emitStore emits the wasm store instruction for type t.
-// Stack state expected: [..., i32_addr, value]. offset is a static immediate.
 func (fg *funcGen) emitStore(t Type, offset uint32) {
 	switch t.Wasm() {
 	case WasmI64:
@@ -563,9 +605,6 @@ func (fg *funcGen) emitStore(t Type, offset uint32) {
 	}
 }
 
-// emitStructMemcopy copies SizeOf(srcType) bytes from the address currently on
-// the wasm stack into the known static destination address dstAddr.
-// Copies 4 bytes at a time (LayoutStruct always pads to word alignment).
 func (fg *funcGen) emitStructMemcopy(dstAddr int32, srcType Type) {
 	size := SizeOf(srcType)
 	if size <= 0 {

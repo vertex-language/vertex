@@ -1,5 +1,5 @@
 // VertexParser.g4
-// Vertex Language — Specification 1.9
+// Vertex Language — Specification 2.0
 //
 // Backend responsibilities (not encoded here):
 //   • Type checking, inference, and coercion
@@ -13,10 +13,11 @@
 //   • ELLIPSIS only valid as the final nativeParam
 //   • Struct literals may not appear directly as the condition of if / for /
 //     switch — wrap in parentheses to disambiguate (§25)
+//   • Receiver block must precede function name; type must be struct or class (§26)
+//   • Type.channel() construction — type-level postfix intrinsic (§41)
 
 parser grammar VertexParser;
 options { tokenVocab = VertexLexer; }
-
 
 // ═══════════════════════════════════════════════════════════════════
 // File — §31
@@ -43,7 +44,6 @@ importDecl
     | IMPORT LPAREN STRING_LIT+ RPAREN
     ;
 
-
 // ═══════════════════════════════════════════════════════════════════
 // Top-level declarations
 // ═══════════════════════════════════════════════════════════════════
@@ -57,11 +57,14 @@ topLevelDecl
     | varDeclStmt
     ;
 
-
-// ─── §19 — Function declaration ─────────────────────────────────────
+// ─── §19 / §26 — Function declaration ───────────────────────────────
 
 funcDecl
-    : FUNC ID genericParams? LPAREN paramList? RPAREN funcQualifier? returnType? block
+    : FUNC receiver? ID genericParams? LPAREN paramList? RPAREN funcQualifier? returnType? block
+    ;
+
+receiver
+    : LPAREN ID COLON MUT? type RPAREN
     ;
 
 genericParams
@@ -76,8 +79,11 @@ paramList
     : param (COMMA param)*
     ;
 
+// ← 2.0: receiver form uses isolated parentheses before the function name (§26).
+//        Backend enforces receiver type must be a struct or class.
+//        Regular params retain the name-only form.
 param
-    : ID COLON MUT? type
+    : ID COLON MUT? type         // regular:   n: int  /  n: mut int
     ;
 
 funcQualifier
@@ -91,10 +97,10 @@ returnType
     : ARROW type
     ;
 
-
 // ─── §25 — Struct ───────────────────────────────────────────────────
 //
-// Declaration — fields are let or var, all must be provided at init site.
+// ← 2.0: fields declared as name: type — no let/var keyword.
+//        Mutability is determined entirely by the binding at the declaration site.
 // Instantiation uses brace-literal syntax: TypeName{field: value, …}
 // Trailing commas are valid. Partial initialization is a compile error.
 // All field labels are required — positional initialization is not supported.
@@ -106,8 +112,9 @@ structDecl
     : STRUCT ID genericParams? LBRACE structField* RBRACE
     ;
 
+// ← 2.0: removed (LET | VAR) — fields declared as name: type only
 structField
-    : (LET | VAR) ID COLON type
+    : ID COLON type
     ;
 
 // Brace-literal instantiation — Point{x: 3, y: 4}
@@ -120,16 +127,15 @@ structFieldInit
     : ID COLON expr
     ;
 
-
 // ─── §28 — Class ────────────────────────────────────────────────────
 //
 // A class with ': parentName' is a native class — a zero-size compile-time
 // dispatch surface bound to the import whose namespace matches parentName.
 // The parentName is the last path segment of the import:
 //
-//   import "lib/sdl2"       →  namespace "sdl2"   →  class SDL2  : sdl2  { … }
+//   import "lib/sdl2"       →  namespace "sdl2"    →  class SDL2 : sdl2  { … }
 //   import "linux/syscalls" →  namespace "syscalls" →  class Sys  : syscalls { … }
-//   import "gpu/cuda"       →  namespace "cuda"    →  class Cuda : cuda   { … }
+//   import "gpu/cuda"       →  namespace "cuda"     →  class Cuda : cuda  { … }
 //
 // Native class members are method declarations without bodies; the backend
 // owns the implementation.  Regular classes have only fields.
@@ -143,8 +149,9 @@ classMember
     | nativeFuncDecl
     ;
 
+// ← 2.0: removed (LET | VAR) — fields declared as name: type only
 classField
-    : (LET | VAR) ID COLON type
+    : ID COLON type
     ;
 
 // Native method declaration — no body.
@@ -161,7 +168,6 @@ nativeParam
     : ID COLON MUT? type
     | ELLIPSIS
     ;
-
 
 // ─── §27 — Enum ─────────────────────────────────────────────────────
 
@@ -182,13 +188,11 @@ enumCase
     : ID (ASSIGN literal)?
     ;
 
-
-// ─── §4 FFI — Type alias ────────────────────────────────────────────
+// ─── Type alias ─────────────────────────────────────────────────────
 
 typeAliasDecl
     : TYPE ID ASSIGN type
     ;
-
 
 // ═══════════════════════════════════════════════════════════════════
 // Statements
@@ -214,7 +218,6 @@ stmt
     | exprStmt
     ;
 
-
 // ─── Variable declaration ────────────────────────────────────────────
 
 varDeclStmt
@@ -235,8 +238,7 @@ tupleBind
     : LPAREN ID (COMMA ID)+ RPAREN
     ;
 
-
-// ─── Assignment ───────────────────────────────────────────────────────
+// ─── Assignment ──────────────────────────────────────────────────────
 
 assignStmt
     : lvalue ASSIGN expr
@@ -260,8 +262,7 @@ lvalue
     | lvalue LBRACKET expr RBRACKET
     ;
 
-
-// ─── If / Else ────────────────────────────────────────────────────────
+// ─── If / Else ───────────────────────────────────────────────────────
 
 ifStmt
     : IF ifCondition block elseIfClause* elseClause?
@@ -280,8 +281,7 @@ ifCondition
     | expr
     ;
 
-
-// ─── Switch ───────────────────────────────────────────────────────────
+// ─── Switch ──────────────────────────────────────────────────────────
 
 switchStmt
     : SWITCH expr LBRACE switchCase* defaultCase? RBRACE
@@ -306,22 +306,19 @@ casePattern
     | ERR LPAREN LET ID RPAREN
     ;
 
-
-// ─── For-in ───────────────────────────────────────────────────────────
+// ─── For-in ──────────────────────────────────────────────────────────
 
 forInStmt
     : FOR ID IN expr block
     ;
 
-
-// ─── While ────────────────────────────────────────────────────────────
+// ─── While ───────────────────────────────────────────────────────────
 
 whileStmt
     : WHILE expr block
     ;
 
-
-// ─── Jump statements ──────────────────────────────────────────────────
+// ─── Jump statements ─────────────────────────────────────────────────
 
 breakStmt       : BREAK       ;
 continueStmt    : CONTINUE    ;
@@ -331,20 +328,17 @@ returnStmt
     : RETURN expr?
     ;
 
-
-// ─── Defer ────────────────────────────────────────────────────────────
+// ─── Defer ───────────────────────────────────────────────────────────
 
 deferStmt
     : DEFER expr
     ;
 
-
-// ─── Expression statement ─────────────────────────────────────────────
+// ─── Expression statement ────────────────────────────────────────────
 
 exprStmt
     : expr
     ;
-
 
 // ═══════════════════════════════════════════════════════════════════
 // Expressions
@@ -390,12 +384,10 @@ expr
     | primary
     ;
 
-
 postfixName
     : ID
     | ANY
     ;
-
 
 primary
     : literal
@@ -415,7 +407,6 @@ primary
     | anonFuncExpr
     ;
 
-
 argList
     : arg (COMMA arg)*
     ;
@@ -423,7 +414,6 @@ argList
 arg
     : (ID COLON)? expr
     ;
-
 
 literal
     : DEC_INT_LIT
@@ -439,13 +429,22 @@ literal
     | NIL
     ;
 
-
 arrayLiteralExpr
     : LBRACKET (exprList COMMA?)? RBRACKET
     ;
 
+// ← 2.0: supports four construction forms (§22.1, §22.2):
+//        [T]()                        — empty growable array
+//        [T](n)                       — fixed, n elements, zero-filled (short form)
+//        [T](capacity: n)             — growable, pre-allocated n slots
+//        [T](repeating: v, count: n)  — fixed, n elements, filled with v (long form)
+//
+// Short form [T](n) always zero-fills. Use long form when fill value is not zero.
 arrayConstructExpr
-    : LBRACKET type RBRACKET LPAREN (ID COLON expr COMMA ID COLON expr)? RPAREN
+    : LBRACKET type RBRACKET LPAREN RPAREN
+    | LBRACKET type RBRACKET LPAREN expr RPAREN
+    | LBRACKET type RBRACKET LPAREN ID COLON expr RPAREN
+    | LBRACKET type RBRACKET LPAREN ID COLON expr COMMA ID COLON expr RPAREN
     ;
 
 exprList
@@ -460,7 +459,6 @@ dictEntry
     : expr COLON expr
     ;
 
-
 tupleExpr
     : LPAREN tupleElement (COMMA tupleElement)+ RPAREN
     ;
@@ -469,11 +467,11 @@ tupleElement
     : (ID COLON)? expr
     ;
 
-
+// ← 2.0: funcQualifier? added — anonymous functions may carry async / thread /
+//        process / gpu between the parameter list and return type (§33.1).
 anonFuncExpr
-    : FUNC LPAREN paramList? RPAREN returnType? block
+    : FUNC LPAREN paramList? RPAREN funcQualifier? returnType? block
     ;
-
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -487,7 +485,8 @@ type
     | LPAREN tupleTypeElem (COMMA tupleTypeElem)+ RPAREN
     | LPAREN RPAREN
     | FUNC LPAREN funcTypeParamList? RPAREN (ARROW type)?
-    | CHANNEL type
+    // ← 2.0: CHAN replaces CHANNEL as the type-annotation keyword (§41)
+    | CHAN type
     | ANY      type
     | MUT ANY  type
     | ANY      VOID
@@ -509,7 +508,6 @@ funcTypeParamList
 funcTypeParam
     : MUT? type
     ;
-
 
 primitiveType
     : INT    | INT8   | INT16  | INT32  | INT64

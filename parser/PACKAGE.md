@@ -34,8 +34,8 @@ const (
 	VertexLexerTHREAD          = 29
 	VertexLexerPROCESS         = 30
 	VertexLexerGPU             = 31
-	VertexLexerANY             = 32
-	VertexLexerCHANNEL         = 33
+	VertexLexerCHAN            = 32
+	VertexLexerANY             = 33
 	VertexLexerOPAQUE          = 34
 	VertexLexerRESULT          = 35
 	VertexLexerOK              = 36
@@ -151,8 +151,8 @@ const (
 	VertexParserTHREAD          = 29
 	VertexParserPROCESS         = 30
 	VertexParserGPU             = 31
-	VertexParserANY             = 32
-	VertexParserCHANNEL         = 33
+	VertexParserCHAN            = 32
+	VertexParserANY             = 33
 	VertexParserOPAQUE          = 34
 	VertexParserRESULT          = 35
 	VertexParserOK              = 36
@@ -243,72 +243,73 @@ const (
 	VertexParserRULE_importDecl         = 4
 	VertexParserRULE_topLevelDecl       = 5
 	VertexParserRULE_funcDecl           = 6
-	VertexParserRULE_genericParams      = 7
-	VertexParserRULE_typeParam          = 8
-	VertexParserRULE_paramList          = 9
-	VertexParserRULE_param              = 10
-	VertexParserRULE_funcQualifier      = 11
-	VertexParserRULE_returnType         = 12
-	VertexParserRULE_structDecl         = 13
-	VertexParserRULE_structField        = 14
-	VertexParserRULE_structLiteralExpr  = 15
-	VertexParserRULE_structFieldInit    = 16
-	VertexParserRULE_classDecl          = 17
-	VertexParserRULE_classMember        = 18
-	VertexParserRULE_classField         = 19
-	VertexParserRULE_nativeFuncDecl     = 20
-	VertexParserRULE_nativeParamList    = 21
-	VertexParserRULE_nativeParam        = 22
-	VertexParserRULE_enumDecl           = 23
-	VertexParserRULE_enumRawType        = 24
-	VertexParserRULE_enumCaseDecl       = 25
-	VertexParserRULE_enumCase           = 26
-	VertexParserRULE_typeAliasDecl      = 27
-	VertexParserRULE_block              = 28
-	VertexParserRULE_stmt               = 29
-	VertexParserRULE_varDeclStmt        = 30
-	VertexParserRULE_bindingKw          = 31
-	VertexParserRULE_tupleBind          = 32
-	VertexParserRULE_assignStmt         = 33
-	VertexParserRULE_compoundAssignStmt = 34
-	VertexParserRULE_compoundOp         = 35
-	VertexParserRULE_lvalue             = 36
-	VertexParserRULE_ifStmt             = 37
-	VertexParserRULE_elseIfClause       = 38
-	VertexParserRULE_elseClause         = 39
-	VertexParserRULE_ifCondition        = 40
-	VertexParserRULE_switchStmt         = 41
-	VertexParserRULE_switchCase         = 42
-	VertexParserRULE_defaultCase        = 43
-	VertexParserRULE_casePatternList    = 44
-	VertexParserRULE_casePattern        = 45
-	VertexParserRULE_forInStmt          = 46
-	VertexParserRULE_whileStmt          = 47
-	VertexParserRULE_breakStmt          = 48
-	VertexParserRULE_continueStmt       = 49
-	VertexParserRULE_fallthroughStmt    = 50
-	VertexParserRULE_returnStmt         = 51
-	VertexParserRULE_deferStmt          = 52
-	VertexParserRULE_exprStmt           = 53
-	VertexParserRULE_expr               = 54
-	VertexParserRULE_postfixName        = 55
-	VertexParserRULE_primary            = 56
-	VertexParserRULE_argList            = 57
-	VertexParserRULE_arg                = 58
-	VertexParserRULE_literal            = 59
-	VertexParserRULE_arrayLiteralExpr   = 60
-	VertexParserRULE_arrayConstructExpr = 61
-	VertexParserRULE_exprList           = 62
-	VertexParserRULE_dictLiteralExpr    = 63
-	VertexParserRULE_dictEntry          = 64
-	VertexParserRULE_tupleExpr          = 65
-	VertexParserRULE_tupleElement       = 66
-	VertexParserRULE_anonFuncExpr       = 67
-	VertexParserRULE_type               = 68
-	VertexParserRULE_tupleTypeElem      = 69
-	VertexParserRULE_funcTypeParamList  = 70
-	VertexParserRULE_funcTypeParam      = 71
-	VertexParserRULE_primitiveType      = 72
+	VertexParserRULE_receiver           = 7
+	VertexParserRULE_genericParams      = 8
+	VertexParserRULE_typeParam          = 9
+	VertexParserRULE_paramList          = 10
+	VertexParserRULE_param              = 11
+	VertexParserRULE_funcQualifier      = 12
+	VertexParserRULE_returnType         = 13
+	VertexParserRULE_structDecl         = 14
+	VertexParserRULE_structField        = 15
+	VertexParserRULE_structLiteralExpr  = 16
+	VertexParserRULE_structFieldInit    = 17
+	VertexParserRULE_classDecl          = 18
+	VertexParserRULE_classMember        = 19
+	VertexParserRULE_classField         = 20
+	VertexParserRULE_nativeFuncDecl     = 21
+	VertexParserRULE_nativeParamList    = 22
+	VertexParserRULE_nativeParam        = 23
+	VertexParserRULE_enumDecl           = 24
+	VertexParserRULE_enumRawType        = 25
+	VertexParserRULE_enumCaseDecl       = 26
+	VertexParserRULE_enumCase           = 27
+	VertexParserRULE_typeAliasDecl      = 28
+	VertexParserRULE_block              = 29
+	VertexParserRULE_stmt               = 30
+	VertexParserRULE_varDeclStmt        = 31
+	VertexParserRULE_bindingKw          = 32
+	VertexParserRULE_tupleBind          = 33
+	VertexParserRULE_assignStmt         = 34
+	VertexParserRULE_compoundAssignStmt = 35
+	VertexParserRULE_compoundOp         = 36
+	VertexParserRULE_lvalue             = 37
+	VertexParserRULE_ifStmt             = 38
+	VertexParserRULE_elseIfClause       = 39
+	VertexParserRULE_elseClause         = 40
+	VertexParserRULE_ifCondition        = 41
+	VertexParserRULE_switchStmt         = 42
+	VertexParserRULE_switchCase         = 43
+	VertexParserRULE_defaultCase        = 44
+	VertexParserRULE_casePatternList    = 45
+	VertexParserRULE_casePattern        = 46
+	VertexParserRULE_forInStmt          = 47
+	VertexParserRULE_whileStmt          = 48
+	VertexParserRULE_breakStmt          = 49
+	VertexParserRULE_continueStmt       = 50
+	VertexParserRULE_fallthroughStmt    = 51
+	VertexParserRULE_returnStmt         = 52
+	VertexParserRULE_deferStmt          = 53
+	VertexParserRULE_exprStmt           = 54
+	VertexParserRULE_expr               = 55
+	VertexParserRULE_postfixName        = 56
+	VertexParserRULE_primary            = 57
+	VertexParserRULE_argList            = 58
+	VertexParserRULE_arg                = 59
+	VertexParserRULE_literal            = 60
+	VertexParserRULE_arrayLiteralExpr   = 61
+	VertexParserRULE_arrayConstructExpr = 62
+	VertexParserRULE_exprList           = 63
+	VertexParserRULE_dictLiteralExpr    = 64
+	VertexParserRULE_dictEntry          = 65
+	VertexParserRULE_tupleExpr          = 66
+	VertexParserRULE_tupleElement       = 67
+	VertexParserRULE_anonFuncExpr       = 68
+	VertexParserRULE_type               = 69
+	VertexParserRULE_tupleTypeElem      = 70
+	VertexParserRULE_funcTypeParamList  = 71
+	VertexParserRULE_funcTypeParam      = 72
+	VertexParserRULE_primitiveType      = 73
 )
     VertexParser rules.
 
@@ -394,6 +395,7 @@ func InitEmptyParamListContext(p *ParamListContext)
 func InitEmptyPostfixNameContext(p *PostfixNameContext)
 func InitEmptyPrimaryContext(p *PrimaryContext)
 func InitEmptyPrimitiveTypeContext(p *PrimitiveTypeContext)
+func InitEmptyReceiverContext(p *ReceiverContext)
 func InitEmptyReturnStmtContext(p *ReturnStmtContext)
 func InitEmptyReturnTypeContext(p *ReturnTypeContext)
 func InitEmptyStmtContext(p *StmtContext)
@@ -442,6 +444,8 @@ func (s *AnonFuncExprContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 func (s *AnonFuncExprContext) Block() IBlockContext
 
 func (s *AnonFuncExprContext) FUNC() antlr.TerminalNode
+
+func (s *AnonFuncExprContext) FuncQualifier() IFuncQualifierContext
 
 func (s *AnonFuncExprContext) GetParser() antlr.Parser
 
@@ -717,6 +721,8 @@ func (v *BaseVertexParserVisitor) VisitPostfixName(ctx *PostfixNameContext) inte
 func (v *BaseVertexParserVisitor) VisitPrimary(ctx *PrimaryContext) interface{}
 
 func (v *BaseVertexParserVisitor) VisitPrimitiveType(ctx *PrimitiveTypeContext) interface{}
+
+func (v *BaseVertexParserVisitor) VisitReceiver(ctx *ReceiverContext) interface{}
 
 func (v *BaseVertexParserVisitor) VisitReturnStmt(ctx *ReturnStmtContext) interface{}
 
@@ -997,13 +1003,9 @@ func (s *ClassFieldContext) ID() antlr.TerminalNode
 
 func (*ClassFieldContext) IsClassFieldContext()
 
-func (s *ClassFieldContext) LET() antlr.TerminalNode
-
 func (s *ClassFieldContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
 
 func (s *ClassFieldContext) Type_() ITypeContext
-
-func (s *ClassFieldContext) VAR() antlr.TerminalNode
 
 type ClassMemberContext struct {
 	antlr.BaseParserRuleContext
@@ -1644,6 +1646,8 @@ func (s *FuncDeclContext) ParamList() IParamListContext
 
 func (s *FuncDeclContext) RPAREN() antlr.TerminalNode
 
+func (s *FuncDeclContext) Receiver() IReceiverContext
+
 func (s *FuncDeclContext) ReturnType() IReturnTypeContext
 
 func (s *FuncDeclContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
@@ -1768,6 +1772,7 @@ type IAnonFuncExprContext interface {
 	RPAREN() antlr.TerminalNode
 	Block() IBlockContext
 	ParamList() IParamListContext
+	FuncQualifier() IFuncQualifierContext
 	ReturnType() IReturnTypeContext
 
 	// IsAnonFuncExprContext differentiates from other interfaces.
@@ -1820,12 +1825,12 @@ type IArrayConstructExprContext interface {
 	RBRACKET() antlr.TerminalNode
 	LPAREN() antlr.TerminalNode
 	RPAREN() antlr.TerminalNode
+	AllExpr() []IExprContext
+	Expr(i int) IExprContext
 	AllID() []antlr.TerminalNode
 	ID(i int) antlr.TerminalNode
 	AllCOLON() []antlr.TerminalNode
 	COLON(i int) antlr.TerminalNode
-	AllExpr() []IExprContext
-	Expr(i int) IExprContext
 	COMMA() antlr.TerminalNode
 
 	// IsArrayConstructExprContext differentiates from other interfaces.
@@ -2014,8 +2019,6 @@ type IClassFieldContext interface {
 	ID() antlr.TerminalNode
 	COLON() antlr.TerminalNode
 	Type_() ITypeContext
-	LET() antlr.TerminalNode
-	VAR() antlr.TerminalNode
 
 	// IsClassFieldContext differentiates from other interfaces.
 	IsClassFieldContext()
@@ -2407,6 +2410,7 @@ type IFuncDeclContext interface {
 	LPAREN() antlr.TerminalNode
 	RPAREN() antlr.TerminalNode
 	Block() IBlockContext
+	Receiver() IReceiverContext
 	GenericParams() IGenericParamsContext
 	ParamList() IParamListContext
 	FuncQualifier() IFuncQualifierContext
@@ -2758,6 +2762,25 @@ type IPrimitiveTypeContext interface {
 }
     IPrimitiveTypeContext is an interface to support dynamic dispatch.
 
+type IReceiverContext interface {
+	antlr.ParserRuleContext
+
+	// GetParser returns the parser.
+	GetParser() antlr.Parser
+
+	// Getter signatures
+	LPAREN() antlr.TerminalNode
+	ID() antlr.TerminalNode
+	COLON() antlr.TerminalNode
+	Type_() ITypeContext
+	RPAREN() antlr.TerminalNode
+	MUT() antlr.TerminalNode
+
+	// IsReceiverContext differentiates from other interfaces.
+	IsReceiverContext()
+}
+    IReceiverContext is an interface to support dynamic dispatch.
+
 type IReturnStmtContext interface {
 	antlr.ParserRuleContext
 
@@ -2844,8 +2867,6 @@ type IStructFieldContext interface {
 	ID() antlr.TerminalNode
 	COLON() antlr.TerminalNode
 	Type_() ITypeContext
-	LET() antlr.TerminalNode
-	VAR() antlr.TerminalNode
 
 	// IsStructFieldContext differentiates from other interfaces.
 	IsStructFieldContext()
@@ -3057,7 +3078,7 @@ type ITypeContext interface {
 	FUNC() antlr.TerminalNode
 	FuncTypeParamList() IFuncTypeParamListContext
 	ARROW() antlr.TerminalNode
-	CHANNEL() antlr.TerminalNode
+	CHAN() antlr.TerminalNode
 	ANY() antlr.TerminalNode
 	MUT() antlr.TerminalNode
 	VOID() antlr.TerminalNode
@@ -3568,6 +3589,37 @@ func (s *PrimitiveTypeContext) UINT8() antlr.TerminalNode
 
 func (s *PrimitiveTypeContext) VOID() antlr.TerminalNode
 
+type ReceiverContext struct {
+	antlr.BaseParserRuleContext
+	// Has unexported fields.
+}
+
+func NewEmptyReceiverContext() *ReceiverContext
+
+func NewReceiverContext(parser antlr.Parser, parent antlr.ParserRuleContext, invokingState int) *ReceiverContext
+
+func (s *ReceiverContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
+
+func (s *ReceiverContext) COLON() antlr.TerminalNode
+
+func (s *ReceiverContext) GetParser() antlr.Parser
+
+func (s *ReceiverContext) GetRuleContext() antlr.RuleContext
+
+func (s *ReceiverContext) ID() antlr.TerminalNode
+
+func (*ReceiverContext) IsReceiverContext()
+
+func (s *ReceiverContext) LPAREN() antlr.TerminalNode
+
+func (s *ReceiverContext) MUT() antlr.TerminalNode
+
+func (s *ReceiverContext) RPAREN() antlr.TerminalNode
+
+func (s *ReceiverContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
+
+func (s *ReceiverContext) Type_() ITypeContext
+
 type ReturnStmtContext struct {
 	antlr.BaseParserRuleContext
 	// Has unexported fields.
@@ -3713,13 +3765,9 @@ func (s *StructFieldContext) ID() antlr.TerminalNode
 
 func (*StructFieldContext) IsStructFieldContext()
 
-func (s *StructFieldContext) LET() antlr.TerminalNode
-
 func (s *StructFieldContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
 
 func (s *StructFieldContext) Type_() ITypeContext
-
-func (s *StructFieldContext) VAR() antlr.TerminalNode
 
 type StructFieldInitContext struct {
 	antlr.BaseParserRuleContext
@@ -4032,7 +4080,7 @@ func (s *TypeContext) AllTupleTypeElem() []ITupleTypeElemContext
 
 func (s *TypeContext) AllType_() []ITypeContext
 
-func (s *TypeContext) CHANNEL() antlr.TerminalNode
+func (s *TypeContext) CHAN() antlr.TerminalNode
 
 func (s *TypeContext) COLON() antlr.TerminalNode
 
@@ -4264,6 +4312,8 @@ func (p *VertexParser) Primary() (localctx IPrimaryContext)
 
 func (p *VertexParser) PrimitiveType() (localctx IPrimitiveTypeContext)
 
+func (p *VertexParser) Receiver() (localctx IReceiverContext)
+
 func (p *VertexParser) ReturnStmt() (localctx IReturnStmtContext)
 
 func (p *VertexParser) ReturnType() (localctx IReturnTypeContext)
@@ -4329,6 +4379,9 @@ type VertexParserVisitor interface {
 
 	// Visit a parse tree produced by VertexParser#funcDecl.
 	VisitFuncDecl(ctx *FuncDeclContext) interface{}
+
+	// Visit a parse tree produced by VertexParser#receiver.
+	VisitReceiver(ctx *ReceiverContext) interface{}
 
 	// Visit a parse tree produced by VertexParser#genericParams.
 	VisitGenericParams(ctx *GenericParamsContext) interface{}

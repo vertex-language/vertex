@@ -1,5 +1,5 @@
 // VertexLexer.g4
-// Vertex Language — Specification 1.9
+// Vertex Language — Specification 2.0
 //
 // Tokenisation only. All semantic constraints are backend responsibilities.
 
@@ -10,7 +10,7 @@ lexer grammar VertexLexer;
 // ═══════════════════════════════════════════════════════════════════
 
 BLOCK_COMMENT : '/*' .*? '*/'  -> skip ;
-LINE_COMMENT  : '//' ~[\r\n]*  -> skip ;
+LINE_COMMENT  : '//' ~[\r\n]* -> skip ;
 
 // ═══════════════════════════════════════════════════════════════════
 // Keywords — must appear before ID so maximal-munch picks them up
@@ -51,9 +51,14 @@ THREAD      : 'thread'      ;
 PROCESS     : 'process'     ;
 GPU         : 'gpu'         ;
 
+// Concurrency
+// ← 2.0: 'chan' replaces 'channel' as the type-annotation keyword (§41).
+//        'channel' is no longer a reserved word — it falls through to ID
+//        so that .channel() parses naturally as a postfix method call.
+CHAN        : 'chan'         ;
+
 // Pointer / FFI
 ANY         : 'any'         ;
-CHANNEL     : 'channel'     ;
 OPAQUE      : 'opaque'      ;
 
 // Result type vocabulary — reserved; backend enforces usage context
@@ -138,6 +143,7 @@ MINUS   : '-' ;
 STAR    : '*' ;
 SLASH   : '/' ;
 PERCENT : '%' ;
+
 // AMP is bitwise-AND infix AND the mut-param address-of prefix (&var).
 // The parser distinguishes by syntactic position.
 AMP     : '&' ;
@@ -163,6 +169,7 @@ RBRACKET  : ']' ;
 COLON     : ':' ;
 COMMA     : ',' ;
 DOT       : '.' ;
+
 // Semicolons are silently discarded; they are not statement terminators.
 SEMICOLON : ';' -> skip ;
 

@@ -141,6 +141,21 @@ func (cg *CodeGen) genFuncBody(fi *funcInfo) {
 		frameAllocs: make(map[string]int32),
 	}
 
+	// ← 2.0: Process the receiver block first, treating it as parameter 0.
+	if rec := ctx.Receiver(); rec != nil {
+		pname := rec.ID().GetText()
+		ptype := ResolveType(rec.Type_(), cg.scope)
+		localIdx := fg.newLocal(ptype)
+		fg.paramCount++
+		fnScope.Define(&Symbol{
+			Name:     pname,
+			Kind:     SymParam,
+			Type:     ptype,
+			LocalIdx: localIdx,
+			Mutable:  rec.MUT() != nil,
+		})
+	}
+
 	if pl := ctx.ParamList(); pl != nil {
 		for _, p := range pl.AllParam() {
 			pname := p.ID().GetText()

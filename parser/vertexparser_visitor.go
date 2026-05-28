@@ -29,6 +29,9 @@ type VertexParserVisitor interface {
 	// Visit a parse tree produced by VertexParser#funcDecl.
 	VisitFuncDecl(ctx *FuncDeclContext) interface{}
 
+	// Visit a parse tree produced by VertexParser#receiver.
+	VisitReceiver(ctx *ReceiverContext) interface{}
+
 	// Visit a parse tree produced by VertexParser#genericParams.
 	VisitGenericParams(ctx *GenericParamsContext) interface{}
 

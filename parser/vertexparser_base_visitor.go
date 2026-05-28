@@ -36,6 +36,10 @@ func (v *BaseVertexParserVisitor) VisitFuncDecl(ctx *FuncDeclContext) interface{
 	return v.VisitChildren(ctx)
 }
 
+func (v *BaseVertexParserVisitor) VisitReceiver(ctx *ReceiverContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BaseVertexParserVisitor) VisitGenericParams(ctx *GenericParamsContext) interface{} {
 	return v.VisitChildren(ctx)
 }
