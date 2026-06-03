@@ -3,212 +3,41 @@
   "name": "Vertex",
   "scopeName": "source.vtx",
   "fileTypes": ["vs"],
-
   "patterns": [
-    { "include": "#comments"          },
-    { "include": "#strings"           },
-    { "include": "#numeric-literals"  },
-    { "include": "#language-constants"},
-    { "include": "#declaration-names" },
-    { "include": "#postfix-intrinsics"},
-    { "include": "#keywords"          },
-    { "include": "#primitive-types"   },
-    { "include": "#special-types"     },
-    { "include": "#operators"         }
+    { "include": "#build_tag" },
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#result_types" },
+    { "include": "#boolean_nil" },
+    { "include": "#numeric_literals" },
+    { "include": "#string_multiline" },
+    { "include": "#string_literal" },
+    { "include": "#func_decl" },
+    { "include": "#receiver_decl" },
+    { "include": "#type_annotations" },
+    { "include": "#asm_block" },
+    { "include": "#postfix_intrinsics" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
   ],
-
   "repository": {
+
+    "build_tag": {
+      "comment": "§45 — build <tag> file-level directive",
+      "match": "^\\s*(build)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*$",
+      "captures": {
+        "1": { "name": "keyword.other.build.vertex" },
+        "2": { "name": "entity.name.tag.build.vertex" }
+      }
+    },
 
     "comments": {
       "patterns": [
         {
-          "name": "comment.block.vertex",
-          "begin": "/\\*",
-          "end": "\\*/",
-          "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.vertex" } },
-          "endCaptures":   { "0": { "name": "punctuation.definition.comment.end.vertex"   } }
-        },
-        {
-          "name": "comment.line.double-slash.vertex",
-          "begin": "//",
-          "end": "$",
-          "beginCaptures": { "0": { "name": "punctuation.definition.comment.vertex" } }
-        }
-      ]
-    },
-
-    "strings": {
-      "patterns": [
-        {
-          "comment": "Raw backtick string — multiline, no escape processing",
-          "name": "string.quoted.other.raw.vertex",
-          "begin": "`",
-          "end": "`",
-          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.vertex" } },
-          "endCaptures":   { "0": { "name": "punctuation.definition.string.end.vertex"   } }
-        },
-        {
-          "comment": "Double-quoted string — single line, backslash escapes",
-          "name": "string.quoted.double.vertex",
-          "begin": "\"",
-          "end": "\"",
-          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.vertex" } },
-          "endCaptures":   { "0": { "name": "punctuation.definition.string.end.vertex"   } },
-          "patterns": [
-            {
-              "name": "constant.character.escape.vertex",
-              "match": "\\\\."
-            }
-          ]
-        }
-      ]
-    },
-
-    "numeric-literals": {
-      "patterns": [
-        {
-          "comment": "Hex float  — 0xFp2  0xC.3p0  0xFp-2",
-          "name": "constant.numeric.float.hex.vertex",
-          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*(\\.[0-9a-fA-F][0-9a-fA-F_]*)?[pP][+\\-]?[0-9][0-9_]*\\b"
-        },
-        {
-          "comment": "Hex integer — 0xFF  0xBadFace",
-          "name": "constant.numeric.integer.hex.vertex",
-          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b"
-        },
-        {
-          "comment": "Binary integer — 0b101010",
-          "name": "constant.numeric.integer.binary.vertex",
-          "match": "\\b0[bB][01][01_]*\\b"
-        },
-        {
-          "comment": "Octal integer — 0o52",
-          "name": "constant.numeric.integer.octal.vertex",
-          "match": "\\b0[oO][0-7][0-7_]*\\b"
-        },
-        {
-          "comment": "Decimal float with optional exponent — 3.14  1.25e-2",
-          "name": "constant.numeric.float.decimal.vertex",
-          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+\\-]?[0-9][0-9_]*)?\\b"
-        },
-        {
-          "comment": "Decimal float exponent only — 1e2  1E-2",
-          "name": "constant.numeric.float.decimal.vertex",
-          "match": "\\b[0-9][0-9_]*[eE][+\\-]?[0-9][0-9_]*\\b"
-        },
-        {
-          "comment": "Decimal integer — 42  1_000_000",
-          "name": "constant.numeric.integer.decimal.vertex",
-          "match": "\\b[0-9][0-9_]*\\b"
-        }
-      ]
-    },
-
-    "language-constants": {
-      "patterns": [
-        {
-          "name": "constant.language.boolean.vertex",
-          "match": "\\b(true|false)\\b"
-        },
-        {
-          "name": "constant.language.nil.vertex",
-          "match": "\\bnil\\b"
-        }
-      ]
-    },
-
-    "declaration-names": {
-      "comment": "Highlight the name that follows a declaration keyword. These patterns must come before the general keywords rule so the name capture fires in context.",
-      "patterns": [
-        {
-          "comment": "Associated function — func (p: mut Point) methodName",
-          "match": "\\b(func)\\s+(\\()\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*(:)\\s*(mut\\s+)?([^)]+?)\\s*(\\))\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.declaration.function.vertex" },
-            "2": { "name": "punctuation.definition.parameters.begin.vertex" },
-            "3": { "name": "variable.parameter.receiver.vertex" },
-            "4": { "name": "punctuation.separator.type.vertex" },
-            "5": { "name": "storage.modifier.mut.vertex" },
-            "6": { "name": "entity.name.type.vertex" },
-            "7": { "name": "punctuation.definition.parameters.end.vertex" },
-            "8": { "name": "entity.name.function.vertex" }
-          }
-        },
-        {
-          "comment": "Named function — func foo",
-          "match": "\\b(func)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.declaration.function.vertex" },
-            "2": { "name": "entity.name.function.vertex"         }
-          }
-        },
-        {
-          "comment": "Struct or class declaration",
-          "match": "\\b(struct|class)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.declaration.type.vertex" },
-            "2": { "name": "entity.name.type.vertex"         }
-          }
-        },
-        {
-          "comment": "Enum declaration",
-          "match": "\\b(enum)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.declaration.type.vertex" },
-            "2": { "name": "entity.name.enum.vertex"         }
-          }
-        },
-        {
-          "comment": "Type alias — type FILE = any opaque",
-          "match": "\\b(type)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.declaration.type.vertex" },
-            "2": { "name": "entity.name.type.vertex"         }
-          }
-        },
-        {
-          "comment": "Package declaration",
-          "match": "\\b(package)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.control.import.vertex"   },
-            "2": { "name": "entity.name.namespace.vertex"    }
-          }
-        }
-      ]
-    },
-
-    "postfix-intrinsics": {
-      "comment": "Language-defined postfix intrinsics — always follow a dot. Matched before keywords to avoid the .any() vs any-type ambiguity.",
-      "patterns": [
-        {
-          "comment": "Execution postfixes: .await()  .spawn()  .dispatch()  .fork()",
-          "name": "support.function.builtin.execution.vertex",
-          "match": "\\.(await|spawn|dispatch|fork)(?=\\s*\\()"
-        },
-        {
-          "comment": "Lifetime postfixes: .new()  .delete()",
-          "name": "support.function.builtin.lifetime.vertex",
-          "match": "\\.(new|delete)(?=\\s*\\()"
-        },
-        {
-          "comment": "Error propagation: .try()",
-          "name": "support.function.builtin.result.vertex",
-          "match": "\\.try(?=\\s*\\()"
-        },
-        {
-          "comment": "Raw-pointer escape: .any()",
-          "name": "support.function.builtin.pointer.vertex",
-          "match": "\\.any(?=\\s*\\()"
-        },
-        {
-          "comment": "Channel construction: .channel()",
-          "name": "support.function.builtin.channel.vertex",
-          "match": "\\.channel(?=\\s*\\()"
-        },
-        {
-          "comment": "Type intrinsics: .sizeof()  .alignof()  .byteSize()",
-          "name": "support.function.builtin.type.vertex",
-          "match": "\\.(sizeof|alignof|byteSize)(?=\\s*\\()"
+          "comment": "Line comment",
+          "match": "//.*$",
+          "name": "comment.line.double-slash.vertex"
         }
       ]
     },
@@ -217,160 +46,376 @@
       "patterns": [
         {
           "comment": "Control flow",
-          "name": "keyword.control.vertex",
-          "match": "\\b(break|case|continue|default|defer|else|fallthrough|for|if|in|return|switch|while)\\b"
+          "match": "\\b(if|else|for|in|while|switch|case|default|return|break|continue|fallthrough|defer)\\b",
+          "name": "keyword.control.vertex"
         },
         {
-          "comment": "Storage keywords — binding kind",
-          "name": "storage.type.vertex",
-          "match": "\\b(let|var)\\b"
+          "comment": "Declaration keywords",
+          "match": "\\b(func|let|var|weak|struct|class|enum|type|import|package|build|asm)\\b",
+          "name": "keyword.declaration.vertex"
         },
         {
-          "comment": "Storage modifiers — weak (ref counting), shared (gpu)",
-          "name": "storage.modifier.vertex",
-          "match": "\\b(weak|shared)\\b"
+          "comment": "Concurrency qualifiers",
+          "match": "\\b(async|thread|process|gpu)\\b",
+          "name": "keyword.other.concurrency.vertex"
         },
         {
-          "comment": "Execution qualifiers — sit between param list and return arrow",
-          "name": "keyword.other.qualifier.vertex",
-          "match": "\\b(async|thread|process|gpu)\\b"
+          "comment": "Type-level keywords",
+          "match": "\\b(chan|map)\\b",
+          "name": "keyword.other.type.vertex"
         },
         {
-          "comment": "Mutability modifier",
-          "name": "storage.modifier.mut.vertex",
-          "match": "\\bmut\\b"
+          "comment": "const keyword — only valid in *const T position",
+          "match": "\\b(const)\\b",
+          "name": "keyword.other.const.vertex"
         },
         {
-          "comment": "Import path declaration",
-          "name": "keyword.control.import.vertex",
-          "match": "\\b(import|build)\\b"
-        },
-        {
-          "comment": "Declaration keywords when not followed by a name (anon func, func type, etc.)",
-          "name": "keyword.declaration.vertex",
-          "match": "\\b(func|struct|class|enum|type|package)\\b"
+          "comment": "Inline-asm constraint keywords",
+          "match": "\\b(inout|out|clobber)\\b",
+          "name": "keyword.other.asm-constraint.vertex"
         }
       ]
     },
 
-    "primitive-types": {
-      "comment": "Built-in primitive types — ordered longest to shortest to avoid partial matches",
-      "name": "support.type.primitive.vertex",
-      "match": "\\b(uint8|uint16|uint32|uint64|int8|int16|int32|int64|uint|int|float|double|bool|string|char|void)\\b"
-    },
-
-    "special-types": {
+    "result_types": {
+      "comment": "§38.3 — Result, Ok, Err are promoted keywords",
       "patterns": [
         {
-          "comment": "Channel type annotation keyword (§41)",
-          "name": "support.type.channel.vertex",
-          "match": "\\bchan\\b"
+          "match": "\\b(Result)\\s*\\(",
+          "captures": {
+            "1": { "name": "keyword.other.result.vertex" }
+          }
         },
         {
-          "comment": "Pointer / FFI type keywords",
-          "name": "support.type.pointer.vertex",
-          "match": "\\b(any|opaque)\\b"
-        },
-        {
-          "comment": "Result type",
-          "name": "support.type.result.vertex",
-          "match": "\\bResult\\b"
-        },
-        {
-          "comment": "Ok / Err variant labels",
-          "name": "support.constant.result.vertex",
-          "match": "\\b(Ok|Err)\\b"
+          "match": "\\b(Ok|Err)\\b",
+          "name": "keyword.other.result-variant.vertex"
         }
       ]
+    },
+
+    "boolean_nil": {
+      "match": "\\b(true|false|nil)\\b",
+      "name": "constant.language.vertex"
+    },
+
+    "numeric_literals": {
+      "patterns": [
+        {
+          "comment": "Hex float — must come before hex int (maximal munch)",
+          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*(\\.[0-9a-fA-F]+)?[pP][+\\-]?[0-9]+\\b",
+          "name": "constant.numeric.float.hex.vertex"
+        },
+        {
+          "comment": "Hex integer",
+          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b",
+          "name": "constant.numeric.integer.hex.vertex"
+        },
+        {
+          "comment": "Octal integer",
+          "match": "\\b0[oO][0-7][0-7_]*\\b",
+          "name": "constant.numeric.integer.octal.vertex"
+        },
+        {
+          "comment": "Binary integer",
+          "match": "\\b0[bB][01][01_]*\\b",
+          "name": "constant.numeric.integer.binary.vertex"
+        },
+        {
+          "comment": "Decimal float with fraction and optional exponent",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+\\-]?[0-9]+)?\\b",
+          "name": "constant.numeric.float.decimal.vertex"
+        },
+        {
+          "comment": "Decimal float with exponent only (no dot)",
+          "match": "\\b[0-9][0-9_]*[eE][+\\-]?[0-9]+\\b",
+          "name": "constant.numeric.float.decimal.vertex"
+        },
+        {
+          "comment": "Decimal integer",
+          "match": "\\b[0-9][0-9_]*\\b",
+          "name": "constant.numeric.integer.decimal.vertex"
+        }
+      ]
+    },
+
+    "string_multiline": {
+      "comment": "§3 — backtick multiline string, no escape processing",
+      "begin": "`",
+      "end": "`",
+      "name": "string.quoted.backtick.vertex"
+    },
+
+    "string_literal": {
+      "comment": "§1 — double-quoted string / char literal",
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.vertex",
+      "patterns": [
+        {
+          "match": "\\\\[nrtbf\"\\\\]",
+          "name": "constant.character.escape.vertex"
+        },
+        {
+          "match": "\\\\.",
+          "name": "invalid.illegal.escape.vertex"
+        }
+      ]
+    },
+
+    "func_decl": {
+      "comment": "Named function declaration — captures qualifier, name, generic params",
+      "patterns": [
+        {
+          "comment": "func with receiver — func (recv: Type) name<T>(...)",
+          "match": "\\b(func)\\b",
+          "name": "keyword.declaration.func.vertex"
+        },
+        {
+          "comment": "Function name following closing paren of receiver or standalone func keyword",
+          "match": "(?<=\\))\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=<|\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.vertex" }
+          }
+        },
+        {
+          "comment": "Function name immediately after 'func ' with no receiver",
+          "match": "(?<=\\bfunc)\\s+(?!\\()([A-Za-z_][A-Za-z0-9_]*)\\s*(?=<|\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.vertex" }
+          }
+        },
+        {
+          "comment": "Generic type params <T, U>",
+          "match": "<([A-Za-z_][A-Za-z0-9_]*(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*)*)>",
+          "captures": {
+            "1": { "name": "entity.name.type.parameter.vertex" }
+          }
+        }
+      ]
+    },
+
+    "receiver_decl": {
+      "comment": "§28 — receiver block (recv: Type) or (recv: *Type)",
+      "begin": "(?<=\\bfunc)\\s*(\\()",
+      "end": "\\)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.receiver.begin.vertex" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.receiver.end.vertex" }
+      },
+      "patterns": [
+        {
+          "match": "([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
+          "captures": {
+            "1": { "name": "variable.parameter.receiver.vertex" },
+            "2": { "name": "punctuation.separator.colon.vertex" }
+          }
+        },
+        { "include": "#type_annotations" }
+      ]
+    },
+
+    "type_annotations": {
+      "comment": "Type expressions in colon positions and return arrows",
+      "patterns": [
+        {
+          "comment": "Return arrow ->",
+          "match": "->",
+          "name": "punctuation.separator.arrow.vertex"
+        },
+        {
+          "comment": "Pointer type with optional const",
+          "match": "\\*(const\\s+)?",
+          "captures": {
+            "0": { "name": "keyword.operator.pointer.vertex" },
+            "1": { "name": "keyword.other.const.vertex" }
+          }
+        },
+        {
+          "comment": "Nullable suffix ?",
+          "match": "(?<=[A-Za-z0-9_\\]\\)])\\?",
+          "name": "keyword.operator.optional.vertex"
+        },
+        {
+          "comment": "Built-in scalar types",
+          "match": "\\b(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|float|float64|bool|char|string|void)\\b",
+          "name": "support.type.primitive.vertex"
+        },
+        {
+          "comment": "Result type keyword in type position",
+          "match": "\\b(Result)\\b",
+          "name": "support.type.result.vertex"
+        }
+      ]
+    },
+
+    "asm_block": {
+      "comment": "§47 — asm() expression",
+      "begin": "\\b(asm)\\s*(\\()",
+      "end": "\\)",
+      "beginCaptures": {
+        "1": { "name": "keyword.other.asm.vertex" },
+        "2": { "name": "punctuation.definition.asm.begin.vertex" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.asm.end.vertex" }
+      },
+      "patterns": [
+        {
+          "comment": "Instruction strings",
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.asm-instruction.vertex"
+        },
+        {
+          "comment": "Constraint keywords",
+          "match": "\\b(in|inout|out|clobber)\\b",
+          "name": "keyword.other.asm-constraint.vertex"
+        },
+        {
+          "comment": "Register name strings",
+          "match": "\"[^\"]*\"",
+          "name": "string.quoted.double.asm-register.vertex"
+        },
+        {
+          "include": "#identifiers"
+        }
+      ]
+    },
+
+    "postfix_intrinsics": {
+      "comment": "§36,§39–§43 — postfix execution / lifecycle methods",
+      "match": "\\.(?:await|spawn|fork|dispatch|channel|new|delete|try|send|receive|trySend|tryReceive|close|push|pop|shift|unshift|indexOf|includes|find|findIndex|sort|reverse|fill|map|filter|slice|concat|forEach|length|rawValue)\\b",
+      "name": "support.function.builtin.vertex"
     },
 
     "operators": {
-      "comment": "Longer / higher-precedence tokens must appear before any shorter prefix they share.",
       "patterns": [
         {
-          "comment": "Identity equality (§14) — must precede ==  !=",
-          "name": "keyword.operator.identity.vertex",
-          "match": "===|!=="
+          "comment": "Identity equality (class) — must precede ==",
+          "match": "===|!==",
+          "name": "keyword.operator.identity.vertex"
         },
         {
-          "comment": "Overflow arithmetic (§8) — must precede &  +  -  *",
-          "name": "keyword.operator.overflow.vertex",
-          "match": "&\\+|&-|&\\*"
+          "comment": "Overflow operators",
+          "match": "&\\+|&-|&\\*",
+          "name": "keyword.operator.overflow.vertex"
         },
         {
-          "comment": "Compound assignment (§6) — must precede =  +  -  * /  %",
-          "name": "keyword.operator.assignment.compound.vertex",
-          "match": "\\+=|-=|\\*=|/=|%="
+          "comment": "Nil coalescing",
+          "match": "\\?\\?",
+          "name": "keyword.operator.nil-coalescing.vertex"
         },
         {
-          "comment": "Logical AND / OR (§10) — must precede &  |",
-          "name": "keyword.operator.logical.vertex",
-          "match": "&&|\\|\\|"
+          "comment": "Range operators",
+          "match": "\\.\\.\\.|\\.\\.<",
+          "name": "keyword.operator.range.vertex"
         },
         {
-          "comment": "Nil-coalescing (§13) — must precede ?",
-          "name": "keyword.operator.nil-coalescing.vertex",
-          "match": "\\?\\?"
+          "comment": "Comparison operators",
+          "match": "==|!=|<=|>=|<|>",
+          "name": "keyword.operator.comparison.vertex"
         },
         {
-          "comment": "Equality (§9) — must precede = and !",
-          "name": "keyword.operator.comparison.vertex",
-          "match": "==|!="
+          "comment": "Logical operators",
+          "match": "&&|\\|\\||!",
+          "name": "keyword.operator.logical.vertex"
         },
         {
-          "comment": "Ordered comparison with equals (§9) — must precede > and <",
-          "name": "keyword.operator.comparison.vertex",
-          "match": ">=|<="
+          "comment": "Shift operators",
+          "match": "<<|>>",
+          "name": "keyword.operator.bitwise.shift.vertex"
         },
         {
-          "comment": "Bit-shift (§7) — must precede < and >",
-          "name": "keyword.operator.bitwise.shift.vertex",
-          "match": "<<|>>"
+          "comment": "Bitwise operators",
+          "match": "[&|^~]",
+          "name": "keyword.operator.bitwise.vertex"
         },
         {
-          "comment": "Range operators (§11) — ..<  and  ...",
-          "name": "keyword.operator.range.vertex",
-          "match": "\\.\\.<|\\.\\.\\.(?![a-zA-Z_])"
+          "comment": "Compound assignment operators",
+          "match": "\\+=|-=|\\*=|/=|%=",
+          "name": "keyword.operator.assignment.compound.vertex"
         },
         {
-          "comment": "Return-type arrow — must precede -",
-          "name": "keyword.operator.arrow.vertex",
-          "match": "->"
+          "comment": "Assignment",
+          "match": "(?<![=!<>])=(?!=)",
+          "name": "keyword.operator.assignment.vertex"
         },
         {
-          "comment": "Ordered comparison singles",
-          "name": "keyword.operator.comparison.vertex",
-          "match": "[<>]"
+          "comment": "Arithmetic operators",
+          "match": "[+\\-*/%]",
+          "name": "keyword.operator.arithmetic.vertex"
         },
         {
-          "comment": "Logical NOT",
-          "name": "keyword.operator.logical.not.vertex",
-          "match": "!"
+          "comment": "Address-of",
+          "match": "&(?=[A-Za-z_])",
+          "name": "keyword.operator.address-of.vertex"
         },
         {
-          "comment": "Bitwise AND / address-of prefix (&var)",
-          "name": "keyword.operator.bitwise.vertex",
-          "match": "&"
+          "comment": "Ternary operator characters",
+          "match": "(?<![?])\\?(?![?])|(?<!:):(?!:)",
+          "name": "keyword.operator.ternary.vertex"
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.dot.vertex"
         },
         {
-          "comment": "Bitwise OR  XOR  NOT",
-          "name": "keyword.operator.bitwise.vertex",
-          "match": "[|^~]"
+          "match": ",",
+          "name": "punctuation.separator.comma.vertex"
         },
         {
-          "comment": "Arithmetic",
-          "name": "keyword.operator.arithmetic.vertex",
-          "match": "[+\\-*/%]"
+          "match": ":",
+          "name": "punctuation.separator.colon.vertex"
         },
         {
-          "comment": "Assignment — matched last so compound forms are not re-matched",
-          "name": "keyword.operator.assignment.vertex",
-          "match": "="
+          "match": ";",
+          "name": "punctuation.terminator.vertex"
         },
         {
-          "comment": "Optional / ternary condition marker",
-          "name": "keyword.operator.optional.vertex",
-          "match": "\\?"
+          "match": "\\{",
+          "name": "punctuation.definition.block.begin.vertex"
+        },
+        {
+          "match": "\\}",
+          "name": "punctuation.definition.block.end.vertex"
+        },
+        {
+          "match": "\\(",
+          "name": "punctuation.definition.group.begin.vertex"
+        },
+        {
+          "match": "\\)",
+          "name": "punctuation.definition.group.end.vertex"
+        },
+        {
+          "match": "\\[",
+          "name": "punctuation.definition.array.begin.vertex"
+        },
+        {
+          "match": "\\]",
+          "name": "punctuation.definition.array.end.vertex"
+        }
+      ]
+    },
+
+    "identifiers": {
+      "patterns": [
+        {
+          "comment": "Type names — PascalCase heuristic",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.vertex"
+        },
+        {
+          "comment": "General identifier",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b",
+          "name": "variable.other.vertex"
         }
       ]
     }

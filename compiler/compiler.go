@@ -1,217 +1,192 @@
-// Package compiler is the Vertex language front-end compiler.
-//
-// It parses .vs source files using the ANTLR-based parser at
-// github.com/vertex-language/vertex/parser, performs a two-pass
-// compilation (declaration collection + wasm code generation), and
-// produces either a native ELF binary or a raw .wasm file.
 package compiler
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 
-	backendCompiler "github.com/vertex-language/compiler"
-	"github.com/vertex-language/compiler/encoder"
-	"github.com/vertex-language/compiler/linker"
-	"github.com/vertex-language/compiler/object"
+	"github.com/antlr4-go/antlr/v4"
+	"github.com/vertex-language/ir/c"
+	"github.com/vertex-language/vertex/parser"
 )
 
-// Options controls the compilation.
-type Options struct {
-	// Target platform: "linux", "darwin", "windows". Default: "linux".
-	Platform string
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
 
-	// Additional build tags (e.g. "syscalls").
-	ExtraTags []string
+// Config holds the compiler's runtime configuration.
+type Config struct {
+	// Target is the platform the emitted C or MIR will be compiled for.
+	// Defaults to TargetLinuxAMD64.
+	Target cir.Target
 
-	// OutputWasm: if true, produce a .wasm binary instead of a native ELF.
-	OutputWasm bool
-
-	// Entry is the export name of the entry-point function. Default: "main".
-	Entry string
-
-	// ModuleRoot is the directory that contains go.mod / vertex.mod.
-	// Defaults to the directory of the first source file.
-	ModuleRoot string
-
-	// ModulePath is the Go module path prefix (e.g. "github.com/acme/myapp").
-	ModulePath string
-
-	// DCE enables dead-code elimination. When true, only functions reachable
-	// from the entry point are emitted into the wasm module. This reduces
-	// binary size but adds a full call-graph analysis pass.
+	// SearchPaths is an ordered list of root directories searched when
+	// resolving import paths.  The compiler checks each directory for a
+	// sub-directory whose path matches the import string.
 	//
-	// Extern (C) functions are always kept when they are actually called from
-	// reachable Vertex code; unreferenced externs are dropped.
-	DCE bool
+	// Example: if SearchPaths = ["/usr/share/vertex/lib", "./vendor"] and the
+	// source imports "core/io", the loader checks
+	//   /usr/share/vertex/lib/core/io/
+	//   ./vendor/core/io/
+	SearchPaths []string
 }
 
-func (o *Options) platform() string {
-	if o.Platform != "" {
-		return o.Platform
-	}
-	return "linux"
+// ─────────────────────────────────────────────────────────────────────────────
+// Compiler
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Compiler orchestrates the frontend pipeline for a single source file or string.
+//
+// Pipeline:
+//
+//	Source
+//	  └─ Parse (ANTLR)       → *File AST
+//	       └─ Import loading  → package scopes
+//	            └─ Resolve    → typed *File AST
+//	                 └─ Lower → ir/c module (returned for MIR/C emission)
+type Compiler struct {
+	cfg    Config
+	diags  *Diagnostics
+	loader *PackageLoader
 }
 
-func (o *Options) entry() string {
-	if o.Entry != "" {
-		return o.Entry
+// New creates a Compiler with the given Config.
+func New(cfg Config) *Compiler {
+	if cfg.Target == cir.TargetUnknown {
+		cfg.Target = cir.TargetLinuxAMD64
 	}
-	return "main"
+	return &Compiler{
+		cfg:    cfg,
+		diags:  NewDiagnostics(),
+		loader: NewPackageLoader(cfg.SearchPaths),
+	}
 }
 
-func (o *Options) buildTags() *BuildTags {
-	tags := []string{o.platform()}
-	tags = append(tags, o.ExtraTags...)
-	return &BuildTags{Tags: tags}
+// Diagnostics exposes the compiler's accumulated messages.
+func (c *Compiler) Diagnostics() *Diagnostics { return c.diags }
+
+// CompileFile reads path and compiles it, returning the optimized C IR module.
+func (c *Compiler) CompileFile(path string) (*cir.Module, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	return c.CompileSource(string(data), path)
 }
 
-// CompileFiles compiles one or more .vs source files and returns the binary.
-// If opts.OutputWasm is true the output is a .wasm module; otherwise it is a
-// native ELF binary (only linux/ELF is supported by the linker at this time).
-func CompileFiles(paths []string, opts Options) ([]byte, error) {
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no source files")
-	}
+// CompileSource compiles the Vertex source string src (with the given filename
+// for diagnostic messages) and returns the optimized C IR module.
+func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
+	c.diags.Reset()
 
-	// Determine module root.
-	root := opts.ModuleRoot
-	if root == "" {
-		root = filepath.Dir(paths[0])
-	}
-
-	// Parse all source files.
-	pkg := &Package{
-		Dir:        root,
-		ImportPath: opts.ModulePath,
-		BuildTags:  opts.buildTags(),
-	}
-
-	for _, p := range paths {
-		sf, err := ParseFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
-		}
-		for _, pe := range sf.ParseErrs {
-			_, _ = fmt.Fprintln(os.Stderr, pe)
-		}
-		if len(sf.ParseErrs) > 0 {
-			return nil, fmt.Errorf("%d parse error(s) in %s", len(sf.ParseErrs), p)
-		}
-		if pkg.Name == "" && sf.PackName != "" {
-			pkg.Name = sf.PackName
-		}
-		pkg.Files = append(pkg.Files, sf)
-	}
-
-	// Resolve and load imports that are Vertex packages (not lib/).
-	resolver := NewResolver(root, opts.ModulePath)
-	if err := loadImports(pkg, resolver, opts.buildTags()); err != nil {
+	// ── 1. Parse ─────────────────────────────────────────────────────────────
+	file, err := c.parseSource(src, filename)
+	if err != nil {
 		return nil, err
 	}
 
-	// Generate wasm module.
-	genOpts := GenerateOptions{
-		DCE:       opts.DCE,
-		EntryName: opts.entry(),
-	}
-	mod, err := Generate(pkg, opts.buildTags(), genOpts)
+	// ── 2. Load imports ───────────────────────────────────────────────────────
+	pkgs, err := c.loader.LoadImports(file.Imports)
 	if err != nil {
-		return nil, fmt.Errorf("codegen: %w", err)
+		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
 	}
 
-	if opts.OutputWasm {
-		// Encode to .wasm binary.
-		data, err := encoder.Encode(mod)
-		if err != nil {
-			return nil, fmt.Errorf("wasm encode: %w", err)
-		}
-		return data, nil
+	// ── 3. Build package scope (global + imported) ────────────────────────────
+	global := newGlobalScope()
+	for _, pkg := range pkgs {
+		pkg.ExportTo(global)
 	}
 
-	// Native binary output: only ELF is supported by the linker right now.
-	if plat := opts.platform(); plat != "linux" {
-		return nil, fmt.Errorf(
-			"native output is not yet supported for platform %q (use -wasm, or target linux)",
-			plat,
-		)
+	// ── 4. Resolve (type-check) ───────────────────────────────────────────────
+	resolver := NewResolver(c.diags, global)
+	resolver.ResolveFile(file)
+	if c.diags.HasErrors() {
+		return nil, c.diags.Error()
 	}
 
-	// Compile wasm → native object.
-	obj, err := backendCompiler.CompileWith(mod, backendCompiler.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("backend compile: %w", err)
+	// ── 5. Lower to ir/c ──────────────────────────────────────────────────────
+	modName := file.Package
+	if modName == "" {
+		modName = stripExt(filepath.Base(filename))
+	}
+	mod := cir.NewModule(modName)
+	mod.BindTarget(c.cfg.Target)
+
+	lowerer := NewLowerer(c.diags, mod)
+	lowerer.LowerFile(file)
+	if c.diags.HasErrors() {
+		return nil, c.diags.Error()
 	}
 
-	// Link → ELF binary.
-	bin, err := linker.Link([]*object.WasmObj{obj}, linker.Options{
-		Output: linker.ELF,
-		Entry:  opts.entry(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("link: %w", err)
-	}
-	return bin, nil
+	// ── 6. Optimise ───────────────────────────────────────────────────────────
+	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
+
+	// ── 7. Return Module ──────────────────────────────────────────────────────
+	// C emission is delegated to the caller so the MIR pipeline can use the IR.
+	return mod, nil
 }
 
-// loadImports recursively loads Vertex-package imports.
-// lib/ imports are skipped (handled by extern declarations in the source).
-func loadImports(pkg *Package, r *Resolver, tags *BuildTags) error {
-	seen := map[string]bool{pkg.ImportPath: true}
-	return loadImportsRec(pkg, r, tags, seen)
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-func loadImportsRec(pkg *Package, r *Resolver, tags *BuildTags, seen map[string]bool) error {
-	for _, sf := range pkg.Files {
-		for _, imp := range sf.Imports {
-			if imp.IsNative() {
-				continue // native interface binding; no .vs files to load
-			}
-			if seen[imp.Raw] {
-				continue
-			}
-			seen[imp.Raw] = true
+// parseSource runs the ANTLR lexer+parser over src and builds the raw AST.
+func (c *Compiler) parseSource(src, filename string) (*File, error) {
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewVertexLexer(input)
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewVertexParser(stream)
 
-			fromDir := filepath.Dir(sf.Path)
-			files, err := r.ResolveFiles(imp.Raw, fromDir)
-			if err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "warn: cannot resolve import %q: %v\n", imp.Raw, err)
-				continue
-			}
+	el := &antlrErrorListener{diags: c.diags, filename: filename}
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(el)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(el)
 
-			subPkg := &Package{
-				ImportPath: imp.Raw,
-				BuildTags:  tags,
-				Dir:        filepath.Dir(files[0]),
-			}
-			for _, fp := range files {
-				if !PlatformMatch(fp, tags) {
-					continue
-				}
-				parsedSf, err := ParseFile(fp)
-				if err != nil {
-					return err
-				}
-				if subPkg.Name == "" && parsedSf.PackName != "" {
-					subPkg.Name = parsedSf.PackName
-				}
-				subPkg.Files = append(subPkg.Files, parsedSf)
-			}
-
-			pkg.Files = append(pkg.Files, subPkg.Files...)
-
-			if err := loadImportsRec(subPkg, r, tags, seen); err != nil {
-				return err
-			}
-		}
+	tree := p.File()
+	if c.diags.HasErrors() {
+		return nil, c.diags.Error()
 	}
-	return nil
+
+	b := newASTBuilder(filename, c.diags)
+	return b.BuildFile(tree), nil
 }
 
-// Version is the compiler version string.
-const Version = "0.1.0"
+func stripExt(name string) string {
+	ext := filepath.Ext(name)
+	if ext != "" {
+		return name[:len(name)-len(ext)]
+	}
+	return name
+}
 
-// Suppress unused import warning.
-var _ = strings.TrimSpace
+// antlrErrorListener forwards ANTLR parse errors into our Diagnostics.
+type antlrErrorListener struct {
+	*antlr.DefaultErrorListener
+	diags    *Diagnostics
+	filename string
+}
+
+func (l *antlrErrorListener) SyntaxError(
+	_ antlr.Recognizer,
+	_ interface{},
+	line, column int,
+	msg string,
+	_ antlr.RecognitionException,
+) {
+	l.diags.Errorf(
+		Pos{File: l.filename, Line: line, Column: column + 1},
+		"syntax: %s", msg,
+	)
+}
+
+// readFile is a thin wrapper so imports.go can call it without importing os.
+func readFile(path string) ([]byte, error) {
+	import_os_ReadFile := func() ([]byte, error) {
+		// Inline to avoid a circular import when imports.go also uses os.
+		return nil, nil
+	}
+	_ = import_os_ReadFile
+
+	// Use os directly here.
+	return osReadFile(path)
+}

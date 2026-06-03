@@ -24,12 +24,12 @@ build linux
 import "lib/c"               // 1. import path — emission strategy
 
 class C : c {                // 2. class — signature manifest
-    func fopen(path: any char, mode: any char) -> any opaque?
-    func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
-    func fclose(stream: mut any opaque) -> int
-    func malloc(size: int) -> any void?
-    func free(ptr: mut any void)
-    func printf(fmt: any char, ...) -> int
+    func fopen(path: *const char, mode: *const char) -> *void?
+    func fwrite(ptr: *const void, size: uint64, count: uint64, stream: *void) -> uint64
+    func fclose(stream: *void) -> int32
+    func malloc(size: uint64) -> *void?
+    func free(ptr: *void)
+    func printf(fmt: *const char, ...) -> int32
 }
 ```
 
@@ -65,48 +65,62 @@ No build tag modifiers, no extern qualifiers, no extra annotations needed.
 
 ## 4. Pointer Model
 
-`any` in type position declares a raw pointer. `mut any` declares a mutable
-raw pointer. These are the only way to express pointer types in Vertex —
-they appear in function signatures, struct fields, and type aliases.
+Vertex's pointer model maps directly to C. `*T` is a raw mutable pointer;
+`*const T` is a read-only pointer. Both collapse to the same C pointer at
+runtime — `const` is a compile-time annotation only.
 
-| Vertex                 | C equivalent    |
-|------------------------|-----------------|
-| `name: any T`          | `const T*`      |
-| `name: mut any T`      | `T*`            |
-| `name: any void`       | `const void*`   |
-| `name: mut any void`   | `void*`         |
-| `name: any char`       | `const char*`   |
-| `name: any opaque`     | `const struct*` |
-| `name: mut any opaque` | `struct*`       |
+| Vertex              | C equivalent  |
+|---------------------|---------------|
+| `name: *const T`    | `const T*`    |
+| `name: *T`          | `T*`          |
+| `name: *const void` | `const void*` |
+| `name: *void`       | `void*`       |
+| `name: *const char` | `const char*` |
+| `name: *char`       | `char*`       |
+| `name: *T?`         | nullable `T*` |
+| `name: **T`         | `T**`         |
+
+`let`/`var` controls whether the binding can be rebound.
+`*const` controls whether the pointed-to data can be modified.
+These are orthogonal — all four combinations are valid.
+
+| Vertex               | C                | Binding | Data      |
+|----------------------|------------------|---------|-----------|
+| `let name: *const T` | `const T* const` | fixed   | read-only |
+| `let name: *T`       | `T* const`       | fixed   | mutable   |
+| `var name: *const T` | `const T*`       | rebind  | read-only |
+| `var name: *T`       | `T*`             | rebind  | mutable   |
 
 ---
 
-## 5. `.any()` — Escape to Raw Pointer
+## 5. Passing Values to Native Functions
 
-`.any()` is a postfix escape — it steps outside Vertex's type system and
-returns the raw memory address of the value. It follows the same postfix
-convention as `.new()`, `.try()`, `.await()`, and `.dispatch()`.
+Because Vertex types lower directly to C types, most values reach native
+functions without any conversion. The two mechanisms are direct passing and
+`&` address-of.
 
-| Value            | `.any()` produces | C type          |
-|------------------|-------------------|-----------------|
-| `string`         | `const char*`     | `const char*`   |
-| `[T]`            | pointer to `T[0]` | `const T*`      |
-| `struct`         | `const struct*`   | `const struct*` |
-| `struct.field`   | pointer to field  | `const T*`      |
-| `class instance` | `const struct*`   | `const struct*` |
+**String literals** are `const char*` pointing into `.rodata`. They pass
+directly to `*const char` parameters — no operator needed.
 
-**Rules:**
+**`var` strings** (GString) expose a `.str` field of type `*const char` for
+passing to C string parameters.
 
-* `.any()` may be called on strings, arrays, structs, struct fields, and
-  class instances.
-* The returned pointer is valid only as long as the backing value is alive.
-  Passing it to a native call and then freeing the backing value is undefined
-  behavior.
-* For ref-counted instances (`.new()`), retain the owning reference for the
-  full duration of any native call that holds the pointer.
-* `.any()` is zero-cost — no allocation, no copy, no runtime overhead.
-* `.any()` does not appear in type position. Type-level pointer declarations
-  use the `any T` keyword form (`name: any char`, `name: mut any void`, etc.).
+**`&value`** returns the raw address of any value as a typed pointer. Zero
+cost — no allocation, no copy.
+
+| What you have           | How to pass to native | Pointer type    |
+|-------------------------|-----------------------|-----------------|
+| string literal          | pass directly         | `*const char`   |
+| `var s: string`         | `s.str`               | `*const char`   |
+| `var x: int32`          | `&x`                  | `*int32`        |
+| `var buf: [uint8]`      | `&buf` or `&buf[0]`   | `*uint8`        |
+| `var p: Point`          | `&p`                  | `*Point`        |
+| struct field `p.x`      | `&p.x`                | `*int32`        |
+
+The returned pointer is valid only while the backing value is alive. Passing
+it to a native call and then freeing the backing value is undefined behavior.
+For ref-counted instances (`.new()`), retain the owning reference for the
+full duration of any native call that holds the pointer.
 
 ---
 
@@ -123,9 +137,9 @@ SockaddrIn.alignof()   // alignment requirement in bytes
 Instance-level intrinsic for byte length of arrays:
 
 ```swift
-let vertices: [float] = [0.0, 0.5, 0.0]
-vertices.byteSize()    // len * sizeof(element) — for C byte-count arguments
-vertices.len           // element count
+var vertices: [float] = [0.0, 0.5, 0.0]
+vertices.byteSize()    // length * sizeof(element) — for C byte-count arguments
+vertices.length        // element count
 ```
 
 **Rules:**
@@ -139,9 +153,8 @@ vertices.len           // element count
 ## 7. Type Aliases
 
 ```swift
-type FILE    = any opaque
-type size_t  = uint64
-type errno_t = int
+type FILE   = *void
+type size_t = uint64
 ```
 
 **Rules:**
@@ -156,9 +169,9 @@ type errno_t = int
 
 ```swift
 class C : c {
-    func printf(fmt: any char, ...) -> int
-    func sprintf(buf: mut any char, fmt: any char, ...) -> int
-    func open(path: any char, flags: int, ...) -> int
+    func printf(fmt: *const char, ...) -> int32
+    func sprintf(buf: *char, fmt: *const char, ...) -> int32
+    func open(path: *const char, flags: int32, ...) -> int32
 }
 ```
 
@@ -179,9 +192,9 @@ owned by the import path.
 
 | Tag       | Meaning                          |
 |-----------|----------------------------------|
-| `linux`   | compile this file for linux      |
-| `darwin`  | compile this file for darwin     |
-| `windows` | compile this file for windows    |
+| `linux`   | compile this file for Linux      |
+| `darwin`  | compile this file for Darwin     |
+| `windows` | compile this file for Windows    |
 | `metal`   | compile this file for bare metal |
 
 ---
@@ -207,8 +220,8 @@ Native class instances are **zero-size compile-time dispatch surfaces**.
 The backend removes them entirely — no allocation, no runtime overhead.
 
 ```swift
-var c = libc.C()             // zero bytes at runtime
-c.printf("hello\n".any())    // emits direct linked call — instance vanishes
+var c = libc.C()          // zero bytes at runtime
+c.printf("hello\n")       // emits direct linked call — instance vanishes
 ```
 
 The instance exists only to give the developer a consistent, typed call
@@ -225,14 +238,16 @@ package libc
 build linux
 import "lib/c"
 
+type FILE = *void
+
 class C : c {
-    func fopen(path: any char, mode: any char) -> any opaque?
-    func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
-    func fread(ptr: mut any void, size: int, count: int, stream: mut any opaque) -> int
-    func fclose(stream: mut any opaque) -> int
-    func malloc(size: int) -> any void?
-    func free(ptr: mut any void)
-    func printf(fmt: any char, ...) -> int
+    func fopen(path: *const char, mode: *const char) -> FILE?
+    func fwrite(ptr: *const void, size: uint64, count: uint64, stream: FILE) -> uint64
+    func fread(ptr: *void, size: uint64, count: uint64, stream: FILE) -> uint64
+    func fclose(stream: FILE) -> int32
+    func malloc(size: uint64) -> *void?
+    func free(ptr: *void)
+    func printf(fmt: *const char, ...) -> int32
 }
 ```
 
@@ -242,12 +257,12 @@ time. Emits a standard linked call at each call site.
 Usage:
 ```swift
 var c = libc.C()
-let f = c.fopen("/tmp/out.bin".any(), "wb".any())
+let f = c.fopen("/tmp/out.bin", "wb")
 defer c.fclose(f)
 
-let data = [uint8](repeating: 0xFF, count: 256)
-c.fwrite(data.any(), 1, data.byteSize(), f)
-c.printf("wrote %d bytes\n".any(), data.len)
+var data = [uint8](repeating: 0xFF, count: 256)
+c.fwrite(&data, 1, data.byteSize(), f)
+c.printf("wrote %d bytes\n", data.length)
 ```
 
 ---
@@ -260,13 +275,13 @@ build linux
 import "linux/syscalls"
 
 class Syscalls : syscalls {
-    func open(path: any char, flags: int, mode: uint) -> int
-    func openat(dirfd: int, path: any char, flags: int, mode: uint) -> int
-    func openat2(dirfd: int, path: any char, how: any opaque, size: uint) -> int
-    func close(fd: int) -> int
-    func close_range(first: uint, last: uint, flags: uint) -> int
-    func read(fd: int, buf: mut any void, count: uint) -> int
-    func write(fd: int, buf: any void, count: uint) -> int
+    func open(path: *const char, flags: int32, mode: uint32) -> int32
+    func openat(dirfd: int32, path: *const char, flags: int32, mode: uint32) -> int32
+    func openat2(dirfd: int32, path: *const char, how: *const void, size: uint32) -> int32
+    func close(fd: int32) -> int32
+    func close_range(first: uint32, last: uint32, flags: uint32) -> int32
+    func read(fd: int32, buf: *void, count: uint64) -> int32
+    func write(fd: int32, buf: *const void, count: uint64) -> int32
 }
 ```
 
@@ -276,9 +291,9 @@ determines arg count, emits inline syscall instruction. No linker involved.
 Usage:
 ```swift
 var s = syscall2.Syscalls()
-let fd = s.open("/tmp/out".any(), O_WRONLY, 0o644)
+let fd = s.open("/tmp/out", O_WRONLY, 0o644)
 defer s.close(fd)
-s.write(fd, data.any(), data.byteSize())
+s.write(fd, &data, data.byteSize())
 ```
 
 ---
@@ -291,11 +306,11 @@ build darwin
 import "darwin/objc/foundation"
 
 class NSString : foundation {
-    func length(s: NSString) -> int
-    func UTF8String(s: NSString) -> any char
+    func length(s: NSString) -> int32
+    func UTF8String(s: NSString) -> *const char
     func isEqualToString(s: NSString, other: NSString) -> bool
-    func substringFromIndex(s: NSString, from: int) -> NSString
-    func stringWithUTF8String(str: any char) -> NSString?
+    func substringFromIndex(s: NSString, from: int32) -> NSString
+    func stringWithUTF8String(str: *const char) -> NSString?
 }
 ```
 
@@ -305,7 +320,7 @@ First typed param is the receiver. No receiver = class-side method.
 Usage:
 ```swift
 var ns = foundation.NSString()
-let str = ns.stringWithUTF8String("hello".any())
+let str = ns.stringWithUTF8String("hello")
 let len = ns.length(str)
 ```
 
@@ -319,18 +334,22 @@ build windows
 import "windows/com/d3d11"
 
 class IUnknown : d3d11 {
-    func QueryInterface(obj: IUnknown, riid: any opaque, ppv: mut any opaque) -> int
-    func AddRef(obj: IUnknown) -> uint
-    func Release(obj: IUnknown) -> uint
+    func QueryInterface(obj: IUnknown, riid: *const void, ppv: *void) -> int32
+    func AddRef(obj: IUnknown) -> uint32
+    func Release(obj: IUnknown) -> uint32
 }
 
 class ID3D11Device : IUnknown {
     func CreateBuffer(
-        d: ID3D11Device, desc: mut any opaque,
-        init: mut any opaque, ppBuffer: mut any opaque) -> int
+        d: ID3D11Device,
+        desc: *const void,
+        init: *const void,
+        ppBuffer: **void) -> int32
     func CreateTexture2D(
-        d: ID3D11Device, desc: mut any opaque,
-        init: mut any opaque, ppTexture: mut any opaque) -> int
+        d: ID3D11Device,
+        desc: *const void,
+        init: *const void,
+        ppTexture: **void) -> int32
 }
 ```
 
@@ -348,15 +367,15 @@ build linux
 import "gpu/cuda"
 
 class Cuda : cuda {
-    let threadIdx: (x: uint, y: uint, z: uint)
-    let blockIdx:  (x: uint, y: uint, z: uint)
-    let blockDim:  (x: uint, y: uint, z: uint)
-    let gridDim:   (x: uint, y: uint, z: uint)
+    let threadIdx: (x: uint32, y: uint32, z: uint32)
+    let blockIdx:  (x: uint32, y: uint32, z: uint32)
+    let blockDim:  (x: uint32, y: uint32, z: uint32)
+    let gridDim:   (x: uint32, y: uint32, z: uint32)
 
     func syncThreads()
-    func syncWarp(mask: uint)
-    func atomicAdd(addr: mut any float, val: float) -> float
-    func atomicAdd(addr: mut any int,   val: int)   -> int
+    func syncWarp(mask: uint32)
+    func atomicAdd(addr: *float, val: float) -> float
+    func atomicAdd(addr: *int32, val: int32) -> int32
     func fmaf(a: float, b: float, c: float) -> float
     func rsqrtf(x: float) -> float
 }
@@ -366,24 +385,24 @@ Compiler: emits PTX. `threadIdx` → `%tid` register reads. `syncThreads()`
 → `bar.sync`. `fmaf` → `fma.rn.f32`. Instance removed entirely.
 
 GPU functions use the `gpu` qualifier between the parameter list and the
-return arrow. Shared memory uses the `shared` storage qualifier — the backend
+return type. Shared memory uses the `shared` storage qualifier — the backend
 allocates in `.shared` PTX memory space. The call site uses `.dispatch()`.
 
 ```swift
-let TILE = 16
+let TILE: int32 = 16
 
-func matMul(a: [float], b: [float], out: mut [float], n: int) gpu {
+func matMul(a: *const float, b: *const float, out: *float, n: int32) gpu {
     var c = cuda2.Cuda()
 
-    shared var tileA = [float](count: TILE * TILE)
-    shared var tileB = [float](count: TILE * TILE)
+    shared var tileA = [float](TILE * TILE)
+    shared var tileB = [float](TILE * TILE)
 
     let tx  = c.threadIdx.x
     let ty  = c.threadIdx.y
     let row = c.blockIdx.y * TILE + ty
     let col = c.blockIdx.x * TILE + tx
 
-    var sum = 0.0
+    var sum: float = 0.0
 
     for t in 0 ..< n / TILE {
         tileA[ty * TILE + tx] = a[row * n + t * TILE + tx]
@@ -399,9 +418,8 @@ func matMul(a: [float], b: [float], out: mut [float], n: int) gpu {
     out[row * n + col] = sum
 }
 
-// call site — out is mut, caller passes &result
-var result = [float](repeating: 0.0, count: n * n)
-matMul(a: a, b: b, out: &result, n: n).dispatch()
+// call site — a, b, result are device memory pointers
+matMul(a: devA, b: devB, out: devResult, n: 1024).dispatch()
 ```
 
 ---
@@ -419,23 +437,22 @@ class Int10h : int10h {
     func set_cursor_pos(page: uint8, row: uint8, col: uint8)
     func get_cursor_pos(
         page: uint8,
-        row: mut any uint8, col: mut any uint8,
-        start: mut any uint8, end: mut any uint8)
+        row: *uint8, col: *uint8,
+        start: *uint8, end: *uint8)
     func scroll_up(
         lines: uint8, attr: uint8,
         top: uint8, left: uint8, bottom: uint8, right: uint8)
     func scroll_down(
         lines: uint8, attr: uint8,
         top: uint8, left: uint8, bottom: uint8, right: uint8)
-    func read_char_attr(page: uint8, char: mut any uint8, attr: mut any uint8)
+    func read_char_attr(page: uint8, char: *uint8, attr: *uint8)
     func write_char_attr(page: uint8, char: uint8, attr: uint8, count: uint16)
     func write_char(page: uint8, char: uint8, count: uint16)
     func write_tty(char: uint8, page: uint8, color: uint8)
-    func get_video_mode(
-        mode: mut any uint8, cols: mut any uint8, page: mut any uint8)
+    func get_video_mode(mode: *uint8, cols: *uint8, page: *uint8)
     func write_string(
         page: uint8, attr: uint8, flags: uint8,
-        row: uint8, col: uint8, str: any char, len: uint16)
+        row: uint8, col: uint8, str: *const char, len: uint16)
     func write_pixel(page: uint8, color: uint8, col: uint16, row: uint16)
     func read_pixel(page: uint8, col: uint16, row: uint16) -> uint8
     func set_palette(palette_id: uint8, color: uint8)
@@ -469,17 +486,17 @@ b.write_tty(0x41, 0, 0x07)
 | Package is the export boundary | consumers import the package, not the class |
 | Sigs enforced at compile time | mismatch = error before anything links or runs |
 | Variadic `...` in native only | Vertex functions may not be variadic |
-| `mut` after label before type | `out: mut [float]` not `mut out: [float]` |
+| String literals pass directly | `const char*` — no conversion needed |
+| `&value` for address-of | zero-cost; pointer valid only while value is alive |
 | GPU call site uses `.dispatch()` | consistent with postfix execution model |
 
 ---
 
 ## 14. Postfix Summary
 
-| Postfix        | Meaning                                 |
-|----------------|-----------------------------------------|
-| `.any()`       | escape to raw pointer                   |
-| `.sizeof()`    | compile-time size of type in bytes      |
-| `.alignof()`   | compile-time alignment of type in bytes |
-| `.byteSize()`  | runtime byte length of array instance   |
-| `.dispatch()`  | execute gpu kernel, return result       |
+| Postfix       | Meaning                                 |
+|---------------|-----------------------------------------|
+| `.sizeof()`   | compile-time size of type in bytes      |
+| `.alignof()`  | compile-time alignment of type in bytes |
+| `.byteSize()` | runtime byte length of array instance   |
+| `.dispatch()` | execute GPU kernel, return result       |

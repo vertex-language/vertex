@@ -17,11 +17,13 @@ package app
 build linux
 
 import "github.com/vertex-language/ui"
+import bundle "github.com/vertex-language/user/your-browser-bundle"
 
 func render() -> Element {
     return (
         <>
             <Column>
+                <WebView src={bundle} ></WebView>
                 <Text>{state.status}</Text>
                 <Button label={"Send"} onClick={func() { send() }} />
             </Column>

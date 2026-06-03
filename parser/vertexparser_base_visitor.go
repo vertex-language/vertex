@@ -12,15 +12,11 @@ func (v *BaseVertexParserVisitor) VisitFile(ctx *FileContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitPackageDecl(ctx *PackageDeclContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BaseVertexParserVisitor) VisitBuildDecl(ctx *BuildDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitBuildTag(ctx *BuildTagContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitPackageDecl(ctx *PackageDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -29,6 +25,10 @@ func (v *BaseVertexParserVisitor) VisitImportDecl(ctx *ImportDeclContext) interf
 }
 
 func (v *BaseVertexParserVisitor) VisitTopLevelDecl(ctx *TopLevelDeclContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitTypeAliasDecl(ctx *TypeAliasDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -44,7 +44,7 @@ func (v *BaseVertexParserVisitor) VisitGenericParams(ctx *GenericParamsContext) 
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitTypeParam(ctx *TypeParamContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitFuncQualifier(ctx *FuncQualifierContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -56,27 +56,11 @@ func (v *BaseVertexParserVisitor) VisitParam(ctx *ParamContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitFuncQualifier(ctx *FuncQualifierContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitReturnType(ctx *ReturnTypeContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BaseVertexParserVisitor) VisitStructDecl(ctx *StructDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitStructField(ctx *StructFieldContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitStructLiteralExpr(ctx *StructLiteralExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitStructFieldInit(ctx *StructFieldInitContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitStructFieldDecl(ctx *StructFieldDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -88,19 +72,7 @@ func (v *BaseVertexParserVisitor) VisitClassMember(ctx *ClassMemberContext) inte
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitClassField(ctx *ClassFieldContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitNativeFuncDecl(ctx *NativeFuncDeclContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitNativeParamList(ctx *NativeParamListContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitNativeParam(ctx *NativeParamContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitQualifiedIdent(ctx *QualifiedIdentContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -108,19 +80,15 @@ func (v *BaseVertexParserVisitor) VisitEnumDecl(ctx *EnumDeclContext) interface{
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitEnumRawType(ctx *EnumRawTypeContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BaseVertexParserVisitor) VisitEnumCaseDecl(ctx *EnumCaseDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitEnumCase(ctx *EnumCaseContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitEnumCaseItem(ctx *EnumCaseItemContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitTypeAliasDecl(ctx *TypeAliasDeclContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitEnumRawValue(ctx *EnumRawValueContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -132,31 +100,11 @@ func (v *BaseVertexParserVisitor) VisitStmt(ctx *StmtContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitVarDeclStmt(ctx *VarDeclStmtContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitVarDecl(ctx *VarDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitBindingKw(ctx *BindingKwContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitTupleBind(ctx *TupleBindContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitAssignStmt(ctx *AssignStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitCompoundAssignStmt(ctx *CompoundAssignStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitCompoundOp(ctx *CompoundOpContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitLvalue(ctx *LvalueContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitBindingPattern(ctx *BindingPatternContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -164,15 +112,15 @@ func (v *BaseVertexParserVisitor) VisitIfStmt(ctx *IfStmtContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitElseIfClause(ctx *ElseIfClauseContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitElseClause(ctx *ElseClauseContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BaseVertexParserVisitor) VisitIfCondition(ctx *IfConditionContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitWhileStmt(ctx *WhileStmtContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitForInStmt(ctx *ForInStmtContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -184,35 +132,7 @@ func (v *BaseVertexParserVisitor) VisitSwitchCase(ctx *SwitchCaseContext) interf
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitDefaultCase(ctx *DefaultCaseContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitCasePatternList(ctx *CasePatternListContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitCasePattern(ctx *CasePatternContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitForInStmt(ctx *ForInStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitWhileStmt(ctx *WhileStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitBreakStmt(ctx *BreakStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitContinueStmt(ctx *ContinueStmtContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitFallthroughStmt(ctx *FallthroughStmtContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitSwitchPattern(ctx *SwitchPatternContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -224,19 +144,15 @@ func (v *BaseVertexParserVisitor) VisitDeferStmt(ctx *DeferStmtContext) interfac
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitExprStmt(ctx *ExprStmtContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitExprOrAssignStmt(ctx *ExprOrAssignStmtContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitAssignOp(ctx *AssignOpContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
 func (v *BaseVertexParserVisitor) VisitExpr(ctx *ExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitPostfixName(ctx *PostfixNameContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitPrimary(ctx *PrimaryContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -248,35 +164,19 @@ func (v *BaseVertexParserVisitor) VisitArg(ctx *ArgContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitLiteral(ctx *LiteralContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitStructLiteralFields(ctx *StructLiteralFieldsContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitArrayLiteralExpr(ctx *ArrayLiteralExprContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitStructLiteralField(ctx *StructLiteralFieldContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitArrayConstructExpr(ctx *ArrayConstructExprContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitMapLiteralFields(ctx *MapLiteralFieldsContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitExprList(ctx *ExprListContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitDictLiteralExpr(ctx *DictLiteralExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitDictEntry(ctx *DictEntryContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitTupleExpr(ctx *TupleExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitTupleElement(ctx *TupleElementContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitMapLiteralField(ctx *MapLiteralFieldContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -284,7 +184,39 @@ func (v *BaseVertexParserVisitor) VisitAnonFuncExpr(ctx *AnonFuncExprContext) in
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitType(ctx *TypeContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitAsmExpr(ctx *AsmExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitAsmBody(ctx *AsmBodyContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitAsmInstr(ctx *AsmInstrContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitAsmConstraint(ctx *AsmConstraintContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitAsmClobberDecl(ctx *AsmClobberDeclContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitTypeExpr(ctx *TypeExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitFuncTypeParams(ctx *FuncTypeParamsContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitBaseType(ctx *BaseTypeContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitTupleTypeElems(ctx *TupleTypeElemsContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -292,14 +224,6 @@ func (v *BaseVertexParserVisitor) VisitTupleTypeElem(ctx *TupleTypeElemContext) 
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitFuncTypeParamList(ctx *FuncTypeParamListContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitFuncTypeParam(ctx *FuncTypeParamContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BaseVertexParserVisitor) VisitPrimitiveType(ctx *PrimitiveTypeContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitLiteral(ctx *LiteralContext) interface{} {
 	return v.VisitChildren(ctx)
 }

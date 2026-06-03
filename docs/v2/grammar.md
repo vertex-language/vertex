@@ -1,12 +1,12 @@
 # Vertex Language Grammar
 
-## Specification 2.0
+## Specification 2.1
 
 ---
 
 ## 1. Literals
 
-```swift
+```vertex
 // Integers — decimal (default)
 42
 -1000
@@ -41,7 +41,7 @@ false
 // Nil — absence of a value
 nil
 
-// Other literals (unchanged)
+// Other literals
 "hello"
 "A"
 ```
@@ -50,7 +50,7 @@ nil
 
 ## 2. Variable Declarations
 
-```swift
+```vertex
 let x = 10
 var y = 20
 ```
@@ -59,7 +59,7 @@ var y = 20
 
 ## 3. Type Annotations
 
-```swift
+```vertex
 let a: int    = 100
 let b: int8   = 127
 let c: int16  = 32767
@@ -71,7 +71,7 @@ let h: uint16 = 65535
 let i: uint32 = 4294967295
 let j: uint64 = 18446744073709551615
 let k: float  = 3.14
-let l: double = 3.14159265358979
+let l: float64 = 3.14159265358979
 let m: bool   = true
 let n: string = "hello"
 let o: string = `
@@ -83,17 +83,118 @@ let q: void = ()
 ```
 
 Multiline strings are delimited by backticks. Content begins after the opening
-backtick and ends before the closing backtick. No indentation stripping is
-applied.
+backtick and ends before the closing backtick. No indentation stripping is applied.
+
+**Scalar type table:**
+
+| Vertex type       | C type     | Notes                  |
+|-------------------|------------|------------------------|
+| `int` / `int32`   | `int32_t`  | default integer        |
+| `int8`            | `int8_t`   |                        |
+| `int16`           | `int16_t`  |                        |
+| `int64`           | `int64_t`  |                        |
+| `uint` / `uint32` | `uint32_t` | default unsigned       |
+| `uint8`           | `uint8_t`  |                        |
+| `uint16`          | `uint16_t` |                        |
+| `uint64`          | `uint64_t` |                        |
+| `float`           | `float`    |                        |
+| `float64`          | `double`   |                        |
+| `bool`            | `bool`     |                        |
+| `char`            | `char`     |                        |
+| `string`          | see §9     | let → rodata, var → heap |
+| `void` / `()`     | `void`     |                        |
+
+`int` is an alias for `int32`; `uint` is an alias for `uint32`. Both forms are
+accepted everywhere a type is valid.
 
 ---
 
-## 4. Numeric Type Conversion
+## 4. Pointer Types
+
+`*` in type position is a raw mutable pointer. `*const` is a raw read-only
+pointer. These are the only pointer types in Vertex.
+
+```vertex
+// raw mutable pointer
+var p: *int32
+
+// read-only pointer — pointed-to data may not be modified
+var p: *const int32
+
+// nullable pointer — nil is the zero value
+var p: *int32?
+
+// pointer-to-pointer
+var pp: **int32
+
+// address-of — zero cost, returns the raw address of any value
+let ptr   = &x          // *int32 — inferred
+let field = &point.x    // *int32 — struct field address
+let elem  = &buf[0]     // *uint8 — array element address
+```
+
+**Pointer type table:**
+
+| Vertex              | C equivalent      |
+|---------------------|-------------------|
+| `name: *T`          | `T*`              |
+| `name: *const T`    | `const T*`        |
+| `name: *void`       | `void*`           |
+| `name: *const void` | `const void*`     |
+| `name: *char`       | `char*`           |
+| `name: *const char` | `const char*`     |
+| `name: *T?`         | nullable `T*`     |
+| `name: **T`         | `T**`             |
+
+**`let`/`var` × `const` orthogonality:**
+
+| Vertex               | C                | Binding   | Data      |
+|----------------------|------------------|-----------|-----------|
+| `let name: *const T` | `const T* const` | fixed     | read-only |
+| `let name: *T`       | `T* const`       | fixed     | mutable   |
+| `var name: *const T` | `const T*`       | rebind OK | read-only |
+| `var name: *T`       | `T*`             | rebind OK | mutable   |
+
+**Rules:**
+
+* `*T` is a raw mutable pointer; `*const T` is a read-only pointer. Both collapse
+  to the same C pointer at runtime — `const` is a compile-time annotation only.
+* `let`/`var` controls whether the binding can be rebound. `*const` controls
+  whether the pointed-to data can be modified. These are orthogonal — all four
+  combinations are valid.
+* `&value` returns the raw address of any value. Zero cost — no allocation, no copy.
+* The pointer is valid only while the backing value is alive. Passing a pointer
+  to a function and then freeing the backing value is undefined behaviour.
+* Reads and writes through pointer parameters and pointer receivers are
+  auto-dereferenced by the compiler: `n += 1` lowers to `*n += 1` in C; `p.x`
+  through a pointer receiver lowers to `p->x`.
+* `*T?` is a nullable pointer. `nil` is the zero value; the compiler enforces
+  null-safety through the type system.
+
+---
+
+## 5. Type Aliases
+
+```vertex
+type FILE   = *void
+type size_t = uint64
+```
+
+**Rules:**
+
+* `type` declares an alias — the two names are interchangeable everywhere a type
+  is valid.
+* Aliases may appear at package level only, not inside functions or blocks.
+* Aliases resolve at compile time — no runtime representation.
+
+---
+
+## 6. Numeric Type Conversion
 
 All numeric conversions are explicit. There is no implicit coercion between
 numeric types.
 
-```swift
+```vertex
 let i: int    = 42
 let f: float  = float(i)       // int → float, always safe
 let d: double = double(f)      // float → double, always safe
@@ -106,15 +207,14 @@ let b: int8   = int8(i)        // narrowing — wraps on overflow
 * Conversion syntax is `targetType(value)` — no cast keyword.
 * No implicit numeric conversion at any point.
 * Float-to-integer conversion truncates toward zero.
-* Narrowing integer conversions wrap on overflow, identical to the `&+`, `&-`,
-  `&*` overflow operators.
+* Narrowing integer conversions wrap on overflow, identical to `&+`, `&-`, `&*`.
 * Widening conversions (e.g. `int` → `double`) are always value-preserving.
 
 ---
 
-## 5. Arithmetic Operators
+## 7. Arithmetic Operators
 
-```swift
+```vertex
 a + b
 a - b
 a * b
@@ -125,9 +225,9 @@ a % b
 
 ---
 
-## 6. Compound Assignment
+## 8. Compound Assignment
 
-```swift
+```vertex
 a += b
 a -= b
 a *= b
@@ -137,9 +237,9 @@ a %= b
 
 ---
 
-## 7. Bitwise Operators
+## 9. Bitwise Operators
 
-```swift
+```vertex
 ~a        // NOT
 a & b     // AND
 a | b     // OR
@@ -150,9 +250,9 @@ a >> b    // right shift
 
 ---
 
-## 8. Overflow Operators
+## 10. Overflow Operators
 
-```swift
+```vertex
 a &+ b    // overflow add
 a &- b    // overflow subtract
 a &* b    // overflow multiply
@@ -160,9 +260,9 @@ a &* b    // overflow multiply
 
 ---
 
-## 9. Comparison Operators
+## 11. Comparison Operators
 
-```swift
+```vertex
 a == b
 a != b
 a >  b
@@ -173,9 +273,9 @@ a <= b
 
 ---
 
-## 10. Logical Operators
+## 12. Logical Operators
 
-```swift
+```vertex
 !a
 a && b
 a || b
@@ -183,41 +283,41 @@ a || b
 
 ---
 
-## 11. Range Operators
+## 13. Range Operators
 
-```swift
+```vertex
 0...5     // closed
 0..<5     // half-open
 ```
 
 ---
 
-## 12. Ternary Operator
+## 14. Ternary Operator
 
-```swift
+```vertex
 condition ? a : b
 ```
 
 ---
 
-## 13. Nil-Coalescing
+## 15. Nil-Coalescing
 
-```swift
+```vertex
 a ?? b
 ```
 
 ---
 
-## 14. Identity Operators (classes only)
+## 16. Identity Operators (classes only)
 
-```swift
+```vertex
 a === b
 a !== b
 ```
 
 ---
 
-## 15. Operator Precedence (high → low)
+## 17. Operator Precedence (high → low)
 
 | Level   | Operators                         |
 |---------|-----------------------------------|
@@ -234,9 +334,9 @@ a !== b
 
 ---
 
-## 16. If / Else / Else If
+## 18. If / Else / Else If
 
-```swift
+```vertex
 if x > 0 {
     // positive
 } else if x < 0 {
@@ -248,9 +348,9 @@ if x > 0 {
 
 ---
 
-## 17. Switch
+## 19. Switch
 
-```swift
+```vertex
 switch x {
 case 0:
     // exactly zero
@@ -263,7 +363,7 @@ default:
 
 **String switch:**
 
-```swift
+```vertex
 switch s {
 case "hello":
     // ...
@@ -276,7 +376,7 @@ default:
 
 **Enum switch:**
 
-```swift
+```vertex
 switch direction {
 case .north:
     // ...
@@ -292,7 +392,7 @@ case .west:
 
 **Explicit fallthrough:**
 
-```swift
+```vertex
 switch x {
 case 0:
     // zero
@@ -314,14 +414,14 @@ default:
 * Switching on an enum with all cases covered is exhaustive — `default` is not
   required.
 * An empty case body (with no `fallthrough`) is a compile error.
-* `break` may be used inside a case to exit the switch early (§18).
+* `break` may be used inside a case to exit the switch early (§20).
 * `switch` may appear anywhere a statement is valid.
 
 ---
 
-## 18. Break and Continue
+## 20. Break and Continue
 
-```swift
+```vertex
 for i in 0..<10 {
     if i % 2 == 0 { continue }   // skip even numbers
     if i == 7     { break }      // stop at 7
@@ -337,28 +437,28 @@ while true {
 **Rules:**
 
 * `break` exits the immediately enclosing `for`, `while`, or `switch` statement.
-* `continue` skips the remainder of the current loop iteration and begins the
-  next.
+* `continue` skips the remainder of the current loop iteration and begins the next.
 * `continue` is not valid inside `switch`.
 * Neither `break` nor `continue` may appear inside a `defer` block.
 
 ---
 
-## 19. Functions
+## 21. Functions
 
-```swift
-func add(a: int, b: int) -> int {
+```vertex
+func add(a: int32, b: int32) -> int32 {
     return a + b
 }
+
 add(1, 2)
 add(a: 1, b: 2)
 ```
 
-**Mutable parameters (`mut`):**
+**Pointer parameters:**
 
-```swift
-func increment(n: mut int) {
-    n += 1
+```vertex
+func increment(n: *int32) {
+    n += 1        // auto-dereferenced — lowers to *n += 1
 }
 
 var count = 0
@@ -368,10 +468,10 @@ increment(n: &count)   // count is now 1
 **Function qualifiers:**
 
 A qualifier sits between the parameter list and the return arrow. All qualifiers
-are mutually exclusive except where noted.
+are mutually exclusive.
 
-```swift
-func fetchUser(id: int) async -> User { }
+```vertex
+func fetchUser(id: int32) async -> User { }
 func crunch(data: [float]) thread -> [float] { }
 func isolated(data: [float]) process -> [float] { }
 func vectorAdd(a: [float], b: [float]) gpu -> [float] { }
@@ -379,18 +479,22 @@ func vectorAdd(a: [float], b: [float]) gpu -> [float] { }
 
 **Rules:**
 
-* Parameters are immutable by default.
-* `mut` marks a parameter as mutable — the function may write back through it.
-* The call site must pass a `var` binding prefixed with `&` to a `mut`
+* Parameters are immutable and passed by value by default.
+* `*T` declares a pointer parameter — the function receives the raw address of
+  the caller's value.
+* The call site must prefix a `var` binding with `&` when passing to a `*T`
   parameter.
-* `mut` always appears immediately before the parameter type, after the label.
-* `mut` may be applied to any parameter, not only receiver parameters.
+* Reads and writes through a pointer parameter are auto-dereferenced by the
+  compiler: `n += 1` lowers to `*n += 1` in C.
+* `*T` may be applied to any parameter.
+* Labels are erased at the call site in the lowered C output — the C call is
+  always positional.
 
 ---
 
-## 20. While Loop
+## 22. While Loop
 
-```swift
+```vertex
 var i = 0
 while i < 5 {
     i += 1
@@ -399,50 +503,50 @@ while i < 5 {
 
 ---
 
-## 21. For-In Loop
+## 23. For-In Loop
 
-```swift
-// Range
+```vertex
+// Range — half-open
 for i in 0..<5 {
-    // i: int
+    // i: int32
 }
 
-// Closed range
+// Range — closed
 for i in 0...5 {
-    // i: int, includes 5
+    // i: int32, includes 5
 }
 
 // Array
 let nums = [1, 2, 3]
 for n in nums {
-    // n: int
+    // n: int32
 }
 ```
 
 **Rules:**
 
-* `for i in range` binds the loop variable as the range element type (`int` for
+* `for i in range` binds the loop variable as the range element type (`int32` for
   integer ranges).
 * `for item in array` binds each element in order, from index 0 to the last.
 * The loop variable is immutable — it may not be assigned inside the body.
-* `break` and `continue` are valid inside any `for-in` body (§18).
+* `break` and `continue` are valid inside any `for-in` body (§20).
 
 ---
 
-## 22. Arrays
+## 24. Arrays
 
-### 22.1 Fixed Arrays
+### 24.1 Fixed Arrays
 
-Fixed arrays are stack-allocated with a known size at compile time.
+Fixed arrays are stack-allocated with a size known at compile time.
 
-```swift
+```vertex
 // zero-filled, fixed size — short form (zero implied)
 var buf  = [uint8](1024)
-var nums = [int](5)
+var nums = [int32](5)
 
 // zero-filled, fixed size — long form
 var buf  = [uint8](repeating: 0, count: 1024)
-var nums = [int](repeating: 0, count: 5)
+var nums = [int32](repeating: 0, count: 5)
 
 // non-zero fill — long form required
 var mask = [uint8](repeating: 0xFF, count: 64)
@@ -458,10 +562,6 @@ let bytes: [uint8] = [
     0xAB,
 ]
 
-// empty
-var a = [int]()
-var b: [int] = []
-
 // nested (multidimensional)
 let matrix = [[1, 2], [3, 4]]
 let grid: [[float]] = [
@@ -476,26 +576,29 @@ nums[0] = 99
 
 **Rules:**
 
-* `[T](n)` allocates `n` elements of type `T`, all zero-filled. Prefer this form when the fill value is zero.
-* `[T](repeating: v, count: n)` allocates `n` elements all set to `v`. Required when the fill value is not zero.
+* `[T](n)` allocates `n` elements of type `T`, all zero-filled. Prefer this form
+  when the fill value is zero.
+* `[T](repeating: v, count: n)` allocates `n` elements all set to `v`. Required
+  when the fill value is not zero.
 * Size must be a compile-time integer literal.
 * Subscript read is valid on both `let` and `var` bindings.
 * Subscript write requires the array binding to be `var`.
 * Index bounds are not checked at compile time — out-of-bounds is a runtime error.
+* No `.delete()` is needed — fixed arrays are stack-allocated and freed automatically.
 
 ---
 
-### 22.2 Growable Arrays
+### 24.2 Growable Arrays
 
 Growable arrays are heap-allocated and must be freed with `.delete()`.
 
-```swift
+```vertex
 // empty
-var items = [int]()
+var items = [int32]()
 defer items.delete()
 
 // pre-allocated capacity
-var items = [int](capacity: 64)
+var items = [int32](capacity: 64)
 defer items.delete()
 ```
 
@@ -509,13 +612,13 @@ defer items.delete()
 
 ---
 
-### 22.3 Add / Remove
+### 24.3 Add / Remove
 
-```swift
-items.push(42)           // add to end
-items.unshift(0)         // add to front
+```vertex
+items.push(42)            // add to end
+items.unshift(0)          // add to front
 
-let last  = items.pop()  // remove from end,   returns T?
+let last  = items.pop()   // remove from end,   returns T?
 let first = items.shift() // remove from front, returns T?
 ```
 
@@ -526,9 +629,9 @@ let first = items.shift() // remove from front, returns T?
 
 ---
 
-### 22.4 Access
+### 24.4 Access
 
-```swift
+```vertex
 let n    = items.length  // element count
 let x    = items[0]      // subscript read
 items[0] = 99            // subscript write
@@ -536,30 +639,30 @@ items[0] = 99            // subscript write
 
 ---
 
-### 22.5 Search
+### 24.5 Search
 
-```swift
-let idx = items.indexOf(42)      // int  (-1 if not found)
+```vertex
+let idx = items.indexOf(42)      // int32  (-1 if not found)
 let has = items.includes(42)     // bool
 
-let val = items.find(func(x: int) -> bool {
+let val = items.find(func(x: int32) -> bool {
     return x > 10
 })                               // T?
 
-let i = items.findIndex(func(x: int) -> bool {
+let i = items.findIndex(func(x: int32) -> bool {
     return x > 10
-})                               // int  (-1 if not found)
+})                               // int32  (-1 if not found)
 ```
 
 ---
 
-### 22.6 In-Place Mutation
+### 24.6 In-Place Mutation
 
 These methods mutate the array without allocating — no `.delete()` needed on
 the result.
 
-```swift
-items.sort(func(a: int, b: int) -> int {
+```vertex
+items.sort(func(a: int32, b: int32) -> int32 {
     return a - b
 })
 
@@ -571,18 +674,18 @@ items.fill(0, from: 1, to: 3)
 
 ---
 
-### 22.7 Methods That Return a New Array
+### 24.7 Methods That Return a New Array
 
 These methods allocate a new array — the caller must call `.delete()` on the
 result.
 
-```swift
-var doubled = items.map(func(x: int) -> int {
+```vertex
+var doubled = items.map(func(x: int32) -> int32 {
     return x * 2
 })
 defer doubled.delete()
 
-var evens = items.filter(func(x: int) -> bool {
+var evens = items.filter(func(x: int32) -> bool {
     return x % 2 == 0
 })
 defer evens.delete()
@@ -596,30 +699,30 @@ defer all.delete()
 
 ---
 
-### 22.8 Iteration
+### 24.8 Iteration
 
-```swift
-items.forEach(func(x: int) {
+```vertex
+items.forEach(func(x: int32) {
     // process each element
 })
 ```
 
 ---
 
-### 22.9 Struct Arrays
+### 24.9 Struct Arrays
 
 Structs are copied by value on push — consistent with Vertex value semantics.
 
-```swift
+```vertex
 struct Vec2 {
     x: float
     y: float
 }
 
 struct Player {
-    id:       int
+    id:       int32
     position: Vec2
-    health:   int
+    health:   int32
 }
 
 var players = [Player]()
@@ -631,16 +734,9 @@ players.push(Player{
     health:   100,
 })
 
-players.push(Player{
-    id:       2,
-    position: Vec2{x: 10.0, y: 5.0},
-    health:   80,
-})
-
 // field access and mutation
-let hp        = players[0].health
+let hp            = players[0].health
 players[0].health = 50
-let x         = players[0].position.x
 
 // search
 let idx = players.findIndex(func(p: Player) -> bool {
@@ -652,7 +748,7 @@ let found = players.find(func(p: Player) -> bool {
 })
 
 // sort by health
-players.sort(func(a: Player, b: Player) -> int {
+players.sort(func(a: Player, b: Player) -> int32 {
     return a.health - b.health
 })
 
@@ -663,7 +759,7 @@ var alive = players.filter(func(p: Player) -> bool {
 defer alive.delete()
 
 // map to ids — new array, must delete
-var ids = players.map(func(p: Player) -> int {
+var ids = players.map(func(p: Player) -> int32 {
     return p.id
 })
 defer ids.delete()
@@ -676,7 +772,7 @@ players.forEach(func(p: Player) {
 
 ---
 
-### 22.10 Memory Rules
+### 24.10 Memory Rules
 
 | Method                                              | Allocates | Action required         |
 |-----------------------------------------------------|-----------|-------------------------|
@@ -687,43 +783,77 @@ players.forEach(func(p: Player) {
 
 ---
 
-## 23. Dictionaries (literal + key access + mutation)
+Renaming them to "Maps" is a great call. It aligns perfectly with the `map[K]V` keyword we just introduced and is generally a more precise term for this data structure in systems-level languages like Vertex.
 
-```swift
-let map = ["a": 1, "b": 2]
-let val = map["a"]           // val: int? — nil if key absent
+Here is the finalized **§25. Maps** section for your grammar document.
 
-var config = ["debug": 0]
+---
+
+## 25. Maps
+
+```vertex
+// short form — type inferred
+let somemap = {"a": 1, "b": 2}
+let val = somemap["a"]           // val: int32? — nil if key absent
+
+// long form — explicit type
+let typedMap: map[string]int32 = {"a": 1, "b": 2}
+
+// empty heap allocation
+var config = map[string]int32()
+defer config.delete()
+
+// mutation
 config["debug"] = 1
 config["verbose"] = 0
+config["debug"] = nil            // removes key
+
 ```
 
 **Rules:**
 
+* Map literals use brace syntax: `{"key": value, ...}`.
+* The formal type signature for a map is `map[KeyType]ValueType`.
+* `map[K]V()` creates an empty, heap-allocated map.
 * Key access always returns an optional (`T?`) — the key may not be present.
-* Key write requires the dictionary binding to be `var`.
-* Assigning `nil` to a key removes it from the dictionary.
+* Key write requires the map binding to be `var`.
+* Assigning `nil` to a key removes it from the map.
+* Maps are heap-allocated and must be freed with `.delete()`.
+* The caller is responsible for calling `.delete()` — failing to do so is a memory leak.
 
 ---
 
-## 24. Optionals (declare + if-let unwrap only)
+## 26. Optionals
 
-```swift
-var maybe: int? = nil
+```vertex
+// scalar optional
+var maybe: int32? = nil
 maybe = 5
 if let val = maybe {
-    // val: int — unwrapped, safe to use
+    // val: int32 — unwrapped, safe to use
 }
+
+// pointer / class optional
+var animal: Animal? = nil
+if let a = animal { }
+let result = animal ?? defaultAnimal
 ```
+
+**Rules:**
+
+* Pointer and class optionals lower to nullable pointers — `nil` is `NULL`.
+* Scalar optionals lower to a tagged struct `{ T value; bool has_value; }`.
+* Use `if let` to safely unwrap any optional.
+* `??` provides a default value when the optional is `nil`.
 
 ---
 
-## 25. Structs — Stack Allocated, Value Semantics
+## 27. Structs
 
-```swift
+```vertex
 struct Point {
-    x: int
-    y: int
+    x: int32
+    y: int32
 }
 
 let p  = Point{x: 3, y: 4}
@@ -736,7 +866,7 @@ q.y = 10
 
 **Multiline form:**
 
-```swift
+```vertex
 let p = Point{
     x: 3,
     y: 4,
@@ -745,7 +875,7 @@ let p = Point{
 
 **Nested field initialization:**
 
-```swift
+```vertex
 struct Line {
     start: Point
     end:   Point
@@ -771,49 +901,59 @@ let l = Line{
 * Struct literals may not appear directly as the condition of `if`, `for`, or
   `switch` statements. Wrap in parentheses to disambiguate:
   `if (Point{x: 1, y: 2} == p) { }`.
-* Structs are pure data — no instance methods, no protocols, no inheritance.
-* A struct may contain fields whose type is another struct.
+* Structs are pure data — no vtable, no heap allocation.
 * Assignment always produces a full copy.
 * Structs may not contain class fields that imply ownership semantics.
 * Field access via dot notation compiles to a direct byte offset calculation.
-* No heap allocation occurs at any point.
 * Struct definitions may not appear inside other struct or class definitions.
 
 ---
 
-## 26. Associated Functions (Receiver Syntax)
+## 28. Associated Functions (Receiver Syntax)
 
-A function declared with a receiver argument immediately preceding the function name is an associated function of the receiver's type.
+A function declared with a receiver argument immediately before the function
+name is an associated function of the receiver's type.
 
-```swift
+```vertex
+// value receiver — receives a copy; mutations do not affect the caller
 func (p: Point) describe() {
     let n = p.x
 }
 
-func (p: mut Point) reset() {
-    p.x = 0
+// pointer receiver — receives the address; mutations affect the caller's binding
+func (p: *Point) reset() {
+    p.x = 0    // auto-dereferenced — lowers to p->x = 0
     p.y = 0
 }
 
 p.describe()
-p.reset()
-
+p.reset()      // compiler inserts & automatically for pointer receiver
 ```
 
 **Rules:**
 
-* The receiver is declared in its own set of parentheses immediately after the `func` keyword and before the function name: `func (receiverName: Type) functionName(params)`.
-* The receiver name is chosen by the developer — `p`, `node`, `rect`, or any valid identifier. Following standard conventions, this is usually a short 1-to-2 letter abbreviation of the type.
-* `mut` before the receiver type marks the receiver as mutable. The caller must invoke the method on a `var` binding (the compiler handles the mutable reference automatically via dot-notation).
-* Associated functions are ordinary functions under the hood and follow all standard function rules in §19.
-* `self` and `this` are entirely absent from the language grammar. Developers must explicitly name the receiver.
-* To write a utility function that takes a known type without associating it as a method, simply place the type in the standard parameter list instead of using the receiver block.
+* The receiver is declared in its own parentheses immediately after `func` and
+  before the function name: `func (receiverName: Type) functionName(params)`.
+* The receiver name is chosen by the developer — typically a short abbreviation
+  of the type name.
+* Value receiver `(p: T)` — the receiver is passed by value (copied). Mutations
+  do not affect the caller.
+* Pointer receiver `(p: *T)` — the receiver is passed as a pointer. Mutations
+  affect the caller's binding.
+* For pointer receivers, the compiler automatically inserts `&` at call sites —
+  the caller writes `p.reset()`, not `reset(&p)`.
+* Reads and writes through a pointer receiver are auto-dereferenced: `.x`
+  lowers to `->x` in C.
+* `self` and `this` are absent from the language — the receiver is named
+  explicitly.
+* To write a utility function without associating it as a method, place the type
+  in the standard parameter list instead of using the receiver block.
 
 ---
 
-## 27. Enums — Value Semantics, Exhaustive Switch
+## 29. Enums
 
-```swift
+```vertex
 enum Direction {
     case north
     case south
@@ -828,7 +968,7 @@ enum Permission {
 
 **Raw values — int:**
 
-```swift
+```vertex
 enum Status: int {
     case inactive = 0
     case active   = 1
@@ -843,7 +983,7 @@ let fromRaw: Status? = Status(rawValue: 1)
 
 **Raw values — string:**
 
-```swift
+```vertex
 enum Color: string {
     case red   = "red"
     case green = "green"
@@ -862,42 +1002,39 @@ enum Planet: string {
 * Cases are declared with the `case` keyword, one or more per line,
   comma-separated.
 * Enum values are accessed via dot notation: `EnumType.caseName`.
-* When the type is known from context, the type name may be omitted:
-  `.caseName`.
-* Raw value types must be `int` or `string`.
+* When the type is known from context, the type name may be omitted: `.caseName`.
+* Raw value types must be `int` (or `int32`) or `string`.
 * `int` raw values auto-increment from the previous value if omitted; the first
   case defaults to `0` if no value is given.
 * `string` raw values default to the case name as a string literal if omitted.
 * `.rawValue` accesses the underlying raw value on a raw-value enum.
 * `EnumType(rawValue:)` constructs from a raw value and returns `EnumType?`.
-* Enums support `==` and `!=`. Raw-value enums also support `<`, `>`, `<=`,
-  `>=`.
-* A `switch` over an enum with all cases covered is exhaustive — `default` is
-  not required.
+* Enums support `==` and `!=`. Raw-value enums also support `<`, `>`, `<=`, `>=`.
+* A `switch` over an enum with all cases covered is exhaustive — `default` is not
+  required.
 * Enums are value types — assignment copies.
 * Enums may not be nested inside structs or classes.
-* Associated values are not supported in 1.9 (deferred).
+* Associated values are not supported in 2.1 (deferred).
 
 ---
 
-## 28. Classes — Heap Allocated, Programmer Manages Lifetime
+## 30. Classes
 
-```swift
+```vertex
 class Animal {
     name: string
 }
 
-func (a: mut Animal) init(name: string) {
+func (a: *Animal) init(name: string) {
     a.name = name
 }
 
-func (a: mut Animal) deinit() {
+func (a: *Animal) deinit() {
     // runs before memory is freed
 }
 
 let a = Animal(name: "Rex")
 a.delete()
-
 ```
 
 **Rules:**
@@ -906,24 +1043,29 @@ a.delete()
 * Mutability is determined entirely by the binding at the declaration site.
 * A `let` binding freezes all fields — no field may be reassigned.
 * A `var` binding opens all fields — any field may be reassigned.
-* Classes are heap allocated — the runtime cost is exactly what the programmer pays.
+* Classes are heap-allocated — the runtime cost is exactly what the programmer pays.
 * Assignment passes a reference — two variables may point to the same object.
 * Identity operators `===` and `!==` compare references, not values.
 * Inheritance is not supported — classes are standalone types.
 * A class may contain fields whose type is a struct.
-* `init` is a reserved associated function name called automatically after allocation. It must be declared using the receiver syntax and the receiver must be typed `mut` (e.g., `func (a: mut Animal) init()`).
-* `deinit` is a reserved associated function name. It runs automatically when `.delete()` is called. It must be declared using the receiver syntax and the receiver must be typed `mut` (e.g., `func (a: mut Animal) deinit()`).
+* `init` is a reserved associated function name called automatically after
+  allocation. It must be declared with a pointer receiver
+  (e.g., `func (a: *Animal) init()`).
+* `deinit` is a reserved associated function name. It runs automatically when
+  `.delete()` is called. It must be declared with a pointer receiver
+  (e.g., `func (a: *Animal) deinit()`).
 * Neither `init` nor `deinit` may be called directly.
-* If no `func init` is declared, the compiler provides a default memberwise initializer.
+* If no `func init` is declared, the compiler provides a default memberwise
+  initializer.
 * The programmer is responsible for calling `.delete()` on class instances.
 * Failing to call `.delete()` on a class instance is a memory leak.
 * Class definitions may not appear inside other class or struct definitions.
 
 ---
 
-## 28.1 Reference Counting — `.new()`
+## 30.1 Reference Counting — `.new()`
 
-```swift
+```vertex
 let a = Animal(name: "Rex").new()
 let b = a                           // count = 2
 // b scope ends — count = 1
@@ -932,7 +1074,7 @@ let b = a                           // count = 2
 
 **Weak references:**
 
-```swift
+```vertex
 let a = Animal(name: "Rex").new()
 weak let b = a                   // b: Animal? — non-owning, count stays 1
 
@@ -948,27 +1090,27 @@ if let animal = b {
 * `weak let` declares a non-owning reference. It does not increment the count.
 * `weak let` produces a value of type `T?`. Use `if let` to safely unwrap
   before use.
-* After the owning references reach zero, all `weak` references become `nil`.
-* `weak` is only valid on ref counted instances (`.new()`).
+* After owning references reach zero, all `weak` references become `nil`.
+* `weak` is only valid on ref-counted instances (`.new()`).
 
 ---
 
-## 29. Defer
+## 31. Defer
 
-```swift
+```vertex
 let a = Animal(name: "Rex")
 defer a.delete()
 ```
 
 **Anonymous function form:**
 
-```swift
+```vertex
 defer func() { cleanup(a) }()
 ```
 
 **Multiple defers (LIFO):**
 
-```swift
+```vertex
 defer a.delete()           // runs second
 defer b.delete()           // runs first
 ```
@@ -977,8 +1119,7 @@ defer b.delete()           // runs first
 
 * `defer` takes a direct function call — no surrounding braces.
 * For multi-statement cleanup, use `defer func() { ... }()` — the trailing `()`
-  invokes the anonymous function immediately, deferring its execution to scope
-  exit.
+  invokes the anonymous function, deferring its execution to scope exit.
 * `defer` executes when the immediately enclosing scope exits.
 * Multiple `defer` statements in the same scope run in reverse declaration order
   (LIFO).
@@ -988,9 +1129,9 @@ defer b.delete()           // runs first
 
 ---
 
-## 30. Generics (unconstrained)
+## 32. Generics (unconstrained)
 
-```swift
+```vertex
 func identity<T>(value: T) -> T {
     return value
 }
@@ -1005,9 +1146,9 @@ let result = identity(value: "hello")
 
 ---
 
-## 31. Import Declarations
+## 33. Import Declarations
 
-```swift
+```vertex
 import "github.com/something"
 
 import (
@@ -1019,35 +1160,31 @@ import (
 **Rules:**
 
 * Import paths are double-quoted string literals.
-* The grouped form parenthesizes one or more newline-separated paths — no
-  commas.
+* The grouped form parenthesizes one or more newline-separated paths — no commas.
 * Imports must appear at the top of a file, after any `package` and `build`
   declarations.
 
 ---
 
-## 32. First-Class Function Types
+## 34. First-Class Function Types
 
-A function type describes the signature of a callable value — its parameter
-types and return type.
-
-```swift
+```vertex
 // variable holding a function
-let double:    func(int) -> int
-let predicate: func(int) -> bool
-let transform: func(string, int) -> string
+let double:    func(int32) -> int32
+let predicate: func(int32) -> bool
+let transform: func(string, int32) -> string
 
 // void return — arrow omitted
-let onFire: func(int)
+let onFire: func(int32)
 
 // function type as a parameter
-func apply(values: [int], f: func(int) -> int) -> [int] { }
+func apply(values: [int32], f: func(int32) -> int32) -> [int32] { }
 
 // function type as a return type
-func makeAdder(n: int) -> func(int) -> int { }
+func makeAdder(n: int32) -> func(int32) -> int32 { }
 
-// mutable parameter in a function type
-func run(n: mut int, f: func(mut int)) { }
+// pointer parameter in a function type
+func run(n: *int32, f: func(*int32)) { }
 
 // calling a function value — standard call syntax
 let result = double(21)
@@ -1057,48 +1194,39 @@ let result = double(21)
 
 * Function type syntax is `func(ParamTypes) -> ReturnType`.
 * When the return type is `void`, the arrow and return type are omitted:
-  `func(int)`.
-* `mut` before a type in a function type signature indicates the caller must
-  pass a `var` binding prefixed with `&` to that position — identical to `mut`
-  in named function declarations (§19).
-* Function types may appear anywhere a type is valid: `let`, `var`, parameter
-  annotations, and return type annotations.
-* A function value is called with standard call syntax: `f(42)`.
+  `func(int32)`.
+* `*T` in a function type signature indicates a pointer parameter — the same
+  rules as pointer parameters in named functions (§21) apply.
 * Function types are value types — assignment copies the callable reference.
-* Parameter names are not part of the type — only the types and their `mut`
-  modifiers are significant.
+* Parameter names are not part of the type — only the types matter.
 
 ---
 
-## 33. Anonymous Functions
+## 35. Anonymous Functions
 
-An anonymous function is a function literal without a name. It follows the
-same syntax as a named function declaration, minus the name. It may capture
-values from the enclosing scope.
-
-```swift
+```vertex
 // stored in a variable
-let double = func(n: int) -> int { return n * 2 }
+let double = func(n: int32) -> int32 { return n * 2 }
 
 // void return — arrow omitted
-let log = func(n: int) { print(n) }
+let log = func(n: int32) { print(n) }
 
 // passed inline — higher-order function pattern
-let doubled = process(nums, func(n: int) -> int {
+let doubled = process(nums, func(n: int32) -> int32 {
     return n * 2
 })
 
-// passed inline — callback registration pattern
-emitter.on(func(n: int) -> int {
+// passed inline — callback registration
+emitter.on(func(n: int32) -> int32 {
     return n * 2
 })
 ```
 
 **Capture — value semantics:**
 
-```swift
+```vertex
 let factor = 3
-let multiply = func(n: int) -> int {
+let multiply = func(n: int32) -> int32 {
     return n * factor    // factor captured by value at creation
 }
 
@@ -1108,49 +1236,48 @@ let increment = func() {
 }
 ```
 
-**Explicit writeback via mut parameter:**
+**Writeback via pointer parameter:**
 
-```swift
-func run(n: mut int, f: func(mut int)) {
-    f(&n)
+```vertex
+func run(n: *int32, f: func(*int32)) {
+    f(n)          // n is already a pointer — pass directly
 }
 
 var total = 0
-run(n: &total, f: func(n: mut int) {
-    n += 10              // writes back through n — total is now 10
+run(n: &total, f: func(n: *int32) {
+    n += 10       // auto-dereferenced — total is now 10
 })
 ```
 
 **Rules:**
 
-* Anonymous function syntax is `func(params) -> ReturnType { body }` —
-  identical to a named function declaration minus the name.
-* Anonymous functions capture variables from the enclosing scope by value
-  at the point of creation.
+* Anonymous function syntax is `func(params) -> ReturnType { body }` — identical
+  to a named function declaration minus the name.
+* Anonymous functions capture variables from the enclosing scope by value at the
+  point of creation.
 * Captured values are copied — mutations inside the anonymous function do not
   affect the original binding.
-* To write back through a variable, pass it explicitly as a `mut` parameter
-  (§19) — capture alone cannot produce writeback.
-* `mut` parameters inside an anonymous function follow the same rules as in
-  named functions (§19) — the call site passes a `var` binding prefixed
-  with `&`.
-* `return` inside an anonymous function returns from the anonymous function,
-  not the enclosing function.
+* To write back through a variable, pass it explicitly as a pointer parameter
+  (§21) — capture alone cannot produce writeback.
+* Pointer parameters (`*T`) inside an anonymous function follow the same rules as
+  in named functions (§21).
+* `return` inside an anonymous function returns from the anonymous function, not
+  the enclosing function.
 * Anonymous functions may not refer to themselves by name — they are not
   recursive. Recursion requires a named function.
 * Anonymous functions are valid anywhere an expression is valid.
 * The inferred type of an anonymous function is `func(ParamTypes) -> ReturnType`
-  (§32).
+  (§34).
 
 ---
 
-## 33.1 Anonymous Concurrent Functions
+## 35.1 Anonymous Concurrent Functions
 
 An anonymous function may carry an execution qualifier between its parameter
 list and body. The qualifier position is identical to named functions — no new
 rule is introduced.
 
-```swift
+```vertex
 // async
 func(params) async -> ReturnType { body }(args).await()
 
@@ -1169,7 +1296,7 @@ func(params) gpu -> ReturnType { body }(args).dispatch(gpu: n, mem: n)
 
 **Examples:**
 
-```swift
+```vertex
 // thread — inline parallel workload
 let results = float.channel(size: 64)
 
@@ -1189,7 +1316,7 @@ func(data: [float], out: chan float) process {
 }(dataset, results).fork()
 
 // async — inline async task
-let user = func(id: int) async -> User {
+let user = func(id: int32) async -> User {
     return fetchUser(id: id)
 }(userId).await()
 
@@ -1210,32 +1337,30 @@ let output = func(a: [float], b: [float]) gpu -> [float] {
 
 **Rules:**
 
-* The qualifier sits between the parameter list and the return arrow —
-  identical to named functions.
+* The qualifier sits between the parameter list and the return arrow — identical
+  to named functions.
 * The trailing `(args)` is the call site — arguments are passed explicitly,
   not captured.
 * The execution postfix must match the qualifier.
-* All rules from §35, §38, §39, and §40 apply — the anonymous form changes
+* All rules from §36, §39, §40, and §41 apply — the anonymous form changes
   nothing about execution semantics.
-* Values from the enclosing scope are captured by value at creation (§33).
-* To pass mutable state, use explicit `mut` parameters and pass `var` bindings
-  prefixed with `&` — capture alone cannot produce writeback.
-* `chan` parameters are valid in `async`, `thread`, and `process` functions
-  only — passing a `chan` to a `gpu` function is a compile error.
-* GPU functions communicate exclusively through their `.dispatch()` return
-  value — the channel model does not map onto GPU execution.
+* Values from the enclosing scope are captured by value at creation (§35).
+* To pass mutable state, use explicit pointer parameters — capture alone cannot
+  produce writeback.
+* `chan` parameters are valid in `async`, `thread`, and `process` functions only
+  — passing a `chan` to a `gpu` function is a compile error.
+* GPU functions communicate exclusively through their `.dispatch()` return value.
 
 ---
 
+## 36. Async / Await
 
-## 35. Async / Await
-
-```swift
-func fetchUser(id: int) async -> User {
+```vertex
+func fetchUser(id: int32) async -> User {
     // body
 }
 
-let user = fetchUser(id: 1).await()
+let user   = fetchUser(id: 1).await()
 let result = fetchUser(id: 1).await().name
 ```
 
@@ -1248,9 +1373,9 @@ let result = fetchUser(id: 1).await().name
 
 ---
 
-## 36. Tuples
+## 37. Tuples
 
-```swift
+```vertex
 let pair  = (1, true)
 let point = (x: 10, y: 20)
 let nothing: () = ()
@@ -1258,15 +1383,15 @@ let nothing: () = ()
 
 **Destructuring:**
 
-```swift
+```vertex
 let (a, b) = pair
-let (x, y): (int, int) = (14, 17)
+let (x, y): (int32, int32) = (14, 17)
 ```
 
 **Function return:**
 
-```swift
-func minMax(values: [int]) -> (min: int, max: int) {
+```vertex
+func minMax(values: [int32]) -> (min: int32, max: int32) {
     return (0, 100)
 }
 
@@ -1276,8 +1401,8 @@ let (lo, hi) = minMax(values: [3, 1, 4])
 **Rules:**
 
 * `()` is the empty tuple and is an alias for `void`.
-* A single-element parenthesised expression like `(x)` has the type of `x`,
-  not a tuple.
+* A single-element parenthesised expression `(x)` has the type of `x`, not a
+  tuple.
 * Element labels are optional. Unlabelled elements are only accessible via
   destructuring.
 * Two tuple types are identical if they share the same element types and labels
@@ -1288,12 +1413,12 @@ let (lo, hi) = minMax(values: [3, 1, 4])
 
 ---
 
-## 37. Error Handling
+## 38. Error Handling
 
-### 37.1 Optionals — absence without context
+### 38.1 Optionals — absence without context
 
-```swift
-func findUser(id: int) -> User? {
+```vertex
+func findUser(id: int32) -> User? {
     if id < 0 { return nil }
     return User(id)
 }
@@ -1302,10 +1427,10 @@ if let user = findUser(id: 1) { }
 let name = findUser(id: -1) ?? defaultUser
 ```
 
-### 37.2 Tuples — multiple returns, caller decides
+### 38.2 Tuples — multiple returns, caller decides
 
-```swift
-func divide(a: int, b: int) -> (int, string?) {
+```vertex
+func divide(a: int32, b: int32) -> (int32, string?) {
     if b == 0 { return (0, "division by zero") }
     return (a / b, nil)
 }
@@ -1314,10 +1439,10 @@ let (result, err) = divide(a: 10, b: 0)
 if err != nil { }
 ```
 
-### 37.3 Result — explicit Ok/Err
+### 38.3 Result — explicit Ok/Err
 
-```swift
-func parseInt(s: string) -> Result(int, string) {
+```vertex
+func parseInt(s: string) -> Result(int32, string) {
     if s == "" { return Result(Err, "empty string") }
     return Result(Ok, 42)
 }
@@ -1325,18 +1450,18 @@ func parseInt(s: string) -> Result(int, string) {
 
 **Consuming with `if let`:**
 
-```swift
-if let value = divide(a: 10, b: 2) {
-    // value: int
+```vertex
+if let value = parseInt(s: "42") {
+    // value: int32
 }
 ```
 
 **Consuming with `switch`:**
 
-```swift
-switch divide(a: 10, b: 0) {
+```vertex
+switch parseInt(s: "42") {
 case Ok(let value):
-    // value: int
+    // value: int32
 case Err(let err):
     // err: string
 }
@@ -1344,9 +1469,9 @@ case Err(let err):
 
 **Propagating with `.try()`:**
 
-```swift
-func process(s: string) -> Result(int, string) {
-    let n = parseInt(s).try()
+```vertex
+func process(s: string) -> Result(int32, string) {
+    let n = parseInt(s: s).try()
     let d = divide(a: n, b: 2).try()
     return Result(Ok, d)
 }
@@ -1358,10 +1483,9 @@ func process(s: string) -> Result(int, string) {
   forms.
 * `if let` on a `Result` binds the `Ok` value only — use `switch` to inspect
   `Err`.
-* `.try()` may only appear inside a function whose return type is
-  `Result(T, E)`.
+* `.try()` may only appear inside a function whose return type is `Result(T, E)`.
 
-### 37.4 Choosing the Right Primitive
+### 38.4 Choosing the Right Primitive
 
 | Situation                               | Use             |
 |-----------------------------------------|-----------------|
@@ -1371,11 +1495,11 @@ func process(s: string) -> Result(int, string) {
 
 ---
 
-## 38. GPU Kernels
+## 39. GPU Kernels
 
-```swift
+```vertex
 func vectorAdd(a: [float], b: [float]) gpu -> [float] {
-    // normal logic in here
+    // body
     return result
 }
 
@@ -1391,9 +1515,9 @@ let result = vectorAdd(a: x, b: y).dispatch(gpu: 0, mem: 256)
 
 ---
 
-## 39. Threads
+## 40. Threads
 
-```swift
+```vertex
 func crunchData(data: [float]) thread -> [float] {
     // runs in a thread, shared memory
 }
@@ -1410,9 +1534,9 @@ let result = crunchData(data: x).spawn(threads: 4)
 
 ---
 
-## 40. Processes
+## 41. Processes
 
-```swift
+```vertex
 func isolatedWork(data: [float]) process -> [float] {
     // runs in a separate process, full memory isolation
 }
@@ -1429,13 +1553,13 @@ let result = isolatedWork(data: x).fork(processes: 4)
 
 ---
 
-## 41. Channels
+## 42. Channels
 
 `.channel()` is a type-level postfix intrinsic. It constructs a channel that
 carries values of the receiver type. `chan` is the type modifier used in
 annotations and parameter lists.
 
-```swift
+```vertex
 // unbuffered — blocks sender until receiver is ready
 let ch = string.channel()
 
@@ -1451,7 +1575,7 @@ func renderLoop(ch: chan rtp.Packet, ctx: canvas.Context) thread { }
 
 **Operations — blocking:**
 
-```swift
+```vertex
 ch.send(value)          // waits if full or no receiver ready
 let val = ch.receive()  // waits until a value is available
 ch.close()
@@ -1459,7 +1583,7 @@ ch.close()
 
 **Operations — non-blocking:**
 
-```swift
+```vertex
 let ok  = ch.trySend(value)  // bool — false if full or no receiver ready
 let val = ch.tryReceive()    // T?   — nil if channel is empty
 ```
@@ -1478,19 +1602,16 @@ let val = ch.tryReceive()    // T?   — nil if channel is empty
 * `size` must be a compile-time integer literal greater than zero.
 * Omitting `size` produces an unbuffered channel.
 * `chan` is the type modifier for annotations and parameter lists.
-* The inferred type of a `.channel()` binding is the channel — annotation
-  is not required.
 * `.send()` blocks when the buffer is full or the channel is unbuffered and no
   receiver is ready.
 * `.receive()` blocks until a value is available.
 * `.trySend()` returns `false` immediately if the channel cannot accept the
   value — it never blocks.
-* `.tryReceive()` returns `nil` immediately if no value is available — it
-  never blocks.
+* `.tryReceive()` returns `nil` immediately if no value is available — it never
+  blocks.
 * `.send()` or `.trySend()` on a closed channel is a runtime error.
-* `.receive()` or `.tryReceive()` on a closed, empty channel is a runtime
-  error.
-* `.close()` has no non-blocking variant — it always completes immediately.
+* `.receive()` or `.tryReceive()` on a closed, empty channel is a runtime error.
+* `.close()` always completes immediately.
 
 **Operation summary:**
 
@@ -1504,7 +1625,7 @@ let val = ch.tryReceive()    // T?   — nil if channel is empty
 
 ---
 
-## 42. Postfix Execution Model — Summary
+## 43. Postfix Execution Model — Summary
 
 | Keyword   | Postfix                                     | Meaning                      |
 |-----------|---------------------------------------------|------------------------------|
@@ -1520,37 +1641,212 @@ let val = ch.tryReceive()    // T?   — nil if channel is empty
 
 ---
 
-## Explicitly Out of Scope in 2.0
 
-| Feature                                      | Status   |
-|----------------------------------------------|----------|
-| Inheritance                                  | Removed  |
-| String interpolation `\()`                   | Removed  |
-| `_` parameter labels                         | Removed  |
-| `self` as implicit keyword or reserved identifier | Removed  |
-| `static` keyword                             | Removed  |
-| Methods inside structs or classes            | Removed  |
-| `mutating` keyword                           | Removed  |
-| Protocols                                    | Removed  |
-| Extensions                                   | Removed  |
-| `try` / `throws` / `do-catch`               | Removed  |
-| Nested structs or classes                    | Removed  |
-| Generic constraints (`where T:`)             | Deferred |
-| Closures                                     | §33      |
-| Enums with associated values                 | Deferred |
-| Access control                               | Deferred |
-| Pattern matching beyond `if let` and `switch`| Deferred |
-| Custom operators                             | Deferred |
-| `async let` / `TaskGroup` concurrency        | Deferred |
-| `actor` keyword                              | Deferred |
-| Conditional build expressions                | Deferred |
-| Import aliasing                              | Deferred |
-| Mixed tuple element labels                   | Deferred |
-| Tuple `for`-loop destructuring               | Deferred |
-| `inout` tuple parameters                     | Deferred |
-| Tuple splat into function arguments          | Deferred |
-| `Err` value binding in `if let` else branch  | Deferred |
-| `select` over multiple channels              | Deferred |
-| `weak` in manual class instances             | Deferred |
-| GPU grid/block control                       | Deferred |
-| Labeled `break` / `continue`                 | Deferred |
+## 44. Native Interface
+
+```swift
+package windows_d3d11
+build windows
+import "windows/com/d3d11"
+
+class IUnknown : d3d11 {
+    func QueryInterface(obj: IUnknown, riid: *const void, ppv: *void) -> int32
+    func AddRef(obj: IUnknown) -> uint32
+    func Release(obj: IUnknown) -> uint32
+}
+
+class ID3D11Device : IUnknown {
+    func CreateBuffer(
+        d: ID3D11Device,
+        desc: *const void,
+        init: *const void,
+        ppBuffer: **void) -> int32
+    func CreateTexture2D(
+        d: ID3D11Device,
+        desc: *const void,
+        init: *const void,
+        ppTexture: **void) -> int32
+}
+```
+
+Looking at `intrinsics.md`, the grammar elements that need to be formally specified are: `build` tags, `package` declarations (both used in §44 but never formally specified), and the `asm()` expression with its full operand syntax. I'll add three sections continuing from §44.
+
+---
+
+## 45. Build Tags
+
+```vertex
+build intrinsics_amd64
+
+build builtin_amd64
+build arm64
+
+build windows
+```
+
+**Rules:**
+
+* `build <tag>` is a file-level declaration that restricts the file to a specific
+  build condition.
+* Multiple `build` tags may appear in the same file; all conditions must hold for
+  the file to be compiled.
+* `build` declarations must appear at the top of a file, before any `package`,
+  `import`, or top-level declarations.
+* The recognised architecture tags are `amd64` and `arm64`. The compiler
+  selects exactly one architecture tag per target.
+* The recognised layer tags are `intrinsics`, `builtin`, and `core`. These
+  control import access enforcement (§46).
+* Arbitrary platform tags (e.g. `windows`) are valid and may be defined by
+  the build system.
+* A file with no `build` tag is compiled unconditionally on all targets.
+
+---
+
+## 46. Package Declarations
+
+```vertex
+package memory
+package atomic
+package windows_d3d11
+```
+
+**Rules:**
+
+* `package <name>` declares the package identity of the file.
+* The package name must be a valid identifier.
+* Every source file must contain exactly one `package` declaration.
+* The `package` declaration must appear after any `build` tags and before any
+  `import` declarations.
+* All files in the same directory must share the same package name.
+* Package names have no impact on the binary — they are a compile-time namespace
+  construct only.
+
+---
+
+## 47. Inline Assembly
+
+`asm()` is valid only inside a `build intrinsics` function body. It is a
+compile error anywhere else in the language.
+
+**Void form — no return value:**
+
+```vertex
+func fence() {
+    asm("mfence")
+}
+```
+
+**Return form — maps output registers to the return type:**
+
+```vertex
+func load32(addr: *uint32) -> uint32 {
+    return asm(
+        "mov eax, [rdi]",
+        "mfence",
+        in("rdi") addr,
+        out("eax")
+    )
+}
+```
+
+**Tuple return — multiple output-producing constraints:**
+
+```vertex
+func add32(a: uint32, b: uint32) -> (uint32, bool) {
+    return asm(
+        "add eax, ecx",
+        inout("eax") a,
+        in("ecx") b,
+        out("cf")
+    )
+}
+```
+
+**Operand declarations:**
+
+```vertex
+in("register") param          // register is loaded with param before execution
+inout("register") param       // register is seeded with param on entry;
+                              // its exit value contributes to the return
+out("register")               // register's exit value contributes to the return;
+                              // undefined on entry
+clobber("reg", "reg", ...)    // registers are trashed — not inputs or outputs
+```
+
+**Special register tokens** — valid in `out` and `clobber` only:
+
+| Token     | Meaning           |
+|-----------|-------------------|
+| `"cf"`    | carry flag        |
+| `"zf"`    | zero flag         |
+| `"sf"`    | sign flag         |
+| `"of"`    | overflow flag     |
+| `"flags"` | all condition flags |
+
+**Rules:**
+
+* Instruction strings are passed verbatim to the backend assembler. AMD64 uses
+  Intel syntax (`dest, src`; no `%` or `$` prefixes). ARM64 uses standard
+  AArch64 syntax (`dest, src1, src2`).
+* A function body inside a `build intrinsics` package must consist of exactly
+  one `asm()` expression. No other statements may appear alongside it.
+* Output-producing constraints — `inout` and `out` — contribute to the return
+  tuple in declaration order. `in` and `clobber` do not contribute to the return
+  regardless of position.
+* `inout` declares a register that is live both on entry and exit. It is
+  self-contained: no separate `out` for the same register is permitted.
+* The `in` + `clobber` pattern on the same register is valid only when an
+  instruction both reads the register as input and unconditionally destroys it
+  (e.g. `cmpxchg` consuming `eax`). The emitter converts this to a discarded
+  inout in the backend.
+* `in("xN") addr` paired with `out("wN")` is valid when the same physical
+  register is used at different widths across the boundary (e.g. 64-bit address
+  in, 32-bit result out on ARM64). Use `inout` when the width is identical.
+* All `asm()` blocks are implicitly non-eliminatable — the backend never
+  optimises across an `asm` boundary and never removes an `asm` block as dead
+  code.
+* `clobber` registers must not appear in `in`, `inout`, or `out`, except for
+  the `in` + `clobber` pattern described above.
+* Only packages tagged `build builtin` or `build core` may import
+  `intrinsics/*`. Any other import of an intrinsics package is a hard compiler
+  error.
+* Two functions — `likely` and `unlikely` (§`intrinsics/hint`) — are
+  compiler-resolved hints. They carry no `asm()` body; the backend emits branch
+  weight metadata directly. Declaring a body for them is a compile error.
+
+
+## Explicitly Out of Scope in 2.1
+
+| Feature                                           | Status                                  |
+|---------------------------------------------------|-----------------------------------------|
+| Inheritance                                       | Removed                                 |
+| String interpolation `\()`                        | Removed                                 |
+| `_` parameter labels                              | Removed                                 |
+| `self` as implicit keyword or reserved identifier | Removed                                 |
+| `static` keyword                                  | Removed                                 |
+| Methods inside structs or classes                 | Removed                                 |
+| `mutating` keyword                                | Removed                                 |
+| `mut` parameter/receiver keyword                  | Removed — replaced by `*T` pointer syntax |
+| Protocols                                         | Removed                                 |
+| Extensions                                        | Removed                                 |
+| `try` / `throws` / `do-catch`                    | Removed                                 |
+| Nested structs or classes                         | Removed                                 |
+| Generic constraints (`where T:`)                  | Deferred                                |
+| Closures                                          | §35                                     |
+| Enums with associated values                      | Deferred                                |
+| Access control                                    | Deferred                                |
+| Pattern matching beyond `if let` and `switch`     | Deferred                                |
+| Custom operators                                  | Deferred                                |
+| `async let` / `TaskGroup` concurrency             | Deferred                                |
+| `actor` keyword                                   | Deferred                                |
+| Conditional build expressions                     | Deferred                                |
+| Import aliasing                                   | Deferred                                |
+| Mixed tuple element labels                        | Deferred                                |
+| Tuple `for`-loop destructuring                    | Deferred                                |
+| `inout` tuple parameters                          | Deferred                                |
+| Tuple splat into function arguments               | Deferred                                |
+| `Err` value binding in `if let` else branch       | Deferred                                |
+| `select` over multiple channels                   | Deferred                                |
+| `weak` in manual class instances                  | Deferred                                |
+| GPU grid/block control                            | Deferred                                |
+| Labeled `break` / `continue`                      | Deferred                                |

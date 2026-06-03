@@ -1,244 +1,196 @@
 // VertexLexer.g4
-// Vertex Language — Specification 2.0
+// Vertex Language — Lexical Grammar, Specification 2.1
 //
-// Tokenisation only. All semantic constraints are backend responsibilities.
+// Design notes:
+//   • Newlines are plain whitespace — Vertex has no automatic semicolon
+//     insertion, so no NEWLINE token is produced. Statement boundaries are
+//     determined by the syntactic structure of the parser rules.
+//   • Scalar type names (int, int32, float, bool, char, string, void …) are
+//     identifiers, not keywords. This keeps the keyword set small and lets
+//     users shadow them in theory (backend may warn).
+//   • Concurrency postfix names (await, spawn, fork, dispatch, channel, new,
+//     delete, try) are identifiers. They are method names resolved by the
+//     backend, never reserved syntax.
+//   • Result, Ok, Err are promoted to keywords so the parser can reference
+//     them unambiguously in Result-construction and switch-pattern rules
+//     without semantic predicates.
+//   • const is a keyword, but is only grammatically valid in pointer type
+//     position (*const T). The backend rejects it elsewhere.
+//   • inout, out, clobber are reserved for asm() constraint syntax (§47).
+//     They would be very unusual variable names in systems code, and the
+//     asm() form is confined to intrinsics packages anyway.
 
 lexer grammar VertexLexer;
 
-// ═══════════════════════════════════════════════════════════════════
-// Comments (consumed before any other rule)
-// ═══════════════════════════════════════════════════════════════════
-
-BLOCK_COMMENT : '/*' .*? '*/'  -> skip ;
-LINE_COMMENT  : '//' ~[\r\n]* -> skip ;
-
-// ═══════════════════════════════════════════════════════════════════
-// Keywords — must appear before ID so maximal-munch picks them up
-// ═══════════════════════════════════════════════════════════════════
-
-// Control flow
-BREAK       : 'break'       ;
-CASE        : 'case'        ;
-CONTINUE    : 'continue'    ;
-DEFAULT     : 'default'     ;
-DEFER       : 'defer'       ;
-ELSE        : 'else'        ;
+// ── Control-flow keywords ─────────────────────────────────────────────────────
+LET         : 'let' ;
+VAR         : 'var' ;
+FUNC        : 'func' ;
+IF          : 'if' ;
+ELSE        : 'else' ;
+FOR         : 'for' ;
+IN          : 'in' ;          // also reused as the asm 'in' constraint keyword
+WHILE       : 'while' ;
+SWITCH      : 'switch' ;
+CASE        : 'case' ;
+DEFAULT     : 'default' ;
+RETURN      : 'return' ;
+BREAK       : 'break' ;
+CONTINUE    : 'continue' ;
 FALLTHROUGH : 'fallthrough' ;
-FOR         : 'for'         ;
-IF          : 'if'          ;
-IN          : 'in'          ;
-RETURN      : 'return'      ;
-SWITCH      : 'switch'      ;
-WHILE       : 'while'       ;
+DEFER       : 'defer' ;
 
-// Declarations
-BUILD       : 'build'       ;
-CLASS       : 'class'       ;
-ENUM        : 'enum'        ;
-FUNC        : 'func'        ;
-IMPORT      : 'import'      ;
-LET         : 'let'         ;
-PACKAGE     : 'package'     ;
-STRUCT      : 'struct'      ;
-TYPE        : 'type'        ;
-VAR         : 'var'         ;
-WEAK        : 'weak'        ;
+// ── Declaration keywords ──────────────────────────────────────────────────────
+STRUCT  : 'struct' ;
+CLASS   : 'class' ;
+ENUM    : 'enum' ;
+TYPE    : 'type' ;
+IMPORT  : 'import' ;
+PACKAGE : 'package' ;
+BUILD   : 'build' ;
+ASM     : 'asm' ;
 
-// Modifiers / qualifiers
-MUT         : 'mut'         ;
-ASYNC       : 'async'       ;
-THREAD      : 'thread'      ;
-PROCESS     : 'process'     ;
-GPU         : 'gpu'         ;
+// ── Modifier keywords ─────────────────────────────────────────────────────────
+WEAK     : 'weak' ;
+CONST_KW : 'const' ;          // only valid in *const T — context enforced by backend
 
-// Concurrency
-// ← 2.0: 'chan' replaces 'channel' as the type-annotation keyword (§41).
-//        'channel' is no longer a reserved word — it falls through to ID
-//        so that .channel() parses naturally as a postfix method call.
-CHAN        : 'chan'         ;
+// ── Concurrency qualifiers (§36, §39–§41) ─────────────────────────────────────
+ASYNC   : 'async' ;
+THREAD  : 'thread' ;
+PROCESS : 'process' ;
+GPU     : 'gpu' ;
 
-// Pointer / FFI
-ANY         : 'any'         ;
-OPAQUE      : 'opaque'      ;
+// ── Channel type keyword (§42) ────────────────────────────────────────────────
+CHAN : 'chan' ;
 
-// Result type vocabulary — reserved; backend enforces usage context
-RESULT      : 'Result'      ;
-OK          : 'Ok'          ;
-ERR         : 'Err'         ;
+// ── Map type keyword (§25) ────────────────────────────────────────────────────
+MAP : 'map' ;
 
-// Value keywords
-FALSE       : 'false'       ;
-NIL         : 'nil'         ;
-TRUE        : 'true'        ;
+// ── Inline-assembly constraint keywords (§47) ─────────────────────────────────
+// 'in' is reused from the control-flow keywords above (same token, IN).
+// 'out' and 'inout' would be ambiguous as plain identifiers inside asm()
+// bodies, so they are reserved. 'clobber' completes the set.
+INOUT   : 'inout' ;
+OUT_KW  : 'out' ;
+CLOBBER : 'clobber' ;
 
-// ─── Built-in primitive types ──────────────────────────────────────
+// ── Result / error-handling names (§38.3) ─────────────────────────────────────
+RESULT : 'Result' ;
+OK     : 'Ok' ;
+ERR_KW : 'Err' ;
 
-INT     : 'int'    ;
-INT8    : 'int8'   ;
-INT16   : 'int16'  ;
-INT32   : 'int32'  ;
-INT64   : 'int64'  ;
-UINT    : 'uint'   ;
-UINT8   : 'uint8'  ;
-UINT16  : 'uint16' ;
-UINT32  : 'uint32' ;
-UINT64  : 'uint64' ;
-FLOAT   : 'float'  ;
-DOUBLE  : 'double' ;
-BOOL    : 'bool'   ;
-STRING  : 'string' ;
-CHAR    : 'char'   ;
-VOID    : 'void'   ;
+// ── Boolean / nil literals (§1) ───────────────────────────────────────────────
+TRUE  : 'true' ;
+FALSE : 'false' ;
+NIL   : 'nil' ;
 
-// ═══════════════════════════════════════════════════════════════════
-// Operators — multi-character tokens must precede their single-char
-// prefixes so ANTLR's maximal-munch picks the right token.
-// ═══════════════════════════════════════════════════════════════════
-
-// §8 — Overflow operators (before AMP / PLUS / MINUS / STAR)
+// ── Multi-character operators ──────────────────────────────────────────────────
+// Listed before their single-character prefixes so maximal-munch wins:
+//   '...' before '.', '.<' before '.', etc.
+ELLIPSIS     : '...' ;
+HALF_OPEN    : '..<' ;
+IDENTITY_EQ  : '===' ;
+IDENTITY_NEQ : '!==' ;
 OVERFLOW_ADD : '&+' ;
 OVERFLOW_SUB : '&-' ;
 OVERFLOW_MUL : '&*' ;
-
-// §6 — Compound assignment (before ASSIGN and arithmetic singles)
+NIL_COALESCE : '??' ;
+ARROW        : '->' ;
+LSHIFT       : '<<' ;
+RSHIFT       : '>>' ;
+LEQ          : '<=' ;
+GEQ          : '>=' ;
+EQ           : '==' ;
+NEQ          : '!=' ;
+LOGICAL_AND  : '&&' ;
+LOGICAL_OR   : '||' ;
 PLUS_ASSIGN  : '+=' ;
 MINUS_ASSIGN : '-=' ;
 STAR_ASSIGN  : '*=' ;
-SLASH_ASSIGN : '/=' ;
+DIV_ASSIGN   : '/=' ;
 MOD_ASSIGN   : '%=' ;
 
-// §14 — Identity operators (before EQ / NEQ)
-IDENTITY_EQ  : '===' ;
-IDENTITY_NEQ : '!==' ;
+// ── Single-character operators ─────────────────────────────────────────────────
+PLUS     : '+' ;
+MINUS    : '-' ;
+STAR     : '*' ;
+SLASH    : '/' ;
+PERCENT  : '%' ;
+TILDE    : '~' ;
+AMP      : '&' ;
+PIPE     : '|' ;
+CARET    : '^' ;
+BANG     : '!' ;
+LT       : '<' ;
+GT       : '>' ;
+ASSIGN   : '=' ;
+QUESTION : '?' ;
+COLON    : ':' ;
 
-// §9 — Equality (before ASSIGN / BANG)
-EQ  : '==' ;
-NEQ : '!=' ;
+// ── Delimiters ─────────────────────────────────────────────────────────────────
+LPAREN   : '(' ;
+RPAREN   : ')' ;
+LBRACE   : '{' ;
+RBRACE   : '}' ;
+LBRACKET : '[' ;
+RBRACKET : ']' ;
+DOT      : '.' ;
+COMMA    : ',' ;
 
-// §9 — Ordered comparison (before ASSIGN)
-GTE : '>=' ;
-LTE : '<=' ;
+// ── Numeric literals (§1) ──────────────────────────────────────────────────────
+//
+// Ordering enforces maximal-munch when two rules share a prefix:
+//   HEX_FLOAT_LIT before HEX_INT_LIT  — '0xFp2' is a float, '0xFF' is an int
+//   DEC_FLOAT_LIT before DEC_INT_LIT  — '3.14' is a float, '42' is an int
+//
+// Negative numeric literals do not exist at the token level. The unary MINUS
+// operator in the expression grammar handles '-1000', '-3.14', etc.
+//
+// Underscore separators (1_000_000, 0xFF_FF) are consumed here and ignored
+// by the compiler backend. They carry no semantic meaning.
 
-// §7 — Bit-shift (before GT / LT)
-LSHIFT : '<<' ;
-RSHIFT : '>>' ;
+HEX_FLOAT_LIT : '0' [xX] HEX_DIGIT+ ('.' HEX_DIGIT+)? [pP] [+\-]? DEC_DIGIT+ ;
+HEX_INT_LIT   : '0' [xX] HEX_DIGIT (HEX_DIGIT | '_')* ;
+OCT_INT_LIT   : '0' [oO] OCT_DIGIT (OCT_DIGIT | '_')* ;
+BIN_INT_LIT   : '0' [bB] BIN_DIGIT (BIN_DIGIT | '_')* ;
 
-// §10 — Logical (before AMP / PIPE)
-AND : '&&' ;
-OR  : '||' ;
+// Decimal float: either 'digits.digits[exp]' or 'digits exp' (no bare dot).
+// A bare '3.' is NOT a float literal; it tokenises as DEC_INT_LIT DOT.
+DEC_FLOAT_LIT : DEC_SEQ '.' DEC_SEQ DEC_EXP?
+              | DEC_SEQ DEC_EXP
+              ;
 
-// Function return-type separator (before MINUS)
-ARROW : '->' ;
+DEC_INT_LIT   : DEC_DIGIT (DEC_DIGIT | '_')* ;
 
-// §13 — Nil-coalescing (before QUESTION)
-NIL_COALESCE : '??' ;
+// ── String and character literals (§1, §3) ─────────────────────────────────────
+//
+// char is a type annotation, not a distinct literal form. Both 'char' and
+// 'string' values use double-quote syntax ("A" vs "hello"). The semantic
+// layer validates that a char-typed binding holds exactly one code unit.
+//
+// Multiline strings use backtick delimiters (§3). Content is verbatim:
+// no escape sequences are processed, and no indentation is stripped.
 
-// §11 — Range operators — both start with '.'; must precede DOT.
-HALF_OPEN_RANGE : '..<' ;
-ELLIPSIS        : '...' ;
+STRING_LIT          : '"' STR_CHAR* '"' ;
+MULTILINE_STRING_LIT: '`' .*? '`' ;
 
-// ─── Single-character operators ────────────────────────────────────
-PLUS    : '+' ;
-MINUS   : '-' ;
-STAR    : '*' ;
-SLASH   : '/' ;
-PERCENT : '%' ;
+// ── Identifiers ────────────────────────────────────────────────────────────────
+// Placed after all keyword rules. ANTLR lexes the longest keyword match
+// before falling through to IDENTIFIER, so 'let' is LET, not IDENTIFIER.
+IDENTIFIER : ID_START ID_CONT* ;
 
-// AMP is bitwise-AND infix AND the mut-param address-of prefix (&var).
-// The parser distinguishes by syntactic position.
-AMP     : '&' ;
-PIPE    : '|' ;
-CARET   : '^' ;
-TILDE   : '~' ;
-BANG    : '!' ;
-GT      : '>' ;
-LT      : '<' ;
-ASSIGN  : '=' ;
-QUESTION: '?' ;
+// ── Whitespace and comments ────────────────────────────────────────────────────
+// Newlines skipped: no statement-terminator token is produced.
+WS           : [ \t\r\n]+ -> skip ;
+LINE_COMMENT : '//' ~[\r\n]* -> skip ;
 
-// ═══════════════════════════════════════════════════════════════════
-// Punctuation
-// ═══════════════════════════════════════════════════════════════════
-
-LPAREN    : '(' ;
-RPAREN    : ')' ;
-LBRACE    : '{' ;
-RBRACE    : '}' ;
-LBRACKET  : '[' ;
-RBRACKET  : ']' ;
-COLON     : ':' ;
-COMMA     : ',' ;
-DOT       : '.' ;
-
-// Semicolons are silently discarded; they are not statement terminators.
-SEMICOLON : ';' -> skip ;
-
-// ═══════════════════════════════════════════════════════════════════
-// Numeric literals — more specific / longer patterns first
-// ═══════════════════════════════════════════════════════════════════
-
-// §1 — Hex float   0xFp2   0xFp-2   0xC.3p0
-HEX_FLOAT_LIT
-    : '0' [xX] HEX_DIGITS ('.' HEX_DIGITS)? [pP] [+\-]? DEC_DIGITS
-    ;
-
-// §1 — Hex integer   0xFF   0xBadFace   0x0123_4567_89ab_cdef
-HEX_INT_LIT
-    : '0' [xX] HEX_DIGITS
-    ;
-
-// §1 — Binary integer   0b101010
-BIN_INT_LIT
-    : '0' [bB] [01] [01_]*
-    ;
-
-// §1 — Octal integer   0o52
-OCT_INT_LIT
-    : '0' [oO] [0-7] [0-7_]*
-    ;
-
-// §1 — Decimal float   3.14   1_000.000_1   1.25e2   1.25E-2
-// Must precede DEC_INT_LIT so "3.14" is not lexed as "3" then ".14".
-DEC_FLOAT_LIT
-    : DEC_DIGITS '.' DEC_DIGITS ([eE] [+\-]? DEC_DIGITS)?
-    | DEC_DIGITS [eE] [+\-]? DEC_DIGITS
-    ;
-
-// §1 — Decimal integer   42   1_000_000
-DEC_INT_LIT
-    : DEC_DIGITS
-    ;
-
-// ═══════════════════════════════════════════════════════════════════
-// String literals
-// ═══════════════════════════════════════════════════════════════════
-
-// §1 — Double-quoted, single-line.  Used for both string and char values;
-// the type system (backend) distinguishes them by annotation.
-STRING_LIT
-    : '"' (~["\\\r\n] | '\\' .)* '"'
-    ;
-
-// §3 — Backtick multiline string.  No indentation stripping (backend note).
-RAW_STRING_LIT
-    : '`' .*? '`'
-    ;
-
-// ═══════════════════════════════════════════════════════════════════
-// Identifier — after all keywords
-// ═══════════════════════════════════════════════════════════════════
-
-ID : [a-zA-Z_] [a-zA-Z0-9_]* ;
-
-// ═══════════════════════════════════════════════════════════════════
-// Whitespace — Vertex is newline-insensitive; all WS skipped
-// ═══════════════════════════════════════════════════════════════════
-
-WS : [ \t\r\n]+ -> skip ;
-
-// ═══════════════════════════════════════════════════════════════════
-// Fragments
-// ═══════════════════════════════════════════════════════════════════
-
-fragment DEC_DIGITS : [0-9] [0-9_]* ;
-fragment HEX_DIGITS : [0-9a-fA-F] [0-9a-fA-F_]* ;
+// ── Fragments ──────────────────────────────────────────────────────────────────
+fragment HEX_DIGIT : [0-9a-fA-F] ;
+fragment OCT_DIGIT : [0-7] ;
+fragment BIN_DIGIT : [01] ;
+fragment DEC_DIGIT : [0-9] ;
+fragment DEC_SEQ   : DEC_DIGIT (DEC_DIGIT | '_')* ;
+fragment DEC_EXP   : [eE] [+\-]? DEC_DIGIT+ ;
+fragment STR_CHAR  : ~["\\\r\n] | '\\' [nrtbf"\\] ;
+fragment ID_START  : [a-zA-Z_] ;
+fragment ID_CONT   : [a-zA-Z0-9_] ;

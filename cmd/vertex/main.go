@@ -1,127 +1,296 @@
-// cmd/main.go — Vertex language compiler driver.
-//
-// Usage:
-//
-//	vertex -o <output>            <file.vs> [file.vs ...]   # native binary
-//	vertex -wasm -o <output.wasm> <file.vs> [file.vs ...]  # wasm module
-//
-// Flags:
-//
-//	-o string      Output file path (default "a.out" or "a.wasm")
-//	-wasm          Emit a .wasm module instead of a native binary
-//	-platform      Target platform: linux | darwin | windows (default: linux)
-//	-tags          Comma-separated extra build tags (e.g. "syscalls")
-//	-module        Module path prefix (e.g. github.com/acme/myapp)
-//	-root          Module root directory (default: directory of first source file)
-//	-entry         Entry-point function name (default: "main")
-//	-no-dce        Disable dead-code elimination (DCE is on by default)
-//	-v             Print version and exit
+// cmd/vertex/main.go
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
+
+	cir "github.com/vertex-language/ir/c"
+	"github.com/vertex-language/ir/mir"
+	mirAMD64 "github.com/vertex-language/ir/mir/amd64"
+	cLower "github.com/vertex-language/ir/mir/amd64/c"
+
+	encAMD64 "github.com/vertex-language/encoder/amd64"
+
+	objCOFF "github.com/vertex-language/objectfile/coff"
+	objELF "github.com/vertex-language/objectfile/elf"
+	objMachO "github.com/vertex-language/objectfile/macho"
+
+	lnkELF "github.com/vertex-language/linker/elf"
+	lnkMachO "github.com/vertex-language/linker/macho"
+	lnkPE "github.com/vertex-language/linker/pe"
 
 	"github.com/vertex-language/vertex/compiler"
 )
 
-func main() {
-	var (
-		outPath  = flag.String("o", "", "output file path")
-		wasmMode = flag.Bool("wasm", false, "emit .wasm module")
-		platform = flag.String("platform", "linux", "target platform: linux | darwin | windows")
-		tagsRaw  = flag.String("tags", "", "comma-separated extra build tags")
-		modPath  = flag.String("module", "", "module path prefix")
-		modRoot  = flag.String("root", "", "module root directory")
-		entry    = flag.String("entry", "", `entry-point function name (default "main")`)
-		noDCE    = flag.Bool("no-dce", false, "disable dead-code elimination")
-		verbose  = flag.Bool("v", false, "print version and exit")
-	)
-	flag.Usage = usage
-	flag.Parse()
+const version = "0.2.0"
 
-	if *verbose {
-		fmt.Printf("vertex compiler %s\n", compiler.Version)
-		os.Exit(0)
-	}
+// ─────────────────────────────────────────────────────────────────────────────
+// Repeatable -I flag
+// ─────────────────────────────────────────────────────────────────────────────
 
-	sources := flag.Args()
-	if len(sources) == 0 {
-		fmt.Fprintln(os.Stderr, "error: no source files specified")
-		usage()
-		os.Exit(1)
-	}
+type searchPathFlag []string
 
-	// Validate source files exist.
-	for _, s := range sources {
-		if _, err := os.Stat(s); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// Default output path.
-	out := *outPath
-	if out == "" {
-		if *wasmMode {
-			out = "a.wasm"
-		} else {
-			out = "a.out"
-		}
-	}
-
-	// Extra build tags.
-	var extraTags []string
-	if *tagsRaw != "" {
-		for _, t := range strings.Split(*tagsRaw, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				extraTags = append(extraTags, t)
-			}
-		}
-	}
-
-	opts := compiler.Options{
-		Platform:   *platform,
-		ExtraTags:  extraTags,
-		OutputWasm: *wasmMode,
-		ModulePath: *modPath,
-		ModuleRoot: *modRoot,
-		Entry:      *entry,
-		DCE:        !*noDCE, // DCE is on by default; -no-dce turns it off
-	}
-
-	binary, err := compiler.CompileFiles(sources, opts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile(out, binary, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "error: write %s: %v\n", out, err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("wrote %s (%d bytes)\n", out, len(binary))
+func (f *searchPathFlag) String() string {
+	return strings.Join(*f, string(filepath.ListSeparator))
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `Vertex language compiler %s
+func (f *searchPathFlag) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
 
-Usage:
-  vertex [flags] <file.vs> [file.vs ...]
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// ─────────────────────────────────────────────────────────────────────────────
 
-Flags:
-`, compiler.Version)
-	flag.PrintDefaults()
-	fmt.Fprintln(os.Stderr, `
-Examples:
-  vertex -o server server.vs
-  vertex -wasm -o main.wasm main.vs
-  vertex -platform darwin -o myapp main.vs
-  vertex -platform linux -tags syscalls -o net net.vs
-  vertex -no-dce -o debug main.vs
-  vertex -entry start -wasm -o lib.wasm lib.vs
-`)
+func main() {
+	os.Exit(run(os.Args[1:], os.Stderr))
+}
+
+func run(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("vertex", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var (
+		emitC       bool
+		compileOnly bool
+		outputFile  string
+		targetStr   string
+		printVer    bool
+		paths       searchPathFlag
+	)
+
+	fs.BoolVar(&emitC, "emit-c", false, "emit C source code instead of native binary")
+	fs.BoolVar(&compileOnly, "c", false, "compile and assemble, but do not link (outputs object file)")
+	fs.StringVar(&outputFile, "o", "", "write output to `file` (default: input stem + \".o\" / \".c\" / or executable)")
+	fs.StringVar(&targetStr, "target", "linux-amd64",
+		"target platform: linux-amd64 (default), darwin-amd64, windows-amd64")
+	fs.BoolVar(&printVer, "version", false, "print version and exit")
+	fs.BoolVar(&printVer, "v", false, "shorthand for -version")
+	fs.Var(&paths, "I", "add a package search `path` (repeatable)")
+
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
+		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs>\n\nFlags:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(stderr, "\nExamples:\n")
+		fmt.Fprintf(stderr, "  vertex -o main main.vs          (Build native executable)\n")
+		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs     (Build object file)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs (Emit C source)\n")
+	}
+
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if printVer {
+		fmt.Fprintf(os.Stdout, "vertex %s\n", version)
+		return 0
+	}
+
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "vertex: expected exactly 1 input file, got %d\n", fs.NArg())
+		fs.Usage()
+		return 2
+	}
+	inputFile := fs.Arg(0)
+
+	// ── Target Resolution ─────────────────────────────────────────────────────
+	cTarget, mTarget, ok := parseTarget(targetStr)
+	if !ok {
+		fmt.Fprintf(stderr, "vertex: unsupported target %q\n", targetStr)
+		return 2
+	}
+
+	// ── 1. Compile to C IR (Frontend) ─────────────────────────────────────────
+	cfg := compiler.Config{
+		Target:      cTarget,
+		SearchPaths: []string(paths),
+	}
+	comp := compiler.New(cfg)
+
+	cMod, err := comp.CompileFile(inputFile)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	// Print warnings / notes
+	for _, d := range comp.Diagnostics().All() {
+		if d.Severity != compiler.SevError {
+			fmt.Fprintln(stderr, d)
+		}
+	}
+
+	// ── Branch: Emit C source directly ────────────────────────────────────────
+	if emitC {
+		if outputFile == "" {
+			outputFile = replaceExt(inputFile, ".c")
+		}
+		cSource, err := cMod.EmitC()
+		if err != nil {
+			fmt.Fprintf(stderr, "vertex: c emission failed: %v\n", err)
+			return 1
+		}
+		if err := writeOutput(outputFile, cSource); err != nil {
+			fmt.Fprintf(stderr, "vertex: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// ── 2. Lower to MIR ───────────────────────────────────────────────────────
+	abi := mirAMD64.ABIForTarget(mTarget)
+	mirMod := mir.NewModule(mTarget)
+
+	cFrames, err := cLower.LowerModule(cMod, mirMod, abi)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: mir lowering failed: %v\n", err)
+		return 1
+	}
+
+	// ── 3. Encode to Machine Code ─────────────────────────────────────────────
+	enc := encAMD64.NewEncoder(abi)
+	sections, err := enc.Encode(mirMod, cFrames)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: encoding failed: %v\n", err)
+		return 1
+	}
+
+	// ── 4. Assemble Object File ───────────────────────────────────────────────
+	var objBytes []byte
+	switch mTarget {
+	case mir.TargetLinuxAMD64:
+		objFile := objELF.NewObjectFile(mTarget)
+		for _, s := range sections {
+			objFile.AddSection(s)
+		}
+		objBytes, err = objFile.Serialize()
+
+	case mir.TargetWindowsAMD64:
+		objFile := objCOFF.NewObjectFile(mTarget)
+		for _, s := range sections {
+			objFile.AddSection(s)
+		}
+		objBytes, err = objFile.Serialize()
+
+	case mir.TargetDarwinAMD64:
+		objFile := objMachO.NewObjectFile(mTarget)
+		for _, s := range sections {
+			objFile.AddSection(s)
+		}
+		objBytes, err = objFile.Serialize()
+	}
+
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: object file assembly failed: %v\n", err)
+		return 1
+	}
+
+	// ── Branch: Compile Only (Output Object File) ─────────────────────────────
+	if compileOnly {
+		if outputFile == "" {
+			outputFile = replaceExt(inputFile, ".o")
+			if mTarget == mir.TargetWindowsAMD64 {
+				outputFile = replaceExt(inputFile, ".obj")
+			}
+		}
+		if err := writeOutput(outputFile, objBytes); err != nil {
+			fmt.Fprintf(stderr, "vertex: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// ── 5. Link Executable ────────────────────────────────────────────────────
+	if outputFile == "" {
+		outputFile = replaceExt(inputFile, "")
+		if mTarget == mir.TargetWindowsAMD64 {
+			outputFile += ".exe"
+		}
+	}
+
+	var exeBytes []byte
+	switch mTarget {
+	case mir.TargetLinuxAMD64:
+		linker := lnkELF.NewLinker(lnkELF.ArchAMD64)
+		linker.AddObject(filepath.Base(inputFile)+".o", objBytes)
+		exeBytes, err = linker.Link()
+
+	case mir.TargetWindowsAMD64:
+		linker := lnkPE.NewLinker(lnkPE.ArchAMD64)
+		linker.AddObject(filepath.Base(inputFile)+".obj", objBytes)
+		exeBytes, err = linker.Link()
+
+	case mir.TargetDarwinAMD64:
+		linker := lnkMachO.NewLinker(lnkMachO.ArchAMD64)
+		linker.AddObject(filepath.Base(inputFile)+".o", objBytes)
+		exeBytes, err = linker.Link()
+	}
+
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: linking failed: %v\n", err)
+		return 1
+	}
+
+	if err := writeOutput(outputFile, exeBytes); err != nil {
+		fmt.Fprintf(stderr, "vertex: %v\n", err)
+		return 1
+	}
+
+	// Mark the binary as executable on Unix systems.
+	if mTarget != mir.TargetWindowsAMD64 && outputFile != "-" {
+		os.Chmod(outputFile, 0755)
+	}
+
+	return 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func writeOutput(path string, data []byte) error {
+	if path == "-" {
+		_, err := os.Stdout.Write(data)
+		return err
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("cannot create output directory %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	return nil
+}
+
+func replaceExt(path, newExt string) string {
+	ext := filepath.Ext(path)
+	if ext == "" {
+		return path + newExt
+	}
+	return path[:len(path)-len(ext)] + newExt
+}
+
+// parseTarget returns both the C IR target and the MIR target.
+// Note: Currently limited to AMD64 targets as they are the fully-supported 
+// paths demonstrated in the provided encoding toolchain.
+func parseTarget(s string) (cir.Target, mir.Target, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "linux-amd64", "linux-x86_64", "linux/amd64":
+		return cir.TargetLinuxAMD64, mir.TargetLinuxAMD64, true
+	case "darwin-amd64", "darwin-x86_64", "macos-amd64":
+		return cir.TargetDarwinAMD64, mir.TargetDarwinAMD64, true
+	case "windows-amd64", "windows-x86_64", "windows/amd64":
+		return cir.TargetWindowsAMD64, mir.TargetWindowsAMD64, true
+	default:
+		return cir.TargetUnknown, 0, false
+	}
 }

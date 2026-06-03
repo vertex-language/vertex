@@ -1,3 +1,5 @@
+package main
+
 import (
     fs    "os/filesystem"
     path  "os/filesystem/path"

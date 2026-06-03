@@ -7,7 +7,7 @@ wasm2wat qsort.wasm -o out.wat
 
 wasm-objdump -x output.wasm
 
-go mod edit -replace github.com/vertex-language/wasm-compiler=/home/yourpath/wasm-compiler
+go mod edit -replace github.com/vertex-language/ir=/Users/galaxy/Desktop/ir
 
 
 gdb ./tcp_server
