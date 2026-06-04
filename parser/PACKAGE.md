@@ -29,77 +29,78 @@ const (
 	VertexLexerASM                  = 24
 	VertexLexerWEAK                 = 25
 	VertexLexerCONST_KW             = 26
-	VertexLexerASYNC                = 27
-	VertexLexerTHREAD               = 28
-	VertexLexerPROCESS              = 29
-	VertexLexerGPU                  = 30
-	VertexLexerCHAN                 = 31
-	VertexLexerMAP                  = 32
-	VertexLexerINOUT                = 33
-	VertexLexerOUT_KW               = 34
-	VertexLexerCLOBBER              = 35
-	VertexLexerRESULT               = 36
-	VertexLexerOK                   = 37
-	VertexLexerERR_KW               = 38
-	VertexLexerTRUE                 = 39
-	VertexLexerFALSE                = 40
-	VertexLexerNIL                  = 41
-	VertexLexerELLIPSIS             = 42
-	VertexLexerHALF_OPEN            = 43
-	VertexLexerIDENTITY_EQ          = 44
-	VertexLexerIDENTITY_NEQ         = 45
-	VertexLexerOVERFLOW_ADD         = 46
-	VertexLexerOVERFLOW_SUB         = 47
-	VertexLexerOVERFLOW_MUL         = 48
-	VertexLexerNIL_COALESCE         = 49
-	VertexLexerARROW                = 50
-	VertexLexerLSHIFT               = 51
-	VertexLexerRSHIFT               = 52
-	VertexLexerLEQ                  = 53
-	VertexLexerGEQ                  = 54
-	VertexLexerEQ                   = 55
-	VertexLexerNEQ                  = 56
-	VertexLexerLOGICAL_AND          = 57
-	VertexLexerLOGICAL_OR           = 58
-	VertexLexerPLUS_ASSIGN          = 59
-	VertexLexerMINUS_ASSIGN         = 60
-	VertexLexerSTAR_ASSIGN          = 61
-	VertexLexerDIV_ASSIGN           = 62
-	VertexLexerMOD_ASSIGN           = 63
-	VertexLexerPLUS                 = 64
-	VertexLexerMINUS                = 65
-	VertexLexerSTAR                 = 66
-	VertexLexerSLASH                = 67
-	VertexLexerPERCENT              = 68
-	VertexLexerTILDE                = 69
-	VertexLexerAMP                  = 70
-	VertexLexerPIPE                 = 71
-	VertexLexerCARET                = 72
-	VertexLexerBANG                 = 73
-	VertexLexerLT                   = 74
-	VertexLexerGT                   = 75
-	VertexLexerASSIGN               = 76
-	VertexLexerQUESTION             = 77
-	VertexLexerCOLON                = 78
-	VertexLexerLPAREN               = 79
-	VertexLexerRPAREN               = 80
-	VertexLexerLBRACE               = 81
-	VertexLexerRBRACE               = 82
-	VertexLexerLBRACKET             = 83
-	VertexLexerRBRACKET             = 84
-	VertexLexerDOT                  = 85
-	VertexLexerCOMMA                = 86
-	VertexLexerHEX_FLOAT_LIT        = 87
-	VertexLexerHEX_INT_LIT          = 88
-	VertexLexerOCT_INT_LIT          = 89
-	VertexLexerBIN_INT_LIT          = 90
-	VertexLexerDEC_FLOAT_LIT        = 91
-	VertexLexerDEC_INT_LIT          = 92
-	VertexLexerSTRING_LIT           = 93
-	VertexLexerMULTILINE_STRING_LIT = 94
-	VertexLexerIDENTIFIER           = 95
-	VertexLexerWS                   = 96
-	VertexLexerLINE_COMMENT         = 97
+	VertexLexerREINTERPRET          = 27
+	VertexLexerASYNC                = 28
+	VertexLexerTHREAD               = 29
+	VertexLexerPROCESS              = 30
+	VertexLexerGPU                  = 31
+	VertexLexerCHAN                 = 32
+	VertexLexerMAP                  = 33
+	VertexLexerINOUT                = 34
+	VertexLexerOUT_KW               = 35
+	VertexLexerCLOBBER              = 36
+	VertexLexerRESULT               = 37
+	VertexLexerOK                   = 38
+	VertexLexerERR_KW               = 39
+	VertexLexerTRUE                 = 40
+	VertexLexerFALSE                = 41
+	VertexLexerNIL                  = 42
+	VertexLexerELLIPSIS             = 43
+	VertexLexerHALF_OPEN            = 44
+	VertexLexerIDENTITY_EQ          = 45
+	VertexLexerIDENTITY_NEQ         = 46
+	VertexLexerOVERFLOW_ADD         = 47
+	VertexLexerOVERFLOW_SUB         = 48
+	VertexLexerOVERFLOW_MUL         = 49
+	VertexLexerNIL_COALESCE         = 50
+	VertexLexerARROW                = 51
+	VertexLexerLSHIFT               = 52
+	VertexLexerRSHIFT               = 53
+	VertexLexerLEQ                  = 54
+	VertexLexerGEQ                  = 55
+	VertexLexerEQ                   = 56
+	VertexLexerNEQ                  = 57
+	VertexLexerLOGICAL_AND          = 58
+	VertexLexerLOGICAL_OR           = 59
+	VertexLexerPLUS_ASSIGN          = 60
+	VertexLexerMINUS_ASSIGN         = 61
+	VertexLexerSTAR_ASSIGN          = 62
+	VertexLexerDIV_ASSIGN           = 63
+	VertexLexerMOD_ASSIGN           = 64
+	VertexLexerPLUS                 = 65
+	VertexLexerMINUS                = 66
+	VertexLexerSTAR                 = 67
+	VertexLexerSLASH                = 68
+	VertexLexerPERCENT              = 69
+	VertexLexerTILDE                = 70
+	VertexLexerAMP                  = 71
+	VertexLexerPIPE                 = 72
+	VertexLexerCARET                = 73
+	VertexLexerBANG                 = 74
+	VertexLexerLT                   = 75
+	VertexLexerGT                   = 76
+	VertexLexerASSIGN               = 77
+	VertexLexerQUESTION             = 78
+	VertexLexerCOLON                = 79
+	VertexLexerLPAREN               = 80
+	VertexLexerRPAREN               = 81
+	VertexLexerLBRACE               = 82
+	VertexLexerRBRACE               = 83
+	VertexLexerLBRACKET             = 84
+	VertexLexerRBRACKET             = 85
+	VertexLexerDOT                  = 86
+	VertexLexerCOMMA                = 87
+	VertexLexerHEX_FLOAT_LIT        = 88
+	VertexLexerHEX_INT_LIT          = 89
+	VertexLexerOCT_INT_LIT          = 90
+	VertexLexerBIN_INT_LIT          = 91
+	VertexLexerDEC_FLOAT_LIT        = 92
+	VertexLexerDEC_INT_LIT          = 93
+	VertexLexerSTRING_LIT           = 94
+	VertexLexerMULTILINE_STRING_LIT = 95
+	VertexLexerIDENTIFIER           = 96
+	VertexLexerWS                   = 97
+	VertexLexerLINE_COMMENT         = 98
 )
     VertexLexer tokens.
 
@@ -131,84 +132,85 @@ const (
 	VertexParserASM                  = 24
 	VertexParserWEAK                 = 25
 	VertexParserCONST_KW             = 26
-	VertexParserASYNC                = 27
-	VertexParserTHREAD               = 28
-	VertexParserPROCESS              = 29
-	VertexParserGPU                  = 30
-	VertexParserCHAN                 = 31
-	VertexParserMAP                  = 32
-	VertexParserINOUT                = 33
-	VertexParserOUT_KW               = 34
-	VertexParserCLOBBER              = 35
-	VertexParserRESULT               = 36
-	VertexParserOK                   = 37
-	VertexParserERR_KW               = 38
-	VertexParserTRUE                 = 39
-	VertexParserFALSE                = 40
-	VertexParserNIL                  = 41
-	VertexParserELLIPSIS             = 42
-	VertexParserHALF_OPEN            = 43
-	VertexParserIDENTITY_EQ          = 44
-	VertexParserIDENTITY_NEQ         = 45
-	VertexParserOVERFLOW_ADD         = 46
-	VertexParserOVERFLOW_SUB         = 47
-	VertexParserOVERFLOW_MUL         = 48
-	VertexParserNIL_COALESCE         = 49
-	VertexParserARROW                = 50
-	VertexParserLSHIFT               = 51
-	VertexParserRSHIFT               = 52
-	VertexParserLEQ                  = 53
-	VertexParserGEQ                  = 54
-	VertexParserEQ                   = 55
-	VertexParserNEQ                  = 56
-	VertexParserLOGICAL_AND          = 57
-	VertexParserLOGICAL_OR           = 58
-	VertexParserPLUS_ASSIGN          = 59
-	VertexParserMINUS_ASSIGN         = 60
-	VertexParserSTAR_ASSIGN          = 61
-	VertexParserDIV_ASSIGN           = 62
-	VertexParserMOD_ASSIGN           = 63
-	VertexParserPLUS                 = 64
-	VertexParserMINUS                = 65
-	VertexParserSTAR                 = 66
-	VertexParserSLASH                = 67
-	VertexParserPERCENT              = 68
-	VertexParserTILDE                = 69
-	VertexParserAMP                  = 70
-	VertexParserPIPE                 = 71
-	VertexParserCARET                = 72
-	VertexParserBANG                 = 73
-	VertexParserLT                   = 74
-	VertexParserGT                   = 75
-	VertexParserASSIGN               = 76
-	VertexParserQUESTION             = 77
-	VertexParserCOLON                = 78
-	VertexParserLPAREN               = 79
-	VertexParserRPAREN               = 80
-	VertexParserLBRACE               = 81
-	VertexParserRBRACE               = 82
-	VertexParserLBRACKET             = 83
-	VertexParserRBRACKET             = 84
-	VertexParserDOT                  = 85
-	VertexParserCOMMA                = 86
-	VertexParserHEX_FLOAT_LIT        = 87
-	VertexParserHEX_INT_LIT          = 88
-	VertexParserOCT_INT_LIT          = 89
-	VertexParserBIN_INT_LIT          = 90
-	VertexParserDEC_FLOAT_LIT        = 91
-	VertexParserDEC_INT_LIT          = 92
-	VertexParserSTRING_LIT           = 93
-	VertexParserMULTILINE_STRING_LIT = 94
-	VertexParserIDENTIFIER           = 95
-	VertexParserWS                   = 96
-	VertexParserLINE_COMMENT         = 97
+	VertexParserREINTERPRET          = 27
+	VertexParserASYNC                = 28
+	VertexParserTHREAD               = 29
+	VertexParserPROCESS              = 30
+	VertexParserGPU                  = 31
+	VertexParserCHAN                 = 32
+	VertexParserMAP                  = 33
+	VertexParserINOUT                = 34
+	VertexParserOUT_KW               = 35
+	VertexParserCLOBBER              = 36
+	VertexParserRESULT               = 37
+	VertexParserOK                   = 38
+	VertexParserERR_KW               = 39
+	VertexParserTRUE                 = 40
+	VertexParserFALSE                = 41
+	VertexParserNIL                  = 42
+	VertexParserELLIPSIS             = 43
+	VertexParserHALF_OPEN            = 44
+	VertexParserIDENTITY_EQ          = 45
+	VertexParserIDENTITY_NEQ         = 46
+	VertexParserOVERFLOW_ADD         = 47
+	VertexParserOVERFLOW_SUB         = 48
+	VertexParserOVERFLOW_MUL         = 49
+	VertexParserNIL_COALESCE         = 50
+	VertexParserARROW                = 51
+	VertexParserLSHIFT               = 52
+	VertexParserRSHIFT               = 53
+	VertexParserLEQ                  = 54
+	VertexParserGEQ                  = 55
+	VertexParserEQ                   = 56
+	VertexParserNEQ                  = 57
+	VertexParserLOGICAL_AND          = 58
+	VertexParserLOGICAL_OR           = 59
+	VertexParserPLUS_ASSIGN          = 60
+	VertexParserMINUS_ASSIGN         = 61
+	VertexParserSTAR_ASSIGN          = 62
+	VertexParserDIV_ASSIGN           = 63
+	VertexParserMOD_ASSIGN           = 64
+	VertexParserPLUS                 = 65
+	VertexParserMINUS                = 66
+	VertexParserSTAR                 = 67
+	VertexParserSLASH                = 68
+	VertexParserPERCENT              = 69
+	VertexParserTILDE                = 70
+	VertexParserAMP                  = 71
+	VertexParserPIPE                 = 72
+	VertexParserCARET                = 73
+	VertexParserBANG                 = 74
+	VertexParserLT                   = 75
+	VertexParserGT                   = 76
+	VertexParserASSIGN               = 77
+	VertexParserQUESTION             = 78
+	VertexParserCOLON                = 79
+	VertexParserLPAREN               = 80
+	VertexParserRPAREN               = 81
+	VertexParserLBRACE               = 82
+	VertexParserRBRACE               = 83
+	VertexParserLBRACKET             = 84
+	VertexParserRBRACKET             = 85
+	VertexParserDOT                  = 86
+	VertexParserCOMMA                = 87
+	VertexParserHEX_FLOAT_LIT        = 88
+	VertexParserHEX_INT_LIT          = 89
+	VertexParserOCT_INT_LIT          = 90
+	VertexParserBIN_INT_LIT          = 91
+	VertexParserDEC_FLOAT_LIT        = 92
+	VertexParserDEC_INT_LIT          = 93
+	VertexParserSTRING_LIT           = 94
+	VertexParserMULTILINE_STRING_LIT = 95
+	VertexParserIDENTIFIER           = 96
+	VertexParserWS                   = 97
+	VertexParserLINE_COMMENT         = 98
 )
     VertexParser tokens.
 
 const (
 	VertexParserRULE_file                = 0
-	VertexParserRULE_buildDecl           = 1
-	VertexParserRULE_packageDecl         = 2
+	VertexParserRULE_packageDecl         = 1
+	VertexParserRULE_buildDecl           = 2
 	VertexParserRULE_importDecl          = 3
 	VertexParserRULE_topLevelDecl        = 4
 	VertexParserRULE_typeAliasDecl       = 5
@@ -218,49 +220,50 @@ const (
 	VertexParserRULE_funcQualifier       = 9
 	VertexParserRULE_paramList           = 10
 	VertexParserRULE_param               = 11
-	VertexParserRULE_structDecl          = 12
-	VertexParserRULE_structFieldDecl     = 13
-	VertexParserRULE_classDecl           = 14
-	VertexParserRULE_classMember         = 15
-	VertexParserRULE_qualifiedIdent      = 16
-	VertexParserRULE_enumDecl            = 17
-	VertexParserRULE_enumCaseDecl        = 18
-	VertexParserRULE_enumCaseItem        = 19
-	VertexParserRULE_enumRawValue        = 20
-	VertexParserRULE_block               = 21
-	VertexParserRULE_stmt                = 22
-	VertexParserRULE_varDecl             = 23
-	VertexParserRULE_bindingPattern      = 24
-	VertexParserRULE_ifStmt              = 25
-	VertexParserRULE_ifCondition         = 26
-	VertexParserRULE_whileStmt           = 27
-	VertexParserRULE_forInStmt           = 28
-	VertexParserRULE_switchStmt          = 29
-	VertexParserRULE_switchCase          = 30
-	VertexParserRULE_switchPattern       = 31
-	VertexParserRULE_returnStmt          = 32
-	VertexParserRULE_deferStmt           = 33
-	VertexParserRULE_exprOrAssignStmt    = 34
-	VertexParserRULE_assignOp            = 35
-	VertexParserRULE_expr                = 36
-	VertexParserRULE_argList             = 37
-	VertexParserRULE_arg                 = 38
-	VertexParserRULE_structLiteralFields = 39
-	VertexParserRULE_structLiteralField  = 40
-	VertexParserRULE_mapLiteralFields    = 41
-	VertexParserRULE_mapLiteralField     = 42
-	VertexParserRULE_anonFuncExpr        = 43
-	VertexParserRULE_asmExpr             = 44
-	VertexParserRULE_asmBody             = 45
-	VertexParserRULE_asmInstr            = 46
-	VertexParserRULE_asmConstraint       = 47
-	VertexParserRULE_asmClobberDecl      = 48
-	VertexParserRULE_typeExpr            = 49
-	VertexParserRULE_funcTypeParams      = 50
-	VertexParserRULE_baseType            = 51
-	VertexParserRULE_tupleTypeElems      = 52
-	VertexParserRULE_tupleTypeElem       = 53
-	VertexParserRULE_literal             = 54
+	VertexParserRULE_variadicParam       = 12
+	VertexParserRULE_structDecl          = 13
+	VertexParserRULE_structFieldDecl     = 14
+	VertexParserRULE_classDecl           = 15
+	VertexParserRULE_classMember         = 16
+	VertexParserRULE_qualifiedIdent      = 17
+	VertexParserRULE_enumDecl            = 18
+	VertexParserRULE_enumCaseDecl        = 19
+	VertexParserRULE_enumCaseItem        = 20
+	VertexParserRULE_enumRawValue        = 21
+	VertexParserRULE_block               = 22
+	VertexParserRULE_stmt                = 23
+	VertexParserRULE_varDecl             = 24
+	VertexParserRULE_bindingPattern      = 25
+	VertexParserRULE_ifStmt              = 26
+	VertexParserRULE_ifCondition         = 27
+	VertexParserRULE_whileStmt           = 28
+	VertexParserRULE_forInStmt           = 29
+	VertexParserRULE_switchStmt          = 30
+	VertexParserRULE_switchCase          = 31
+	VertexParserRULE_switchPattern       = 32
+	VertexParserRULE_returnStmt          = 33
+	VertexParserRULE_deferStmt           = 34
+	VertexParserRULE_exprOrAssignStmt    = 35
+	VertexParserRULE_assignOp            = 36
+	VertexParserRULE_expr                = 37
+	VertexParserRULE_argList             = 38
+	VertexParserRULE_arg                 = 39
+	VertexParserRULE_structLiteralFields = 40
+	VertexParserRULE_structLiteralField  = 41
+	VertexParserRULE_mapLiteralFields    = 42
+	VertexParserRULE_mapLiteralField     = 43
+	VertexParserRULE_anonFuncExpr        = 44
+	VertexParserRULE_asmExpr             = 45
+	VertexParserRULE_asmBody             = 46
+	VertexParserRULE_asmInstr            = 47
+	VertexParserRULE_asmConstraint       = 48
+	VertexParserRULE_asmClobberDecl      = 49
+	VertexParserRULE_typeExpr            = 50
+	VertexParserRULE_funcTypeParams      = 51
+	VertexParserRULE_baseType            = 52
+	VertexParserRULE_tupleTypeElems      = 53
+	VertexParserRULE_tupleTypeElem       = 54
+	VertexParserRULE_literal             = 55
 )
     VertexParser rules.
 
@@ -346,6 +349,7 @@ func InitEmptyTupleTypeElemsContext(p *TupleTypeElemsContext)
 func InitEmptyTypeAliasDeclContext(p *TypeAliasDeclContext)
 func InitEmptyTypeExprContext(p *TypeExprContext)
 func InitEmptyVarDeclContext(p *VarDeclContext)
+func InitEmptyVariadicParamContext(p *VariadicParamContext)
 func InitEmptyWhileStmtContext(p *WhileStmtContext)
 func VertexLexerInit()
     VertexLexerInit initializes any static state used to implement VertexLexer.
@@ -766,6 +770,8 @@ func (v *BaseVertexParserVisitor) VisitTypeExpr(ctx *TypeExprContext) interface{
 
 func (v *BaseVertexParserVisitor) VisitVarDecl(ctx *VarDeclContext) interface{}
 
+func (v *BaseVertexParserVisitor) VisitVariadicParam(ctx *VariadicParamContext) interface{}
+
 func (v *BaseVertexParserVisitor) VisitWhileStmt(ctx *WhileStmtContext) interface{}
 
 type BindingPatternContext struct {
@@ -1166,6 +1172,8 @@ func (s *ExprContext) QUESTION() antlr.TerminalNode
 func (s *ExprContext) RBRACE() antlr.TerminalNode
 
 func (s *ExprContext) RBRACKET() antlr.TerminalNode
+
+func (s *ExprContext) REINTERPRET() antlr.TerminalNode
 
 func (s *ExprContext) RESULT() antlr.TerminalNode
 
@@ -1797,6 +1805,9 @@ type IExprContext interface {
 	RESULT() antlr.TerminalNode
 	OK() antlr.TerminalNode
 	ERR_KW() antlr.TerminalNode
+	REINTERPRET() antlr.TerminalNode
+	LT() antlr.TerminalNode
+	GT() antlr.TerminalNode
 	AsmExpr() IAsmExprContext
 	LSHIFT() antlr.TerminalNode
 	RSHIFT() antlr.TerminalNode
@@ -1812,8 +1823,6 @@ type IExprContext interface {
 	NIL_COALESCE() antlr.TerminalNode
 	EQ() antlr.TerminalNode
 	NEQ() antlr.TerminalNode
-	LT() antlr.TerminalNode
-	GT() antlr.TerminalNode
 	LEQ() antlr.TerminalNode
 	GEQ() antlr.TerminalNode
 	IDENTITY_EQ() antlr.TerminalNode
@@ -1852,9 +1861,9 @@ type IFileContext interface {
 
 	// Getter signatures
 	EOF() antlr.TerminalNode
+	PackageDecl() IPackageDeclContext
 	AllBuildDecl() []IBuildDeclContext
 	BuildDecl(i int) IBuildDeclContext
-	PackageDecl() IPackageDeclContext
 	AllImportDecl() []IImportDeclContext
 	ImportDecl(i int) IImportDeclContext
 	AllTopLevelDecl() []ITopLevelDeclContext
@@ -2113,6 +2122,7 @@ type IParamListContext interface {
 	Param(i int) IParamContext
 	AllCOMMA() []antlr.TerminalNode
 	COMMA(i int) antlr.TerminalNode
+	VariadicParam() IVariadicParamContext
 
 	// IsParamListContext differentiates from other interfaces.
 	IsParamListContext()
@@ -2448,6 +2458,23 @@ type IVarDeclContext interface {
 }
     IVarDeclContext is an interface to support dynamic dispatch.
 
+type IVariadicParamContext interface {
+	antlr.ParserRuleContext
+
+	// GetParser returns the parser.
+	GetParser() antlr.Parser
+
+	// Getter signatures
+	IDENTIFIER() antlr.TerminalNode
+	COLON() antlr.TerminalNode
+	ELLIPSIS() antlr.TerminalNode
+	TypeExpr() ITypeExprContext
+
+	// IsVariadicParamContext differentiates from other interfaces.
+	IsVariadicParamContext()
+}
+    IVariadicParamContext is an interface to support dynamic dispatch.
+
 type IWhileStmtContext interface {
 	antlr.ParserRuleContext
 
@@ -2718,6 +2745,8 @@ func (*ParamListContext) IsParamListContext()
 func (s *ParamListContext) Param(i int) IParamContext
 
 func (s *ParamListContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
+
+func (s *ParamListContext) VariadicParam() IVariadicParamContext
 
 type QualifiedIdentContext struct {
 	antlr.BaseParserRuleContext
@@ -3258,6 +3287,33 @@ func (s *VarDeclContext) VAR() antlr.TerminalNode
 
 func (s *VarDeclContext) WEAK() antlr.TerminalNode
 
+type VariadicParamContext struct {
+	antlr.BaseParserRuleContext
+	// Has unexported fields.
+}
+
+func NewEmptyVariadicParamContext() *VariadicParamContext
+
+func NewVariadicParamContext(parser antlr.Parser, parent antlr.ParserRuleContext, invokingState int) *VariadicParamContext
+
+func (s *VariadicParamContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
+
+func (s *VariadicParamContext) COLON() antlr.TerminalNode
+
+func (s *VariadicParamContext) ELLIPSIS() antlr.TerminalNode
+
+func (s *VariadicParamContext) GetParser() antlr.Parser
+
+func (s *VariadicParamContext) GetRuleContext() antlr.RuleContext
+
+func (s *VariadicParamContext) IDENTIFIER() antlr.TerminalNode
+
+func (*VariadicParamContext) IsVariadicParamContext()
+
+func (s *VariadicParamContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
+
+func (s *VariadicParamContext) TypeExpr() ITypeExprContext
+
 type VertexLexer struct {
 	*antlr.BaseLexer
 
@@ -3388,6 +3444,8 @@ func (p *VertexParser) TypeExpr() (localctx ITypeExprContext)
 
 func (p *VertexParser) VarDecl() (localctx IVarDeclContext)
 
+func (p *VertexParser) VariadicParam() (localctx IVariadicParamContext)
+
 func (p *VertexParser) WhileStmt() (localctx IWhileStmtContext)
 
 type VertexParserVisitor interface {
@@ -3396,11 +3454,11 @@ type VertexParserVisitor interface {
 	// Visit a parse tree produced by VertexParser#file.
 	VisitFile(ctx *FileContext) interface{}
 
-	// Visit a parse tree produced by VertexParser#buildDecl.
-	VisitBuildDecl(ctx *BuildDeclContext) interface{}
-
 	// Visit a parse tree produced by VertexParser#packageDecl.
 	VisitPackageDecl(ctx *PackageDeclContext) interface{}
+
+	// Visit a parse tree produced by VertexParser#buildDecl.
+	VisitBuildDecl(ctx *BuildDeclContext) interface{}
 
 	// Visit a parse tree produced by VertexParser#importDecl.
 	VisitImportDecl(ctx *ImportDeclContext) interface{}
@@ -3428,6 +3486,9 @@ type VertexParserVisitor interface {
 
 	// Visit a parse tree produced by VertexParser#param.
 	VisitParam(ctx *ParamContext) interface{}
+
+	// Visit a parse tree produced by VertexParser#variadicParam.
+	VisitVariadicParam(ctx *VariadicParamContext) interface{}
 
 	// Visit a parse tree produced by VertexParser#structDecl.
 	VisitStructDecl(ctx *StructDeclContext) interface{}

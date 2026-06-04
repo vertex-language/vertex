@@ -187,6 +187,21 @@ type size_t = uint64
 * Aliases may appear at package level only, not inside functions or blocks.
 * Aliases resolve at compile time — no runtime representation.
 
+
+## 5. Type Variadic Args
+
+```vertex
+class C : c {
+  func printf(fmt: ...*const char)
+}
+
+func log(prefix: string, msg: ...string) {
+    for m in msg {
+        libc.printf("%s: %s\n", prefix, m)
+    }
+}
+```
+
 ---
 
 ## 6. Numeric Type Conversion
@@ -1649,6 +1664,10 @@ package windows_d3d11
 build windows
 import "windows/com/d3d11"
 
+class C : c {
+  func printf(fmt: ...*const char)
+}
+
 class IUnknown : d3d11 {
     func QueryInterface(obj: IUnknown, riid: *const void, ppv: *void) -> int32
     func AddRef(obj: IUnknown) -> uint32
@@ -1690,7 +1709,7 @@ build windows
   build condition.
 * Multiple `build` tags may appear in the same file; all conditions must hold for
   the file to be compiled.
-* `build` declarations must appear at the top of a file, before any `package`,
+* `build` declarations must appear at the top of a file, after any `package`,
   `import`, or top-level declarations.
 * The recognised architecture tags are `amd64` and `arm64`. The compiler
   selects exactly one architecture tag per target.

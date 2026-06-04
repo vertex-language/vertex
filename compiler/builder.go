@@ -138,15 +138,24 @@ func (b *ASTBuilder) buildFuncQual(ctx parser.IFuncQualifierContext) FuncQual {
 }
 
 func (b *ASTBuilder) buildParamList(ctx parser.IParamListContext) []*Param {
-	var params []*Param
-	for _, p := range ctx.AllParam() {
-		params = append(params, &Param{
-			Pos:  b.ctxPos(p),
-			Name: p.IDENTIFIER().GetText(),
-			Type: b.buildTypeExpr(p.TypeExpr()),
-		})
-	}
-	return params
+    var params []*Param
+    for _, p := range ctx.AllParam() {
+        params = append(params, &Param{
+            Pos:  b.ctxPos(p),
+            Name: p.IDENTIFIER().GetText(),
+            Type: b.buildTypeExpr(p.TypeExpr()),
+        })
+    }
+    // Variadic parameter (at most one, always last).
+    if vp := ctx.VariadicParam(); vp != nil {
+        params = append(params, &Param{
+            Pos:        b.ctxPos(vp),
+            Name:       vp.IDENTIFIER().GetText(),
+            Type:       b.buildTypeExpr(vp.TypeExpr()),
+            IsVariadic: true,
+        })
+    }
+    return params
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,6 +567,46 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &NilLitExpr{exprBase: exprBase{Pos: pos}}
 	}
 
+	// ── reinterpret<T>(expr) ─────────────────────────────────────────────────
+	if ctx.REINTERPRET() != nil {
+		typeExprs := ctx.AllTypeExpr()
+		var targetType TypeExpr
+		if len(typeExprs) > 0 {
+			targetType = b.buildTypeExpr(typeExprs[0])
+		}
+		var val Expr
+		if len(exprs) > 0 {
+			val = b.buildExpr(exprs[0])
+		}
+		return &ReinterpretExpr{
+			exprBase:   exprBase{Pos: pos},
+			TargetType: targetType,
+			Value:      val,
+		}
+	}
+
+	// ── [T](args) / [T]() array constructor ──────────────────────────────────
+	// ANTLR parses [char](1024) as the call alternative (expr LPAREN argList RPAREN)
+	// where [char] is the function expr. startTok is LBRACKET (inherited from
+	// the inner expr) so isPrefix fires and the postfix call block is never
+	// reached. ctx.LBRACKET() is nil on the call alternative because LBRACKET
+	// is a terminal of the nested expr, not this rule — that is the reliable
+	// discriminant.
+	if startTok == parser.VertexLexerLBRACKET &&
+		ctx.LPAREN() != nil && ctx.RPAREN() != nil &&
+		ctx.LBRACKET() == nil && nExprs == 1 {
+		inner := b.buildExpr(exprs[0])
+		if arrLit, ok := inner.(*ArrayLitExpr); ok && len(arrLit.Elems) == 1 {
+			if id, ok2 := arrLit.Elems[0].(*IdentExpr); ok2 {
+				return &ArrayCtorExpr{
+					exprBase:     exprBase{Pos: pos},
+					ElemTypeName: id.Name,
+					Args:         b.buildArgList(ctx.ArgList()),
+				}
+			}
+		}
+	}
+
 	// ── Postfix: leading child is an expr (start token is NOT an operator) ───
 	isPrefix := startTok == parser.VertexLexerMINUS ||
 		startTok == parser.VertexLexerBANG ||
@@ -657,7 +706,7 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 			return &TupleLitExpr{exprBase: exprBase{Pos: pos}}
 		}
 		if nExprs == 1 && len(ctx.AllCOMMA()) == 0 {
-			return b.buildExpr(exprs[0]) // grouping
+			return b.buildExpr(exprs[0])
 		}
 		var elems []Expr
 		for _, e := range exprs {

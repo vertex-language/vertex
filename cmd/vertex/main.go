@@ -30,18 +30,52 @@ import (
 const version = "0.2.0"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Repeatable -I flag
+// Repeatable flags
 // ─────────────────────────────────────────────────────────────────────────────
 
-type searchPathFlag []string
+type stringListFlag []string
 
-func (f *searchPathFlag) String() string {
+func (f *stringListFlag) String() string {
 	return strings.Join(*f, string(filepath.ListSeparator))
 }
-
-func (f *searchPathFlag) Set(v string) error {
+func (f *stringListFlag) Set(v string) error {
 	*f = append(*f, v)
 	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// expandShortFlags converts POSIX-style concatenated short flags into the two-
+// token form that Go's flag package understands.  For example:
+//
+//	-lc   →  -l  c
+//	-lm   →  -l  m
+//	-L/my/dir  →  -L  /my/dir
+//	-Isrc      →  -I  src
+//
+// Only single-character flags that accept a value are expanded; boolean flags
+// (-c, -v) are left untouched because their names are a single character but
+// they never have a fused value.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func expandShortFlags(args []string) []string {
+	// Single-char flags that take a value argument.
+	valueFlags := map[byte]bool{
+		'l': true,
+		'L': true,
+		'I': true,
+		'o': true,
+	}
+
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		// Must look like -X<value>: dash, one letter in valueFlags, then more chars.
+		if len(arg) >= 3 && arg[0] == '-' && arg[1] != '-' && valueFlags[arg[1]] {
+			out = append(out, arg[:2], arg[2:]) // e.g. "-lc" → "-l", "c"
+		} else {
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +96,9 @@ func run(args []string, stderr io.Writer) int {
 		outputFile  string
 		targetStr   string
 		printVer    bool
-		paths       searchPathFlag
+		paths       stringListFlag // -I  source/package search paths
+		libDirs     stringListFlag // -L  library search paths (ELF only)
+		libs        stringListFlag // -l  libraries to link  (ELF only)
 	)
 
 	fs.BoolVar(&emitC, "emit-c", false, "emit C source code instead of native binary")
@@ -73,18 +109,22 @@ func run(args []string, stderr io.Writer) int {
 	fs.BoolVar(&printVer, "version", false, "print version and exit")
 	fs.BoolVar(&printVer, "v", false, "shorthand for -version")
 	fs.Var(&paths, "I", "add a package search `path` (repeatable)")
+	fs.Var(&libDirs, "L", "add a library search `dir` (ELF targets only, repeatable)")
+	fs.Var(&libs, "l", "link against lib`name` e.g. -lc -lm (ELF targets only, repeatable)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
 		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs>\n\nFlags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(stderr, "\nExamples:\n")
-		fmt.Fprintf(stderr, "  vertex -o main main.vs          (Build native executable)\n")
-		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs     (Build object file)\n")
-		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs (Emit C source)\n")
+		fmt.Fprintf(stderr, "  vertex -o main main.vs              (build native executable)\n")
+		fmt.Fprintf(stderr, "  vertex -lc -lm -o main main.vs      (link against libc and libm)\n")
+		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs         (build object file only)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs    (emit C source)\n")
 	}
 
-	if err := fs.Parse(args); err != nil {
+	// Expand POSIX-style fused short flags (e.g. -lc → -l c) before parsing.
+	if err := fs.Parse(expandShortFlags(args)); err != nil {
 		return 2
 	}
 
@@ -107,6 +147,11 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
+	// Warn if -l / -L are used on non-ELF targets (accepted but ignored).
+	if mTarget != mir.TargetLinuxAMD64 && (len(libs) > 0 || len(libDirs) > 0) {
+		fmt.Fprintf(stderr, "vertex: warning: -l / -L flags are only supported for Linux ELF targets; ignored\n")
+	}
+
 	// ── 1. Compile to C IR (Frontend) ─────────────────────────────────────────
 	cfg := compiler.Config{
 		Target:      cTarget,
@@ -120,7 +165,6 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	// Print warnings / notes
 	for _, d := range comp.Diagnostics().All() {
 		if d.Severity != compiler.SevError {
 			fmt.Fprintln(stderr, d)
@@ -217,9 +261,33 @@ func run(args []string, stderr io.Writer) int {
 
 	var exeBytes []byte
 	switch mTarget {
+
 	case mir.TargetLinuxAMD64:
 		linker := lnkELF.NewLinker(lnkELF.ArchAMD64)
-		linker.AddObject(filepath.Base(inputFile)+".o", objBytes)
+		if err := linker.AddObject(filepath.Base(inputFile)+".o", objBytes); err != nil {
+			fmt.Fprintf(stderr, "vertex: %v\n", err)
+			return 1
+		}
+
+		// User-supplied -L paths prepended; built-in system dirs appended as fallback.
+		searchDirs := append([]string(libDirs), elfLibSearchDirs()...)
+		for _, p := range searchDirs {
+			linker.AddLibraryPath(p)
+		}
+
+		// Resolve and load each -l<name> library.
+		for _, name := range libs {
+			data, soname, err := findSharedLib(name, searchDirs)
+			if err != nil {
+				fmt.Fprintf(stderr, "vertex: %v\n", err)
+				return 1
+			}
+			if err := linker.AddDynamicLibrary(soname, data); err != nil {
+				fmt.Fprintf(stderr, "vertex: -l%s: %v\n", name, err)
+				return 1
+			}
+		}
+
 		exeBytes, err = linker.Link()
 
 	case mir.TargetWindowsAMD64:
@@ -243,12 +311,64 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 
-	// Mark the binary as executable on Unix systems.
 	if mTarget != mir.TargetWindowsAMD64 && outputFile != "-" {
 		os.Chmod(outputFile, 0755)
 	}
 
 	return 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ELF shared-library resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+// elfLibSearchDirs returns the standard AMD64 Linux shared-library directories
+// in the order they are typically searched.
+func elfLibSearchDirs() []string {
+	return []string{
+		"/lib/x86_64-linux-gnu",
+		"/usr/lib/x86_64-linux-gnu",
+		"/lib64",
+		"/usr/lib64",
+		"/lib",
+		"/usr/lib",
+		"/usr/local/lib",
+	}
+}
+
+// findSharedLib locates the real ELF binary for -l<name>, trying versioned
+// filenames before the bare .so name (which is often a GNU linker script).
+// Returns the file bytes, the soname to register, and any error.
+func findSharedLib(name string, searchDirs []string) ([]byte, string, error) {
+	base := "lib" + name + ".so"
+	for _, dir := range searchDirs {
+		// Prefer versioned files (e.g. libc.so.6) — they are real ELF binaries.
+		// The unversioned .so is frequently a GNU ld linker script, not an ELF.
+		matches, _ := filepath.Glob(filepath.Join(dir, base+".[0-9]*"))
+		for _, m := range matches {
+			data, err := os.ReadFile(m)
+			if err != nil || !isELF(data) {
+				continue
+			}
+			return data, filepath.Base(m), nil
+		}
+
+		// Fall back to the unversioned name if it really is an ELF.
+		path := filepath.Join(dir, base)
+		data, err := os.ReadFile(path)
+		if err != nil || !isELF(data) {
+			continue
+		}
+		return data, base, nil
+	}
+	return nil, "", fmt.Errorf("-l%s: library not found (searched: %s)",
+		name, strings.Join(searchDirs, ", "))
+}
+
+// isELF reports whether data begins with the ELF magic bytes.
+func isELF(data []byte) bool {
+	return len(data) >= 4 &&
+		data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,9 +399,6 @@ func replaceExt(path, newExt string) string {
 	return path[:len(path)-len(ext)] + newExt
 }
 
-// parseTarget returns both the C IR target and the MIR target.
-// Note: Currently limited to AMD64 targets as they are the fully-supported 
-// paths demonstrated in the provided encoding toolchain.
 func parseTarget(s string) (cir.Target, mir.Target, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "linux-amd64", "linux-x86_64", "linux/amd64":

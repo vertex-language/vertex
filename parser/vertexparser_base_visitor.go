@@ -12,11 +12,11 @@ func (v *BaseVertexParserVisitor) VisitFile(ctx *FileContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitBuildDecl(ctx *BuildDeclContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitPackageDecl(ctx *PackageDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BaseVertexParserVisitor) VisitPackageDecl(ctx *PackageDeclContext) interface{} {
+func (v *BaseVertexParserVisitor) VisitBuildDecl(ctx *BuildDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -53,6 +53,10 @@ func (v *BaseVertexParserVisitor) VisitParamList(ctx *ParamListContext) interfac
 }
 
 func (v *BaseVertexParserVisitor) VisitParam(ctx *ParamContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BaseVertexParserVisitor) VisitVariadicParam(ctx *VariadicParamContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

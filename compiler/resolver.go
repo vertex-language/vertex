@@ -299,12 +299,12 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		if e.Is32Bit {
 			t = &VFloat{Bits: 32}
 		} else {
-			t = &VFloat{Bits: 32} // default float literal = float32
+			t = &VFloat{Bits: 32}
 		}
 	case *BoolLitExpr:
 		t = &VBool{}
 	case *StringLitExpr:
-		t = &VString{Mutable: false} // default; mutability set by VarDecl context
+		t = &VString{Mutable: false}
 	case *NilLitExpr:
 		t = &VNil{}
 
@@ -312,7 +312,6 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		t = r.resolveIdent(e, scope)
 
 	case *DotEnumExpr:
-		// .caseName — type determined from context; leave as VUnknown for now.
 		t = &VUnknown{Name: "." + e.Case}
 
 	case *UnaryExpr:
@@ -334,7 +333,7 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 			BinAnd, BinOr, BinIdentityEq, BinIdentityNeq:
 			t = &VBool{}
 		case BinRangeHalfOpen, BinRangeClosed:
-			t = &VDynArray{Elem: l} // range produces an iterable
+			t = &VDynArray{Elem: l}
 		default:
 			t = l
 		}
@@ -401,6 +400,13 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		}
 
 	case *TypeConvExpr:
+		r.resolveExpr(e.Value, scope)
+		t = r.resolveTypeExpr(e.TargetType, scope)
+
+	// ── reinterpret<T>(expr) ─────────────────────────────────────────────────
+	// Walk the value expression for diagnostics, then resolve the target pointer
+	// type — that becomes the type of the whole reinterpret expression.
+	case *ReinterpretExpr:
 		r.resolveExpr(e.Value, scope)
 		t = r.resolveTypeExpr(e.TargetType, scope)
 

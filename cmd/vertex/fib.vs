@@ -1,12 +1,10 @@
 package main
 
-import "linux/libc"
+import "linux/lib/c"
 
-
-func printf(fmt: string) -> int32 {
-    return fmt
+class C : c {
+    func printf(fmt:  ...*const char) -> int
 }
-
 
 // fibRecursive computes the nth Fibonacci number using classic recursion.
 func fibRecursive(n: int32) -> int32 {
@@ -38,42 +36,27 @@ func fibIterative(n: int32) -> int32 {
 
 func main() -> int {
 
-    printf("--- Recursive ---\n")
+    var libc = C()
+
+    libc.printf("--- Recursive ---\n")
     var i: int32 = 0
     while true {
         if i >= 10 {
             break
         }
-        printf("fib(%d) = %d\n", i, fibRecursive(i))
+        libc.printf("fib(%d) = %d\n", i, fibRecursive(i))
         i = i + 1
     }
 
-    printf("--- Iterative ---\n")
+    libc.printf("--- Iterative ---\n")
     var j: int32 = 0
     while true {
         if j >= 10 {
             break
         }
-        printf("fib(%d) = %d\n", j, fibIterative(j))
+        libc.printf("fib(%d) = %d\n", j, fibIterative(j))
         j = j + 1
     }
-
-    var val100 = 100
-    
-    var config2 = {
-        "debug": 0,
-        "more": val100,
-    }
-
-    var config = {
-        "debug": 0,
-        "more": config2,
-    }
-
-    var value = config["debug"]
-    printf("config.debug = %d\n", value)
-
-    fmt.Printf(json.stringify(config))
 
     return 0
 }

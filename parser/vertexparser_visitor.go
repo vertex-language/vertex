@@ -11,11 +11,11 @@ type VertexParserVisitor interface {
 	// Visit a parse tree produced by VertexParser#file.
 	VisitFile(ctx *FileContext) interface{}
 
-	// Visit a parse tree produced by VertexParser#buildDecl.
-	VisitBuildDecl(ctx *BuildDeclContext) interface{}
-
 	// Visit a parse tree produced by VertexParser#packageDecl.
 	VisitPackageDecl(ctx *PackageDeclContext) interface{}
+
+	// Visit a parse tree produced by VertexParser#buildDecl.
+	VisitBuildDecl(ctx *BuildDeclContext) interface{}
 
 	// Visit a parse tree produced by VertexParser#importDecl.
 	VisitImportDecl(ctx *ImportDeclContext) interface{}
@@ -43,6 +43,9 @@ type VertexParserVisitor interface {
 
 	// Visit a parse tree produced by VertexParser#param.
 	VisitParam(ctx *ParamContext) interface{}
+
+	// Visit a parse tree produced by VertexParser#variadicParam.
+	VisitVariadicParam(ctx *VariadicParamContext) interface{}
 
 	// Visit a parse tree produced by VertexParser#structDecl.
 	VisitStructDecl(ctx *StructDeclContext) interface{}

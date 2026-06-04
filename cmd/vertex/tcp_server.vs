@@ -1,92 +1,101 @@
 package main
+import "linux/lib/c"
 
-import "linux/libc"
-
-// Zero-cost native bindings to POSIX socket API
-class Net : libc {
-    func socket(domain: int32, stype: int32, proto: int32) -> int32
-    func setsockopt(fd: int32, level: int32, opt: int32, val: string, len: int32) -> int32
-    func bind(fd: int32, addr: string, len: int32) -> int32
-    func listen(fd: int32, backlog: int32) -> int32
-    func accept(fd: int32, addr: string, addrlen: string) -> int32
-    func recv(fd: int32, buf: string, n: int32, flags: int32) -> int32
-    func send(fd: int32, buf: string, n: int32, flags: int32) -> int32
+class C : c {
+    func printf(fmt: ...*const char) -> int32
+    func socket(domain: int32, socktype: int32, protocol: int32) -> int32
+    func setsockopt(sockfd: int32, level: int32, optname: int32, optval: *const char, optlen: int32) -> int32
+    func bind(sockfd: int32, addr: *const char, addrlen: int32) -> int32
+    func listen(sockfd: int32, backlog: int32) -> int32
+    func accept(sockfd: int32, addr: *char, addrlen: *int32) -> int32
+    func read(fd: int32, buf: *char, count: int32) -> int32
+    func write(fd: int32, buf: *const char, count: int32) -> int32
     func close(fd: int32) -> int32
-    func htons(port: uint16) -> uint16
-}
-
-class C : libc {
-    func printf(fmt: string, ...) -> int32
+    func htons(port: int32) -> int32
     func exit(code: int32)
+
+    func malloc(size: int32) -> *char
+    func free(ptr: *char)
 }
 
-let AF_INET:      int32  = 2
-let SOCK_STREAM:  int32  = 1
-let SOL_SOCKET:   int32  = 1
-let SO_REUSEADDR: int32  = 2
-let PORT:         uint16 = 8080
-let BACKLOG:      int32  = 128
-
-// each accepted client spins up here in its own thread — echo server
-func serve(fd: int32) thread {
-    var net = Net()
-    var c   = C()
-    defer net.close(fd)
-
-    // 4096-byte stack buffer — no heap, no gc
-    var buf = [uint8](4096)
-
-    while true {
-        let n = net.recv(fd, buf, 4096, 0)
-        if n <= 0 { break }
-        net.send(fd, buf, n, 0)
-        c.printf("fd=%-4d  echoed %d bytes\n", fd, n)
-    }
-
-    c.printf("fd=%-4d  disconnected\n", fd)
+struct SockAddrIn {
+    sin_family: int16
+    sin_port:   int16
+    sin_addr:   int32
+    sin_zero:   int64
 }
 
 func main() -> int {
-    var net = Net()
-    var c   = C()
+    var libc = C()
 
-    let serverFd = net.socket(AF_INET, SOCK_STREAM, 0)
-    if serverFd < 0 {
-        c.printf("error: socket() failed\n")
-        c.exit(1)
+    // 1 ── create TCP socket  (AF_INET=2, SOCK_STREAM=1)
+    var sfd = libc.socket(2, 1, 0)
+    if sfd < 0 {
+        libc.printf("socket() failed\n")
+        libc.exit(1)
     }
-    defer net.close(serverFd)
 
-    // allow port reuse across quick restarts
+    // 2 ── SO_REUSEADDR — allows restart without waiting out TIME_WAIT
+    //      SOL_SOCKET=1, SO_REUSEADDR=2
     var opt: int32 = 1
-    net.setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, opt, 4)
-
-    // build sockaddr_in inline: sin_family(2) | sin_port(2) | sin_addr(4) | zero(8)
-    var addr = [uint8](16)
-    addr[0] = uint8(AF_INET)
-    addr[2] = uint8(net.htons(PORT) >> 8)
-    addr[3] = uint8(net.htons(PORT) & 0xFF)
-    // sin_addr stays 0 — INADDR_ANY, sin_zero stays 0 — already zeroed
-
-    if net.bind(serverFd, addr, 16) < 0 {
-        c.printf("error: bind() failed\n")
-        c.exit(1)
+    if libc.setsockopt(sfd, 1, 2, reinterpret<*const char>(&opt), 4) < 0 {
+        libc.printf("setsockopt() failed\n")
+        libc.exit(1)
     }
 
-    if net.listen(serverFd, BACKLOG) < 0 {
-        c.printf("error: listen() failed\n")
-        c.exit(1)
+    // 3 ── bind to 0.0.0.0:8080
+    var addr = SockAddrIn{
+        sin_family: int16(2),
+        sin_port:   int16(libc.htons(8080)),
+        sin_addr:   0,
+        sin_zero:   int64(0),
+    }
+    if libc.bind(sfd, reinterpret<*const char>(&addr), 16) < 0 {
+        libc.printf("bind() failed\n")
+        libc.exit(1)
     }
 
-    c.printf("tcp echo  0.0.0.0:%d\n", PORT)
+    // 4 ── listen
+    if libc.listen(sfd, 8) < 0 {
+        libc.printf("listen() failed\n")
+        libc.exit(1)
+    }
+    libc.printf("TCP echo server listening on :8080\n")
 
-    // accept loop — non-blocking hand-off, each client owns its thread
+    // 5 ── accept loop — single-threaded, one client at a time
     while true {
-        let clientFd = net.accept(serverFd, nil, nil)
-        if clientFd < 0 { break }
-        c.printf("accepted  fd=%d\n", clientFd)
-        serve(fd: clientFd).spawn()
+        var clen: int32 = 16
+        var caddr = SockAddrIn{
+            sin_family: int16(0),
+            sin_port:   int16(0),
+            sin_addr:   0,
+            sin_zero:   int64(0),
+        }
+        var cfd = libc.accept(sfd, reinterpret<*char>(&caddr), &clen)
+        if cfd >= 0 {
+            libc.printf("client connected  fd=%d\n", cfd)
+
+            // 6 ── echo loop
+            //var buf = [char](1024)
+
+            var buf_ptr = libc.malloc(1024)
+        
+            while true {
+                var n = libc.read(cfd, buf_ptr, 1024)
+                //var n = libc.read(cfd, &buf[0], 1024)
+                if n <= 0 {
+                    break
+                }
+                libc.write(cfd, reinterpret<*const char>(&buf_ptr[0]), n)
+                libc.free(buf_ptr)
+
+            }    
+
+            libc.close(cfd)
+            libc.printf("client disconnected fd=%d\n", cfd)
+        }
     }
 
+    libc.close(sfd)
     return 0
 }

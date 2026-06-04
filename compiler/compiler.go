@@ -3,9 +3,8 @@ package compiler
 import (
 	"fmt"
 	"path/filepath"
-
 	"github.com/antlr4-go/antlr/v4"
-	"github.com/vertex-language/ir/c"
+	cir "github.com/vertex-language/ir/c"
 	"github.com/vertex-language/vertex/parser"
 )
 

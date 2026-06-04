@@ -70,9 +70,10 @@ type Receiver struct {
 }
 
 type Param struct {
-	Pos  Pos
-	Name string
-	Type TypeExpr
+    Pos        Pos
+    Name       string
+    Type       TypeExpr
+    IsVariadic bool // true for the trailing '...' parameter
 }
 
 type FuncQual int
@@ -444,6 +445,15 @@ type FloatLitExpr struct {
 	exprBase
 	Value   float64
 	Is32Bit bool
+}
+
+// ReinterpretExpr is reinterpret<T>(expr) — zero-cost raw pointer reinterpretation.
+// TargetType must resolve to a pointer type; Value must be a pointer or addressable.
+// Validated by the backend; the lowerer emits a plain C cast.
+type ReinterpretExpr struct {
+    exprBase
+    TargetType TypeExpr
+    Value      Expr
 }
 
 type BoolLitExpr struct {

@@ -27,6 +27,8 @@
 //   • typeAliasDecl is accepted inside blocks; backend restricts to package scope.
 //   • Assignments and compound assignments share exprOrAssignStmt; the backend
 //     validates that the left-hand expression is an addressable lvalue.
+//   • reinterpret<T>(expr) accepts any expr as its argument; backend validates
+//     that T is a pointer type and expr is a pointer or addressable value.
 // ─────────────────────────────────────────────────────────────────────────────
 
 parser grammar VertexParser;
@@ -37,24 +39,24 @@ options { tokenVocab = VertexLexer; }
 // §45–46, §33  FILE STRUCTURE
 //
 // Source file layout (enforced by backend where ordering matters):
-//   build tag(s)  →  package declaration  →  imports  →  declarations
+//   package declaration  →  build tag(s)  →  imports  →  declarations
 //
 // packageDecl is marked optional here so the parser produces a useful error
 // message when it is missing, rather than a generic syntax failure.
 // ════════════════════════════════════════════════════════════════════════════
 
 file
-    : buildDecl* packageDecl? importDecl* topLevelDecl* EOF
-    ;
-
-// §45  One 'build <tag>' per line; multiple tags in a file are all required.
-buildDecl
-    : BUILD IDENTIFIER
+    : packageDecl? buildDecl* importDecl* topLevelDecl* EOF
     ;
 
 // §46  Exactly one per file; must be a valid identifier.
 packageDecl
     : PACKAGE IDENTIFIER
+    ;
+
+// §45  One 'build <tag>' per line; multiple tags in a file are all required.
+buildDecl
+    : BUILD IDENTIFIER
     ;
 
 // §33  Single or grouped imports. Grouped form is newline-separated (no commas).
@@ -119,12 +121,25 @@ funcQualifier
     | GPU
     ;
 
+// §21  Parameter list. A variadic parameter, if present, must be last.
+// Both named functions and anonymous functions share this rule.
+// classMember native method signatures also reuse it, gaining variadic
+// support for free (backend validates C ABI compatibility).
 paramList
-    : param (COMMA param)* COMMA?
+    : param (COMMA param)* (COMMA variadicParam)? COMMA?
+    | variadicParam COMMA?
     ;
 
 param
     : IDENTIFIER COLON typeExpr
+    ;
+
+// §21.1  Variadic parameter — Go-style '...' prefix on the element type.
+// Must be the final parameter. Inside the function body the parameter
+// is iterable (for-in). Backend maps it to a C variadic on native
+// class methods and to a slice-backed sequence on regular functions.
+variadicParam
+    : IDENTIFIER COLON ELLIPSIS typeExpr
     ;
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -161,6 +176,8 @@ classDecl
 
 // Fields and native method signatures are syntactically unambiguous:
 // fields start with IDENTIFIER COLON, native methods start with FUNC.
+// Native method signatures reuse paramList, so variadic params are
+// supported automatically (e.g. func printf(fmt: ...*const char)).
 classMember
     : IDENTIFIER COLON typeExpr                                       // field
     | FUNC IDENTIFIER LPAREN paramList? RPAREN (ARROW typeExpr)?      // native method (no body)
@@ -346,6 +363,11 @@ assignOp
 //
 // An empty '{}' on an identifier is parsed as a zero-field struct literal.
 // Backend rejects it if the struct type has required fields.
+//
+// ── reinterpret<T>(expr) ambiguity note ──────────────────────────────────────
+// Because REINTERPRET is a dedicated keyword, the parser knows that any LT
+// immediately following it opens a type-argument list, not a comparison.
+// No semantic predicate or lookahead conflict arises.
 // ════════════════════════════════════════════════════════════════════════════
 
 expr
@@ -396,6 +418,7 @@ expr
     | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET                 // §24 array literal [a, b, …]
     | anonFuncExpr                                                   // §35 anonymous function
     | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN                  // §38.3 Result(Ok,v)/Result(Err,e)
+    | REINTERPRET LT typeExpr GT LPAREN expr RPAREN                  // raw pointer reinterpretation
     | asmExpr                                                        // §47 inline assembly
     ;
 

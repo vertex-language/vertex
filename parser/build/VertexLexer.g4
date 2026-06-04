@@ -19,6 +19,9 @@
 //   • inout, out, clobber are reserved for asm() constraint syntax (§47).
 //     They would be very unusual variable names in systems code, and the
 //     asm() form is confined to intrinsics packages anyway.
+//   • reinterpret is a keyword so that 'reinterpret<T>(expr)' is unambiguous
+//     at the parser level — the LT/GT tokens cannot be mistaken for
+//     comparison operators when immediately preceded by this token.
 
 lexer grammar VertexLexer;
 
@@ -53,6 +56,14 @@ ASM     : 'asm' ;
 // ── Modifier keywords ─────────────────────────────────────────────────────────
 WEAK     : 'weak' ;
 CONST_KW : 'const' ;          // only valid in *const T — context enforced by backend
+
+// ── Cast keywords ─────────────────────────────────────────────────────────────
+// reinterpret<T>(expr) — raw pointer reinterpretation. Promoted to a keyword
+// so the parser can unambiguously treat the immediately following '<' as the
+// opening of a type-argument list rather than a less-than comparison.
+// Backend validates: T must be a pointer type; expr must be a pointer or
+// addressable value. Zero runtime cost — type annotation only.
+REINTERPRET : 'reinterpret' ;
 
 // ── Concurrency qualifiers (§36, §39–§41) ─────────────────────────────────────
 ASYNC   : 'async' ;
