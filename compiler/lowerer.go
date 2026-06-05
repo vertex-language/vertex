@@ -546,6 +546,28 @@ func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
+	// Range check first — must come before lowerExpr and the type switch,
+	// because the resolver tags range expressions as *VRange (not a collection).
+	if be, ok := st.Iter.(*BinaryExpr); ok &&
+		(be.Op == BinRangeHalfOpen || be.Op == BinRangeClosed) {
+		lo := l.lowerExpr(b, be.Left, fc)
+		hi := l.lowerExpr(b, be.Right, fc)
+		iRef := b.Local(st.Var, cir.Int32)
+		fc.locals[st.Var] = iRef
+		b.Assign(iRef, lo)
+		var cond cir.Expr
+		if be.Op == BinRangeHalfOpen {
+			cond = b.Lt(iRef, hi)
+		} else {
+			cond = b.Lte(iRef, hi)
+		}
+		b.While(cond, cir.B(func(b *cir.Builder) {
+			l.lowerBlock(b, st.Body, fc)
+			b.Assign(iRef, b.Add(iRef, cir.IntLit(1)))
+		}))
+		return
+	}
+
 	iterType := st.Iter.GetVType()
 	iter := l.lowerExpr(b, st.Iter, fc)
 	if iter == nil {
@@ -569,26 +591,6 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
 		}))
 	default:
-		// Range iteration: for i in lo..<hi or lo...hi
-		if be, ok := st.Iter.(*BinaryExpr); ok &&
-			(be.Op == BinRangeHalfOpen || be.Op == BinRangeClosed) {
-			lo := l.lowerExpr(b, be.Left, fc)
-			hi := l.lowerExpr(b, be.Right, fc)
-			iRef := b.Local(st.Var, cir.Int32)
-			fc.locals[st.Var] = iRef
-			b.Assign(iRef, lo)
-			var cond cir.Expr
-			if be.Op == BinRangeHalfOpen {
-				cond = b.Lt(iRef, hi)
-			} else {
-				cond = b.Lte(iRef, hi)
-			}
-			b.While(cond, cir.B(func(b *cir.Builder) {
-				l.lowerBlock(b, st.Body, fc)
-				b.Assign(iRef, b.Add(iRef, cir.IntLit(1)))
-			}))
-			return
-		}
 		l.diags.Warnf(st.Pos, "for-in over unsupported type %v; skipping", iterType)
 	}
 }

@@ -189,6 +189,8 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 			elemType = it.Elem
 		case *VFixedArray:
 			elemType = it.Elem
+		case *VRange:
+			elemType = it.Elem
 		}
 		inner.Define(&Symbol{Name: st.Var, Kind: SymVar, Type: elemType})
 		r.resolveBlock(st.Body, inner, retType)
@@ -320,9 +322,8 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 			BinAnd, BinOr, BinIdentityEq, BinIdentityNeq:
 			t = &VBool{}
 		case BinRangeHalfOpen, BinRangeClosed:
-			t = &VDynArray{Elem: l}
+			t = &VRange{Elem: l} // not VDynArray — a range is not a GLib array
 		case BinNilCoalesce:
-			// ?? always yields the inner type, never the optional wrapper
 			if opt, ok := l.(*VOptional); ok {
 				t = opt.Elem
 			} else {

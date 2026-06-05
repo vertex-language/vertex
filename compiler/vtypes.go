@@ -114,6 +114,18 @@ type VTypeAlias struct {
 	Underlying VType
 }
 
+// VRange is the type of a range expression: lo..<hi or lo...hi.
+// It is distinct from VDynArray — a range is not a GLib array.
+type VRange struct{ Elem VType }
+
+func (*VRange) vtypeNode()        {}
+func (*VRange) String() string    { return "range" }
+func (*VRange) CIRType() cir.Type { return nil }
+func (*VRange) Equal(o VType) bool {
+    u, ok := o.(*VRange)
+    return ok && u.Elem.Equal(u.Elem)
+}
+
 // ─── vtypeNode markers ────────────────────────────────────────────────────────
 
 func (*VInt) vtypeNode()       {}
