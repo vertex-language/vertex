@@ -1532,6 +1532,10 @@ func (l *Lowerer) ensurePrintf() {
 
 // printfFormatFor returns a printf format specifier appropriate for vt.
 func (l *Lowerer) printfFormatFor(vt VType) string {
+	// Unwrap optional — ?? and if-let always yield the inner type at runtime.
+	if opt, ok := vt.(*VOptional); ok {
+		return l.printfFormatFor(opt.Elem)
+	}
 	switch t := vt.(type) {
 	case *VInt:
 		if t.Bits == 64 {

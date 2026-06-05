@@ -321,6 +321,13 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 			t = &VBool{}
 		case BinRangeHalfOpen, BinRangeClosed:
 			t = &VDynArray{Elem: l}
+		case BinNilCoalesce:
+			// ?? always yields the inner type, never the optional wrapper
+			if opt, ok := l.(*VOptional); ok {
+				t = opt.Elem
+			} else {
+				t = l
+			}
 		default:
 			t = l
 		}
