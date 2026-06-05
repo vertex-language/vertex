@@ -8,6 +8,7 @@
     { "include": "#comment" },
     { "include": "#multiline-string" },
     { "include": "#string" },
+    { "include": "#char-literal" },
     { "include": "#directive" },
     { "include": "#function-decl" },
     { "include": "#type-decl" },
@@ -40,6 +41,22 @@
         {
           "name": "constant.character.escape.vertex",
           "match": "\\\\[nrtbf\"\\\\]"
+        },
+        {
+          "name": "invalid.illegal.escape.vertex",
+          "match": "\\\\."
+        }
+      ]
+    },
+
+    "char-literal": {
+      "name": "string.quoted.single.vertex",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape.vertex",
+          "match": "\\\\[nrtbf'\\\\]"
         },
         {
           "name": "invalid.illegal.escape.vertex",

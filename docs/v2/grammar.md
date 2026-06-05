@@ -78,7 +78,7 @@ let o: string = `
 multi
 line
 `
-let p: char = "A"
+let p: char = 'A'
 let q: void = ()
 ```
 
