@@ -1,6 +1,6 @@
 # Vertex Programming Language
 
-**Version 2.1** · [Grammar Spec](docs/grammar.md) · [Native Interface](docs/native_interface.md)
+**Version 2.1** · [Grammar Spec](docs/v2/grammar.md) · [Native Interface](docs/v2/native_interface.md)
 
 Vertex is a statically-typed systems and application programming language built
 for explicit control, zero-overhead C interop, and first-class concurrency.
