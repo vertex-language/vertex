@@ -546,24 +546,33 @@ func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
-	// Range check first — must come before lowerExpr and the type switch,
-	// because the resolver tags range expressions as *VRange (not a collection).
+	// Range check first — before lowerExpr and the type switch.
 	if be, ok := st.Iter.(*BinaryExpr); ok &&
 		(be.Op == BinRangeHalfOpen || be.Op == BinRangeClosed) {
 		lo := l.lowerExpr(b, be.Left, fc)
 		hi := l.lowerExpr(b, be.Right, fc)
+
 		iRef := b.Local(st.Var, cir.Int32)
 		fc.locals[st.Var] = iRef
 		b.Assign(iRef, lo)
+
 		var cond cir.Expr
 		if be.Op == BinRangeHalfOpen {
 			cond = b.Lt(iRef, hi)
 		} else {
 			cond = b.Lte(iRef, hi)
 		}
-		b.While(cond, cir.B(func(b *cir.Builder) {
+
+		// Use For instead of While so that `continue` jumps to the post
+		// expression (the increment) rather than back to the condition check.
+		// With While, `continue` skips the bottom-of-body increment entirely,
+		// causing an infinite loop whenever the loop variable is not advanced.
+		post := &cir.AssignExpr{
+			LHS: iRef,
+			RHS: b.Add(iRef, cir.IntLit(1)),
+		}
+		b.For(nil, cond, post, cir.B(func(b *cir.Builder) {
 			l.lowerBlock(b, st.Body, fc)
-			b.Assign(iRef, b.Add(iRef, cir.IntLit(1)))
 		}))
 		return
 	}
