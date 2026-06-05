@@ -446,6 +446,10 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		// Emit initialiser.
 		initExpr := l.lowerExpr(b, d.Value, fc)
 		if initExpr != nil {
+			// NEW: Safely cast the initializer to the target variable's type
+			if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
+				initExpr = b.Cast(targetCT, initExpr)
+			}
 			b.Assign(ref, initExpr)
 		}
 	}
@@ -704,7 +708,8 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		}
 		return cir.IntLit(e.Value)
 	case *FloatLitExpr:
-		if e.Is32Bit {
+		// Use the resolved VType to determine literal size
+		if vt, ok := e.GetVType().(*VFloat); ok && vt.Bits == 32 {
 			return cir.FloatLit32(e.Value)
 		}
 		return cir.FloatLit(e.Value)
