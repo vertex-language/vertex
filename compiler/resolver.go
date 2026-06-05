@@ -37,17 +37,17 @@ func (r *Resolver) collectDecls(file *File) {
 		switch d := decl.(type) {
 		case *StructDecl:
 			r.pkg.Define(&Symbol{
-				Name:  d.Name,
-				Kind:  SymStruct,
-				Type:  &VStruct{Name: d.Name, Decl: d},
-				Decl:  d,
+				Name: d.Name,
+				Kind: SymStruct,
+				Type: &VStruct{Name: d.Name, Decl: d},
+				Decl: d,
 			})
 		case *ClassDecl:
 			r.pkg.Define(&Symbol{
-				Name:  d.Name,
-				Kind:  SymClass,
-				Type:  &VClass{Name: d.Name, Decl: d},
-				Decl:  d,
+				Name: d.Name,
+				Kind: SymClass,
+				Type: &VClass{Name: d.Name, Decl: d},
+				Decl: d,
 			})
 		case *EnumDecl:
 			rawType := VType(&VInt{Bits: 32, Signed: true})
@@ -56,7 +56,6 @@ func (r *Resolver) collectDecls(file *File) {
 			}
 			enumType := &VEnum{Name: d.Name, RawType: rawType, Decl: d}
 			r.pkg.Define(&Symbol{Name: d.Name, Kind: SymEnum, Type: enumType, Decl: d})
-			// Also expose each case as a qualified symbol: EnumName.caseName
 			for _, c := range d.Cases {
 				r.pkg.Define(&Symbol{
 					Name: d.Name + "." + c.Name,
@@ -64,7 +63,6 @@ func (r *Resolver) collectDecls(file *File) {
 					Type: enumType,
 					Decl: d,
 				})
-				// Also bare case name in the enum's own pseudo-scope (for switch patterns).
 				r.pkg.Define(&Symbol{Name: c.Name, Kind: SymEnumCase, Type: enumType, Decl: d})
 			}
 		case *TypeAliasDecl:
@@ -81,7 +79,6 @@ func (r *Resolver) collectDecls(file *File) {
 				r.pkg.Define(&Symbol{Name: d.Name, Kind: SymFunc, Decl: d})
 			}
 		case *VarDecl:
-			// Global vars: resolve their value type lazily in pass 2.
 			for _, name := range d.Binding.Names {
 				r.pkg.Define(&Symbol{Name: name, Kind: SymVar, Decl: d, IsConst: d.IsLet})
 			}
@@ -107,13 +104,10 @@ func (r *Resolver) resolveDecls(file *File) {
 }
 
 func (r *Resolver) resolveFunc(fn *FuncDecl) {
-	// Build a function-level scope.
 	fnScope := NewScope(r.pkg)
 
-	// Resolve receiver type and add to scope.
 	if fn.Receiver != nil {
 		recvType := r.resolveTypeExpr(fn.Receiver.Type, fnScope)
-		// Detect pointer receiver (*T).
 		if pt, ok := recvType.(*VPointer); ok {
 			fn.Receiver.IsPtr = true
 			recvType = pt.Elem
@@ -122,19 +116,16 @@ func (r *Resolver) resolveFunc(fn *FuncDecl) {
 		fnScope.Define(&Symbol{Name: fn.Receiver.Name, Kind: SymParam, Type: recvType})
 	}
 
-	// Resolve param types.
 	for _, p := range fn.Params {
 		pt := r.resolveTypeExpr(p.Type, fnScope)
 		fnScope.Define(&Symbol{Name: p.Name, Kind: SymParam, Type: pt})
 	}
 
-	// Determine return type.
 	var retVType VType = &VVoid{}
 	if fn.RetType != nil {
 		retVType = r.resolveTypeExpr(fn.RetType, fnScope)
 	}
 
-	// Walk body.
 	if fn.Body != nil {
 		r.resolveBlock(fn.Body, fnScope, retVType)
 	}
@@ -142,7 +133,7 @@ func (r *Resolver) resolveFunc(fn *FuncDecl) {
 
 func (r *Resolver) resolveStruct(d *StructDecl) {
 	for _, f := range d.Fields {
-		r.resolveTypeExpr(f.Type, r.pkg) // validate types exist
+		r.resolveTypeExpr(f.Type, r.pkg)
 	}
 }
 
@@ -160,7 +151,6 @@ func (r *Resolver) resolveVarDeclGlobal(d *VarDecl) {
 	if d.TypeHint != nil {
 		vtype = r.resolveTypeExpr(d.TypeHint, scope)
 	}
-	// For let strings: immutable.
 	if s, ok := vtype.(*VString); ok {
 		s.Mutable = !d.IsLet
 	}
@@ -193,7 +183,6 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 	case *ForInStmt:
 		inner := NewScope(scope)
 		iterType := r.resolveExpr(st.Iter, scope)
-		// Determine element type.
 		var elemType VType = &VUnknown{Name: "element"}
 		switch it := iterType.(type) {
 		case *VDynArray:
@@ -240,12 +229,10 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
 	valType := r.resolveExpr(d.Value, scope)
 
-	// Apply explicit type annotation.
 	if d.TypeHint != nil {
 		valType = r.resolveTypeExpr(d.TypeHint, scope)
 	}
 
-	// Mutable string: mark VString.Mutable.
 	if s, ok := valType.(*VString); ok {
 		s.Mutable = !d.IsLet
 	}
@@ -266,7 +253,6 @@ func (r *Resolver) resolveIfStmt(st *IfStmt, scope *Scope, retType VType) {
 	switch cond := st.Cond.(type) {
 	case *IfLetCond:
 		bound := r.resolveExpr(cond.Expr, scope)
-		// Unwrap optional if needed.
 		if opt, ok := bound.(*VOptional); ok {
 			bound = opt.Elem
 		}
@@ -282,7 +268,6 @@ func (r *Resolver) resolveIfStmt(st *IfStmt, scope *Scope, retType VType) {
 
 // ─── Expression resolution ────────────────────────────────────────────────────
 
-// resolveExpr walks expr, sets VType on each node, and returns the type.
 func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 	if expr == nil {
 		return &VVoid{}
@@ -403,9 +388,6 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		r.resolveExpr(e.Value, scope)
 		t = r.resolveTypeExpr(e.TargetType, scope)
 
-	// ── reinterpret<T>(expr) ─────────────────────────────────────────────────
-	// Walk the value expression for diagnostics, then resolve the target pointer
-	// type — that becomes the type of the whole reinterpret expression.
 	case *ReinterpretExpr:
 		r.resolveExpr(e.Value, scope)
 		t = r.resolveTypeExpr(e.TargetType, scope)
@@ -424,7 +406,6 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 func (r *Resolver) resolveIdent(e *IdentExpr, scope *Scope) VType {
 	sym, ok := scope.Lookup(e.Name)
 	if !ok {
-		// Check if it's a built-in type name used as a type conversion.
 		if bt, ok2 := BuiltinTypes[e.Name]; ok2 {
 			return bt
 		}
@@ -438,10 +419,8 @@ func (r *Resolver) resolveIdent(e *IdentExpr, scope *Scope) VType {
 }
 
 func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
-	// Check for type-conversion call: float(x), int32(y), etc.
 	if id, ok := e.Func.(*IdentExpr); ok {
 		if bt, isBT := BuiltinTypes[id.Name]; isBT {
-			// Rewrite as TypeConvExpr in place.
 			conv := &TypeConvExpr{
 				exprBase:   exprBase{Pos: id.Pos},
 				TargetType: &NamedTypeExpr{Pos: id.Pos, Name: id.Name},
@@ -451,26 +430,21 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 				r.resolveExpr(e.Args[0].Value, scope)
 			}
 			conv.SetVType(bt)
-			// We can't replace e in-place here; the lowerer must check for this.
-			// Instead, annotate e itself with the target type and mark it as a conv.
 			e.SetVType(bt)
 			_ = conv
 			return bt
 		}
-		// Class instantiation?
 		if sym, ok2 := scope.Lookup(id.Name); ok2 && sym.Kind == SymClass {
 			for _, a := range e.Args {
 				r.resolveExpr(a.Value, scope)
 			}
-			return sym.Type // VClass
+			return sym.Type
 		}
 	}
-	// Regular function call.
 	r.resolveExpr(e.Func, scope)
 	for _, a := range e.Args {
 		r.resolveExpr(a.Value, scope)
 	}
-	// Look up return type if we can.
 	if id, ok := e.Func.(*IdentExpr); ok {
 		if sym, ok2 := scope.Lookup(id.Name); ok2 {
 			if fn, ok3 := sym.Decl.(*FuncDecl); ok3 && fn.RetType != nil {
@@ -486,7 +460,6 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 	for _, a := range e.Args {
 		r.resolveExpr(a.Value, scope)
 	}
-	// Built-in method return types.
 	switch e.Method {
 	case "push", "unshift", "fill", "sort", "reverse", "forEach",
 		"delete", "close", "send":
@@ -518,7 +491,7 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 	case "trySend":
 		return &VBool{}
 	case "new":
-		return recvType // ref-counted same type
+		return recvType
 	}
 	return &VUnknown{Name: e.Method}
 }
@@ -531,7 +504,6 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 			return &VInt{Bits: 32, Signed: false}
 		}
 	case *VStruct:
-		// Look up field in the struct declaration.
 		if rt.Decl != nil {
 			for _, f := range rt.Decl.Fields {
 				if f.Name == e.Field {
@@ -593,14 +565,12 @@ func (r *Resolver) resolveArrayCtor(e *ArrayCtorExpr, scope *Scope) VType {
 		r.resolveExpr(a.Value, scope)
 	}
 
-	// [T](size) → fixed array.
 	if len(e.Args) == 1 && e.Args[0].Label == "" {
 		if il, ok := e.Args[0].Value.(*IntLitExpr); ok {
 			return &VFixedArray{Elem: elemType, Size: int(il.Value)}
 		}
 		return &VFixedArray{Elem: elemType, Size: -1}
 	}
-	// [T](repeating:, count:) → fixed array with fill.
 	hasRepeating := false
 	hasCount := false
 	countSize := -1
@@ -618,7 +588,6 @@ func (r *Resolver) resolveArrayCtor(e *ArrayCtorExpr, scope *Scope) VType {
 	if hasRepeating && hasCount {
 		return &VFixedArray{Elem: elemType, Size: countSize}
 	}
-	// [T]() or [T](capacity:) → dynamic array.
 	return &VDynArray{Elem: elemType}
 }
 
@@ -640,7 +609,7 @@ func (r *Resolver) resolveTypeExpr(te TypeExpr, scope *Scope) VType {
 		return pt
 	case *ArrayTypeExpr:
 		elem := r.resolveTypeExpr(t.Elem, scope)
-		return &VDynArray{Elem: elem} // [T] → dynamic by default
+		return &VDynArray{Elem: elem}
 	case *OptionalTypeExpr:
 		elem := r.resolveTypeExpr(t.Elem, scope)
 		return &VOptional{Elem: elem}
@@ -664,21 +633,22 @@ func (r *Resolver) resolveTypeExpr(te TypeExpr, scope *Scope) VType {
 		}
 	case *ChanTypeExpr:
 		return &VChan{Elem: r.resolveTypeExpr(t.Elem, scope)}
+	case *ExpectedTypeExpr:
+		// Test annotation: resolve to VExpected so the lowerer can read
+		// Channel/Value without needing to inspect the raw TypeExpr again.
+		return &VExpected{Channel: t.Channel, Value: t.Value}
 	}
 	return &VVoid{}
 }
 
 func (r *Resolver) resolveNamedType(t *NamedTypeExpr, scope *Scope) VType {
-	// Qualify: "pkg.Type".
 	name := t.Name
 	if t.Pkg != "" {
 		name = t.Pkg + "." + t.Name
 	}
-	// Built-in type?
 	if bt, ok := BuiltinTypes[name]; ok {
 		return bt
 	}
-	// User-defined type?
 	if sym, ok := scope.Lookup(name); ok {
 		if sym.Type != nil {
 			return sym.Type
@@ -690,8 +660,6 @@ func (r *Resolver) resolveNamedType(t *NamedTypeExpr, scope *Scope) VType {
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
-// typeExprFor synthesises a minimal TypeExpr for a resolved VType.
-// Used to set fn.Receiver.Type after resolving pointer receivers.
 func typeExprFor(vt VType) TypeExpr {
 	return &NamedTypeExpr{Name: vtypeName(vt)}
 }
@@ -703,7 +671,6 @@ func vtypeName(vt VType) string {
 	return vt.String()
 }
 
-// intVal tries to extract an integer constant from an expression.
 func intVal(e Expr) (int64, bool) {
 	if il, ok := e.(*IntLitExpr); ok {
 		return il.Value, true
@@ -711,7 +678,6 @@ func intVal(e Expr) (int64, bool) {
 	return 0, false
 }
 
-// Silence unused-import lint for strconv/strings used transitively.
 var _ = fmt.Sprintf
 var _ = strconv.Itoa
 var _ = strings.Join

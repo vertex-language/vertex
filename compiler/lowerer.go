@@ -16,16 +16,21 @@ import (
 
 // Lowerer holds all mutable state for a single module lowering.
 type Lowerer struct {
-    diags   *Diagnostics
-    mod     *cir.Module
-    gt      *glibTypes
+	diags   *Diagnostics
+	mod     *cir.Module
+	gt      *glibTypes
 
-    structTypes   map[string]*cir.StructType
-    classTypes    map[string]*cir.StructType // regular classes only
-    enumTypes     map[string]cir.Type
-    nativeClasses map[string]bool // class Foo : pkg — no struct, calls C directly
+	structTypes   map[string]*cir.StructType
+	classTypes    map[string]*cir.StructType
+	enumTypes     map[string]cir.Type
+	nativeClasses map[string]bool
 
-    tempSeq int
+	// testEntryFunc, when non-empty, identifies the single test function being
+	// compiled. lowerFunctions skips all other test-qualified functions and
+	// injects a main() that calls this one.
+	testEntryFunc string
+
+	tempSeq int
 }
 
 func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
@@ -192,10 +197,20 @@ func (l *Lowerer) lowerFunctions(file *File) {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *FuncDecl:
+			// In test mode, skip every test function except the active entry.
+			if l.testEntryFunc != "" &&
+				d.Qualifier == FuncQualTest &&
+				d.Name != l.testEntryFunc {
+				continue
+			}
 			l.lowerFuncDecl(d)
 		case *VarDecl:
 			l.lowerGlobalVar(d)
 		}
+	}
+	// Inject a standalone main() when compiling a single test function.
+	if l.testEntryFunc != "" {
+		l.injectTestMain()
 	}
 }
 
@@ -233,65 +248,70 @@ func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
 
 // lowerFuncDecl emits one ir/c FuncDef for a Vertex function or method.
 func (l *Lowerer) lowerFuncDecl(fn *FuncDecl) {
-    if fn.Qualifier != FuncQualNone {
-        l.diags.Warnf(fn.Pos, "function qualifier %v is not yet supported; ignoring", fn.Qualifier)
-    }
+	// Test-qualified functions use their own lowering path.
+	if fn.Qualifier == FuncQualTest {
+		l.lowerTestFuncDecl(fn)
+		return
+	}
+	if fn.Qualifier != FuncQualNone {
+		l.diags.Warnf(fn.Pos, "function qualifier %v is not yet supported; ignoring", fn.Qualifier)
+	}
 
-    cName := fn.Name
-    if fn.Receiver != nil {
-        recvTypeName := extractTypeName(fn.Receiver.Type)
-        cName = recvTypeName + "__" + fn.Name
-    }
+	cName := fn.Name
+	if fn.Receiver != nil {
+		recvTypeName := extractTypeName(fn.Receiver.Type)
+		cName = recvTypeName + "__" + fn.Name
+	}
 
-    retType := cir.Void
-    if fn.RetType != nil {
-        vrt := l.resolveTypeExprVType(fn.RetType)
-        if ct := l.vtypeToCIR(vrt); ct != nil {
-            retType = ct
-        }
-    }
+	retType := cir.Void
+	if fn.RetType != nil {
+		vrt := l.resolveTypeExprVType(fn.RetType)
+		if ct := l.vtypeToCIR(vrt); ct != nil {
+			retType = ct
+		}
+	}
 
-    opts := []cir.FuncOpt{cir.Returns(retType)}
+	opts := []cir.FuncOpt{cir.Returns(retType)}
 
-    if fn.Receiver != nil {
-        recvCType := l.receiverCIRType(fn.Receiver)
-        opts = append(opts, cir.Param(fn.Receiver.Name, recvCType))
-    }
+	if fn.Receiver != nil {
+		recvCType := l.receiverCIRType(fn.Receiver)
+		opts = append(opts, cir.Param(fn.Receiver.Name, recvCType))
+	}
 
-    for _, p := range fn.Params {
-        if p.IsVariadic {
-            opts = append(opts, cir.Variadic)
-            continue
-        }
-        pt := l.resolveTypeExprVType(p.Type)
-        ct := l.vtypeToCIR(pt)
-        if ct == nil {
-            ct = cir.VoidPtr
-        }
-        opts = append(opts, cir.Param(p.Name, ct))
-    }
+	for _, p := range fn.Params {
+		if p.IsVariadic {
+			opts = append(opts, cir.Variadic)
+			continue
+		}
+		pt := l.resolveTypeExprVType(p.Type)
+		ct := l.vtypeToCIR(pt)
+		if ct == nil {
+			ct = cir.VoidPtr
+		}
+		opts = append(opts, cir.Param(p.Name, ct))
+	}
 
-    def := l.mod.Func(cName, opts...)
+	def := l.mod.Func(cName, opts...)
 
-    if fn.Body == nil {
-        return
-    }
+	if fn.Body == nil {
+		return
+	}
 
-    fc := newFuncCtx()
-    if fn.Receiver != nil {
-        fc.params[fn.Receiver.Name] = true
-    }
-    for _, p := range fn.Params {
-        fc.params[p.Name] = true
-    }
+	fc := newFuncCtx()
+	if fn.Receiver != nil {
+		fc.params[fn.Receiver.Name] = true
+	}
+	for _, p := range fn.Params {
+		fc.params[p.Name] = true
+	}
 
-    def.Body(func(b *cir.Builder) {
-        l.lowerBlock(b, fn.Body, fc)
-        if retType == cir.Void && !blockEndsWithReturn(fn.Body) {
-            fc.emitDefers(b)
-            b.Return()
-        }
-    })
+	def.Body(func(b *cir.Builder) {
+		l.lowerBlock(b, fn.Body, fc)
+		if retType == cir.Void && !blockEndsWithReturn(fn.Body) {
+			fc.emitDefers(b)
+			b.Return()
+		}
+	})
 }
 
 func (l *Lowerer) receiverCIRType(recv *Receiver) cir.Type {
@@ -312,9 +332,10 @@ func (l *Lowerer) receiverCIRType(recv *Receiver) cir.Type {
 
 // funcCtx carries per-function state during lowering.
 type funcCtx struct {
-	params  map[string]bool              // names that are parameters
-	locals  map[string]cir.Expr          // name → cached Local ref
-	defers  []func(*cir.Builder)         // accumulated defer thunks (LIFO)
+	params     map[string]bool
+	locals     map[string]cir.Expr
+	defers     []func(*cir.Builder)
+	isTestFunc bool // when true, return-expr → printf + void return
 }
 
 func newFuncCtx() *funcCtx {
@@ -364,7 +385,17 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 	case *ReturnStmt:
 		fc.emitDefers(b)
 		if st.Value != nil {
-			b.ReturnVal(l.lowerExpr(b, st.Value, fc))
+			val := l.lowerExpr(b, st.Value, fc)
+			if fc.isTestFunc {
+				// Test mode: write the value to stdout then void-return.
+				// The format specifier is derived from the expression's resolved type.
+				fmtStr := l.printfFormatFor(st.Value.GetVType()) + "\n"
+				fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
+				b.Stmt(b.Call("printf", fmtLit, val))
+				b.Return()
+			} else {
+				b.ReturnVal(val)
+			}
 		} else {
 			b.Return()
 		}
@@ -1433,6 +1464,85 @@ func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 		return &VOptional{Elem: l.resolveTypeExprVType(t.Elem)}
 	}
 	return &VVoid{}
+}
+
+// lowerTestFuncDecl emits a void function whose return statements are rewritten
+// to printf calls so the value appears on stdout for the test runner to capture.
+func (l *Lowerer) lowerTestFuncDecl(fn *FuncDecl) {
+	l.ensurePrintf()
+
+	def := l.mod.Func(fn.Name, cir.Returns(cir.Void))
+	if fn.Body == nil {
+		return
+	}
+
+	fc := newFuncCtx()
+	fc.isTestFunc = true
+	for _, p := range fn.Params {
+		fc.params[p.Name] = true
+	}
+
+	def.Body(func(b *cir.Builder) {
+		l.lowerBlock(b, fn.Body, fc)
+		// Each ReturnStmt already emits a void return via lowerStmt.
+		// Only add a fallback return for functions that fall off the end
+		// without any return statement at all.
+		if !blockEndsWithReturn(fn.Body) {
+			fc.emitDefers(b)
+			b.Return()
+		}
+	})
+}
+
+// injectTestMain emits:
+//
+//	int main() { <testEntryFunc>(); return 0; }
+func (l *Lowerer) injectTestMain() {
+	entryName := l.testEntryFunc
+	def := l.mod.Func("main", cir.Returns(cir.Int32))
+	def.Body(func(b *cir.Builder) {
+		b.Stmt(b.Call(entryName))
+		b.ReturnVal(cir.IntLit(0))
+	})
+}
+
+// ensurePrintf registers printf as a C extern and adds <stdio.h> to the module
+// if they are not already present.
+func (l *Lowerer) ensurePrintf() {
+	if l.mod.LookupExtern("printf") != nil {
+		return
+	}
+	l.mod.Include("<stdio.h>")
+	l.mod.Extern("printf",
+		cir.Returns(cir.Int32),
+		cir.Param("fmt", cir.ConstPtr(cir.Char)),
+		cir.Variadic,
+	)
+}
+
+// printfFormatFor returns a printf format specifier appropriate for vt.
+func (l *Lowerer) printfFormatFor(vt VType) string {
+	switch t := vt.(type) {
+	case *VInt:
+		if t.Bits == 64 {
+			if t.Signed {
+				return "%lld"
+			}
+			return "%llu"
+		}
+		if t.Signed {
+			return "%d"
+		}
+		return "%u"
+	case *VFloat:
+		return "%g"
+	case *VBool:
+		return "%d"
+	case *VString:
+		return "%s"
+	default:
+		return "%d"
+	}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

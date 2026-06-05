@@ -12,13 +12,11 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // VType is the internal representation of a resolved Vertex type.
-// Each concrete type knows how to produce its ir/c equivalent.
 type VType interface {
 	vtypeNode()
 	String() string
 	// CIRType returns the ir/c Type for this VType.
-	// Returns nil for types that the lowerer must handle specially
-	// (e.g. VDynArray, VClass, mutable VString).
+	// Returns nil for types the lowerer must handle specially.
 	CIRType() cir.Type
 	Equal(VType) bool
 }
@@ -80,18 +78,17 @@ type VResult struct {
 
 type VChan struct{ Elem VType }
 
-// Add to the bottom of the composite types section:
 type VMap struct {
 	Key   VType
 	Value VType
 }
 
-func (*VMap) vtypeNode() {}
-func (t *VMap) String() string { return fmt.Sprintf("map[%s]%s", t.Key, t.Value) }
-func (*VMap) CIRType() cir.Type { return nil } // Handled by lowerer as GHashTable
-func (t *VMap) Equal(o VType) bool {
-	u, ok := o.(*VMap)
-	return ok && t.Key.Equal(u.Key) && t.Value.Equal(u.Value)
+// VExpected is the resolved type of an Expected(channel, value) test annotation.
+// It carries no runtime representation; it is only used by the compiler to
+// route test-function lowering and to store the expected output string.
+type VExpected struct {
+	Channel string // "stdout" | "exitCode"
+	Value   string // expected output, e.g. "15"
 }
 
 // ─── Named user types ─────────────────────────────────────────────────────────
@@ -135,6 +132,8 @@ func (*VTuple) vtypeNode()     {}
 func (*VFunc) vtypeNode()      {}
 func (*VResult) vtypeNode()    {}
 func (*VChan) vtypeNode()      {}
+func (*VMap) vtypeNode()       {}
+func (*VExpected) vtypeNode()  {}
 func (*VStruct) vtypeNode()    {}
 func (*VClass) vtypeNode()     {}
 func (*VEnum) vtypeNode()      {}
@@ -149,22 +148,22 @@ func (t *VInt) String() string {
 	}
 	return fmt.Sprintf("%s%d", prefix, t.Bits)
 }
-func (t *VFloat) String() string   { return fmt.Sprintf("float%d", t.Bits) }
-func (*VBool) String() string      { return "bool" }
-func (*VChar) String() string      { return "char" }
-func (*VVoid) String() string      { return "void" }
-func (t *VString) String() string  { return "string" }
-func (*VNil) String() string       { return "nil" }
-func (t *VUnknown) String() string { return "<unknown:" + t.Name + ">" }
+func (t *VFloat) String() string     { return fmt.Sprintf("float%d", t.Bits) }
+func (*VBool) String() string        { return "bool" }
+func (*VChar) String() string        { return "char" }
+func (*VVoid) String() string        { return "void" }
+func (t *VString) String() string    { return "string" }
+func (*VNil) String() string         { return "nil" }
+func (t *VUnknown) String() string   { return "<unknown:" + t.Name + ">" }
 func (t *VPointer) String() string {
 	if t.IsConst {
 		return "*const " + t.Elem.String()
 	}
 	return "*" + t.Elem.String()
 }
-func (t *VOptional) String() string  { return t.Elem.String() + "?" }
+func (t *VOptional) String() string   { return t.Elem.String() + "?" }
 func (t *VFixedArray) String() string { return fmt.Sprintf("[%s](%d)", t.Elem, t.Size) }
-func (t *VDynArray) String() string  { return "[" + t.Elem.String() + "]" }
+func (t *VDynArray) String() string   { return "[" + t.Elem.String() + "]" }
 func (t *VTuple) String() string {
 	parts := make([]string, len(t.Elems))
 	for i, e := range t.Elems {
@@ -176,13 +175,15 @@ func (t *VTuple) String() string {
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }
-func (t *VResult) String() string  { return fmt.Sprintf("Result(%s, %s)", t.Ok, t.Err) }
-func (t *VChan) String() string    { return "chan " + t.Elem.String() }
-func (t *VStruct) String() string  { return t.Name }
-func (t *VClass) String() string   { return t.Name }
-func (t *VEnum) String() string    { return t.Name }
+func (t *VResult) String() string    { return fmt.Sprintf("Result(%s, %s)", t.Ok, t.Err) }
+func (t *VChan) String() string      { return "chan " + t.Elem.String() }
+func (t *VMap) String() string       { return fmt.Sprintf("map[%s]%s", t.Key, t.Value) }
+func (t *VExpected) String() string  { return fmt.Sprintf("Expected(%s,%q)", t.Channel, t.Value) }
+func (t *VStruct) String() string    { return t.Name }
+func (t *VClass) String() string     { return t.Name }
+func (t *VEnum) String() string      { return t.Name }
 func (t *VTypeAlias) String() string { return t.Name }
-func (t *VFunc) String() string    { return "func" }
+func (t *VFunc) String() string      { return "func" }
 
 // ─── CIRType — mapping to ir/c types ─────────────────────────────────────────
 
@@ -220,10 +221,10 @@ func (t *VFloat) CIRType() cir.Type {
 	return cir.Float64
 }
 
-func (*VBool) CIRType() cir.Type   { return cir.Bool }
-func (*VChar) CIRType() cir.Type   { return cir.Char }
-func (*VVoid) CIRType() cir.Type   { return cir.Void }
-func (*VNil) CIRType() cir.Type    { return cir.VoidPtr }
+func (*VBool) CIRType() cir.Type    { return cir.Bool }
+func (*VChar) CIRType() cir.Type    { return cir.Char }
+func (*VVoid) CIRType() cir.Type    { return cir.Void }
+func (*VNil) CIRType() cir.Type     { return cir.VoidPtr }
 func (*VUnknown) CIRType() cir.Type { return cir.VoidPtr }
 
 func (t *VString) CIRType() cir.Type {
@@ -241,8 +242,6 @@ func (t *VPointer) CIRType() cir.Type {
 }
 
 func (t *VOptional) CIRType() cir.Type {
-	// Pointer / class optionals are nullable pointers.
-	// Scalar optionals need a tagged struct — handled in lowerer.
 	if inner := t.Elem.CIRType(); inner != nil {
 		return cir.Ptr(inner)
 	}
@@ -260,15 +259,20 @@ func (t *VFixedArray) CIRType() cir.Type {
 	return cir.Array(elem, t.Size)
 }
 
-// Dynamic arrays, classes, dicts, tuples, results → lowerer handles specially.
+// Dynamic arrays, classes, maps, tuples, results, channels → lowerer handles.
 func (*VDynArray) CIRType() cir.Type   { return nil }
 func (*VTuple) CIRType() cir.Type      { return nil }
 func (*VFunc) CIRType() cir.Type       { return nil }
 func (*VResult) CIRType() cir.Type     { return nil }
 func (*VChan) CIRType() cir.Type       { return nil }
+func (*VMap) CIRType() cir.Type        { return nil } // lowerer handles as GHashTable
 func (*VStruct) CIRType() cir.Type     { return nil } // lowerer looks up cached *StructType
 func (*VClass) CIRType() cir.Type      { return nil }
 func (*VEnum) CIRType() cir.Type       { return cir.Int32 }
+
+// VExpected carries no runtime value — it is a compile-time annotation only.
+func (*VExpected) CIRType() cir.Type { return cir.Void }
+
 func (t *VTypeAlias) CIRType() cir.Type { return t.Underlying.CIRType() }
 
 // ─── Equal ────────────────────────────────────────────────────────────────────
@@ -303,8 +307,16 @@ func (t *VFixedArray) Equal(o VType) bool {
 	return ok && t.Size == u.Size && t.Elem.Equal(u.Elem)
 }
 func (t *VDynArray) Equal(o VType) bool {
-    u, ok := o.(*VDynArray)
+	u, ok := o.(*VDynArray)
 	return ok && t.Elem.Equal(u.Elem)
+}
+func (t *VMap) Equal(o VType) bool {
+	u, ok := o.(*VMap)
+	return ok && t.Key.Equal(u.Key) && t.Value.Equal(u.Value)
+}
+func (t *VExpected) Equal(o VType) bool {
+	u, ok := o.(*VExpected)
+	return ok && t.Channel == u.Channel && t.Value == u.Value
 }
 func (t *VStruct) Equal(o VType) bool {
 	u, ok := o.(*VStruct)
@@ -338,8 +350,8 @@ func (t *VTuple) Equal(o VType) bool {
 	}
 	return true
 }
-func (t *VFunc) Equal(o VType) bool  { return false } // structural equality not needed yet
-func (*VChan) Equal(o VType) bool    { return false }
+func (t *VFunc) Equal(o VType) bool { return false } // structural equality not needed yet
+func (*VChan) Equal(o VType) bool   { return false }
 
 // ─── Built-in type name table ─────────────────────────────────────────────────
 

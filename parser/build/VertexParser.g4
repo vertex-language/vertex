@@ -29,6 +29,8 @@
 //     validates that the left-hand expression is an addressable lvalue.
 //   • reinterpret<T>(expr) accepts any expr as its argument; backend validates
 //     that T is a pointer type and expr is a pointer or addressable value.
+//   • Expected(channel, string) accepts any IDENTIFIER as the channel name;
+//     backend validates it is a known channel (stdout).
 // ─────────────────────────────────────────────────────────────────────────────
 
 parser grammar VertexParser;
@@ -55,8 +57,12 @@ packageDecl
     ;
 
 // §45  One 'build <tag>' per line; multiple tags in a file are all required.
+// TEST is listed explicitly because 'test' is a keyword token and would not
+// match IDENTIFIER. All other build tags (release, debug, …) remain plain  // ← NEW
+// identifiers and continue to match the IDENTIFIER alternative.            // ← NEW
 buildDecl
-    : BUILD IDENTIFIER
+    : BUILD IDENTIFIER   // e.g. build release, build debug
+    | BUILD TEST         // ← NEW  'build test' — test is a keyword, not IDENTIFIER
     ;
 
 // §33  Single or grouped imports. Grouped form is newline-separated (no commas).
@@ -114,11 +120,13 @@ genericParams
     ;
 
 // §36, §39–41  Qualifier sits between the closing ')' and the return arrow.
+// compiler_testing §4.1  TEST added — occupies the same syntactic position. // ← NEW
 funcQualifier
     : ASYNC
     | THREAD
     | PROCESS
     | GPU
+    | TEST   // ← NEW  compiler_testing §4.1
     ;
 
 // §21  Parameter list. A variadic parameter, if present, must be last.
@@ -516,14 +524,17 @@ asmClobberDecl
 // ════════════════════════════════════════════════════════════════════════════
 
 typeExpr
-    : STAR CONST_KW? typeExpr QUESTION?                         // §4  *T, *const T, *T?, *const T?
-    | LBRACKET typeExpr RBRACKET                                // §24 [T] array
-    | MAP LBRACKET typeExpr RBRACKET typeExpr                   // §25 map[K]V map
-    | CHAN typeExpr                                             // §42 chan T channel
-    | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?      // §34 func(T…)->T function type
-    | LPAREN tupleTypeElems? RPAREN                             // §37 (T,T) tuple / () void
-    | RESULT LPAREN typeExpr COMMA typeExpr RPAREN              // §38.3 Result(T, E)
-    | baseType QUESTION?                                        // named type T, or optional T?
+    : STAR CONST_KW? typeExpr QUESTION?                              // §4   *T, *const T, *T?, *const T?
+    | LBRACKET typeExpr RBRACKET                                     // §24  [T] array
+    | MAP LBRACKET typeExpr RBRACKET typeExpr                        // §25  map[K]V map
+    | CHAN typeExpr                                                   // §42  chan T channel
+    | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T…)->T function type
+    | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / () void
+    | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T, E)
+    // 👇 UPDATED: Identifier & Comma are now optional.
+    | EXPECTED LPAREN (IDENTIFIER COMMA)? STRING_LIT RPAREN          // ← NEW  compiler_testing §4.2
+                                                                     //        Expected("42") or Expected(stdout, "42")
+    | baseType QUESTION?                                             // named type T, or optional T?
     ;
 
 // §34  Function type parameters are types only — no parameter names.

@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"path/filepath"
+
 	"github.com/antlr4-go/antlr/v4"
 	cir "github.com/vertex-language/ir/c"
 	"github.com/vertex-language/vertex/parser"
@@ -14,26 +15,26 @@ import (
 
 // Config holds the compiler's runtime configuration.
 type Config struct {
-	// Target is the platform the emitted C or MIR will be compiled for.
-	// Defaults to TargetLinuxAMD64.
-	Target cir.Target
-
-	// SearchPaths is an ordered list of root directories searched when
-	// resolving import paths.  The compiler checks each directory for a
-	// sub-directory whose path matches the import string.
-	//
-	// Example: if SearchPaths = ["/usr/share/vertex/lib", "./vendor"] and the
-	// source imports "core/io", the loader checks
-	//   /usr/share/vertex/lib/core/io/
-	//   ./vendor/core/io/
+	Target      cir.Target
 	SearchPaths []string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TestFuncInfo — metadata extracted from a test function's Expected annotation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestFuncInfo describes one test-qualified function and what it expects.
+type TestFuncInfo struct {
+	Name     string // function name, e.g. "test_add"
+	Channel  string // "stdout" | "exitCode"
+	Expected string // expected output string, e.g. "15"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compiler
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Compiler orchestrates the frontend pipeline for a single source file or string.
+// Compiler orchestrates the frontend pipeline for a single source file.
 //
 // Pipeline:
 //
@@ -41,14 +42,13 @@ type Config struct {
 //	  └─ Parse (ANTLR)       → *File AST
 //	       └─ Import loading  → package scopes
 //	            └─ Resolve    → typed *File AST
-//	                 └─ Lower → ir/c module (returned for MIR/C emission)
+//	                 └─ Lower → ir/c module
 type Compiler struct {
 	cfg    Config
 	diags  *Diagnostics
 	loader *PackageLoader
 }
 
-// New creates a Compiler with the given Config.
 func New(cfg Config) *Compiler {
 	if cfg.Target == cir.TargetUnknown {
 		cfg.Target = cir.TargetLinuxAMD64
@@ -60,10 +60,9 @@ func New(cfg Config) *Compiler {
 	}
 }
 
-// Diagnostics exposes the compiler's accumulated messages.
 func (c *Compiler) Diagnostics() *Diagnostics { return c.diags }
 
-// CompileFile reads path and compiles it, returning the optimized C IR module.
+// CompileFile reads path and compiles it, returning the optimised C IR module.
 func (c *Compiler) CompileFile(path string) (*cir.Module, error) {
 	data, err := readFile(path)
 	if err != nil {
@@ -72,37 +71,32 @@ func (c *Compiler) CompileFile(path string) (*cir.Module, error) {
 	return c.CompileSource(string(data), path)
 }
 
-// CompileSource compiles the Vertex source string src (with the given filename
-// for diagnostic messages) and returns the optimized C IR module.
+// CompileSource compiles src (identified by filename for diagnostics) and
+// returns the optimised C IR module.
 func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
 	c.diags.Reset()
 
-	// ── 1. Parse ─────────────────────────────────────────────────────────────
 	file, err := c.parseSource(src, filename)
 	if err != nil {
 		return nil, err
 	}
 
-	// ── 2. Load imports ───────────────────────────────────────────────────────
 	pkgs, err := c.loader.LoadImports(file.Imports)
 	if err != nil {
 		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
 	}
 
-	// ── 3. Build package scope (global + imported) ────────────────────────────
 	global := newGlobalScope()
 	for _, pkg := range pkgs {
 		pkg.ExportTo(global)
 	}
 
-	// ── 4. Resolve (type-check) ───────────────────────────────────────────────
 	resolver := NewResolver(c.diags, global)
 	resolver.ResolveFile(file)
 	if c.diags.HasErrors() {
 		return nil, c.diags.Error()
 	}
 
-	// ── 5. Lower to ir/c ──────────────────────────────────────────────────────
 	modName := file.Package
 	if modName == "" {
 		modName = stripExt(filepath.Base(filename))
@@ -116,19 +110,97 @@ func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
 		return nil, c.diags.Error()
 	}
 
-	// ── 6. Optimise ───────────────────────────────────────────────────────────
 	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
-
-	// ── 7. Return Module ──────────────────────────────────────────────────────
-	// C emission is delegated to the caller so the MIR pipeline can use the IR.
 	return mod, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test compilation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CompileTestFile parses a "build test" file and returns one *cir.Module per
+// test function. Each module is compiled as a standalone program with its own
+// main() that calls the single test function and prints its return value.
+// The returned slices are parallel: infos[i] describes modules[i].
+func (c *Compiler) CompileTestFile(path string) ([]TestFuncInfo, []*cir.Module, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	return c.compileTestSource(string(data), path)
+}
+
+func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*cir.Module, error) {
+	c.diags.Reset()
+
+	file, err := c.parseSource(src, filename)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Collect test-function metadata (no resolution needed yet — names and
+	// Expected annotations are available straight from the AST).
+	var infos []TestFuncInfo
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*FuncDecl)
+		if !ok || fn.Qualifier != FuncQualTest {
+			continue
+		}
+		info := TestFuncInfo{Name: fn.Name, Channel: "stdout"}
+		if exp, ok2 := fn.RetType.(*ExpectedTypeExpr); ok2 {
+			info.Channel = exp.Channel
+			info.Expected = exp.Value
+		}
+		infos = append(infos, info)
+	}
+	if len(infos) == 0 {
+		return nil, nil, nil
+	}
+
+	// Load imports and resolve once — the typed AST is read-only during lowering.
+	pkgs, err := c.loader.LoadImports(file.Imports)
+	if err != nil {
+		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
+	}
+	global := newGlobalScope()
+	for _, pkg := range pkgs {
+		pkg.ExportTo(global)
+	}
+
+	resolver := NewResolver(c.diags, global)
+	resolver.ResolveFile(file)
+	if c.diags.HasErrors() {
+		return nil, nil, c.diags.Error()
+	}
+
+	// Lower one isolated module per test function.
+	modBase := stripExt(filepath.Base(filename))
+	var modules []*cir.Module
+
+	for _, info := range infos {
+		c.diags.Reset()
+
+		mod := cir.NewModule(modBase + "_" + info.Name)
+		mod.BindTarget(c.cfg.Target)
+
+		lwr := NewLowerer(c.diags, mod)
+		lwr.testEntryFunc = info.Name // drives test-specific lowering
+		lwr.LowerFile(file)
+		if c.diags.HasErrors() {
+			return nil, nil, c.diags.Error()
+		}
+
+		mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
+		modules = append(modules, mod)
+	}
+
+	return infos, modules, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// parseSource runs the ANTLR lexer+parser over src and builds the raw AST.
 func (c *Compiler) parseSource(src, filename string) (*File, error) {
 	input := antlr.NewInputStream(src)
 	lexer := parser.NewVertexLexer(input)
@@ -145,7 +217,6 @@ func (c *Compiler) parseSource(src, filename string) (*File, error) {
 	if c.diags.HasErrors() {
 		return nil, c.diags.Error()
 	}
-
 	b := newASTBuilder(filename, c.diags)
 	return b.BuildFile(tree), nil
 }
@@ -158,7 +229,6 @@ func stripExt(name string) string {
 	return name
 }
 
-// antlrErrorListener forwards ANTLR parse errors into our Diagnostics.
 type antlrErrorListener struct {
 	*antlr.DefaultErrorListener
 	diags    *Diagnostics
@@ -178,14 +248,6 @@ func (l *antlrErrorListener) SyntaxError(
 	)
 }
 
-// readFile is a thin wrapper so imports.go can call it without importing os.
 func readFile(path string) ([]byte, error) {
-	import_os_ReadFile := func() ([]byte, error) {
-		// Inline to avoid a circular import when imports.go also uses os.
-		return nil, nil
-	}
-	_ = import_os_ReadFile
-
-	// Use os directly here.
 	return osReadFile(path)
 }

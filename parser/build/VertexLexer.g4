@@ -13,7 +13,12 @@
 //     backend, never reserved syntax.
 //   • Result, Ok, Err are promoted to keywords so the parser can reference
 //     them unambiguously in Result-construction and switch-pattern rules
-//     without semantic predicates.
+//     without semantic predicates. Expected follows the same reasoning for
+//     the same reason — it appears in typeExpr position after '->' and would
+//     be ambiguous as a plain identifier there.
+//   • test is promoted to a keyword so funcQualifier can reference it as a
+//     token (matching async, thread, process, gpu). Because 'build test' is
+//     the canonical test-file tag, buildDecl explicitly accepts TEST there.
 //   • const is a keyword, but is only grammatically valid in pointer type
 //     position (*const T). The backend rejects it elsewhere.
 //   • inout, out, clobber are reserved for asm() constraint syntax (§47).
@@ -71,6 +76,12 @@ THREAD  : 'thread' ;
 PROCESS : 'process' ;
 GPU     : 'gpu' ;
 
+// ── Testing qualifier (compiler_testing §4.1) ─────────────────────────────────  // ← NEW
+// Promoted to a keyword so funcQualifier can reference it as a token,
+// matching the pattern of the concurrency qualifiers above.
+// 'build test' is handled in buildDecl by explicitly accepting TEST there.
+TEST : 'test' ;                                                                    // ← NEW
+
 // ── Channel type keyword (§42) ────────────────────────────────────────────────
 CHAN : 'chan' ;
 
@@ -86,9 +97,14 @@ OUT_KW  : 'out' ;
 CLOBBER : 'clobber' ;
 
 // ── Result / error-handling names (§38.3) ─────────────────────────────────────
-RESULT : 'Result' ;
-OK     : 'Ok' ;
-ERR_KW : 'Err' ;
+// Expected follows the same promotion rationale as Result: it appears in
+// typeExpr position after '->' and must be unambiguous to the parser.
+// Channel names (stdout, exitCode) are left as plain identifiers — they
+// only appear inside Expected(...) where the backend validates them.
+RESULT   : 'Result' ;
+OK       : 'Ok' ;
+ERR_KW   : 'Err' ;
+EXPECTED : 'Expected' ;  // ← NEW  compiler_testing §4.2
 
 // ── Boolean / nil literals (§1) ───────────────────────────────────────────────
 TRUE  : 'true' ;

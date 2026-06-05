@@ -1,6 +1,6 @@
 # Vertex Programming Language
 
-### Version 1.9
+**Version 2.1** · [Grammar Spec](docs/grammar.md) · [Native Interface](docs/native_interface.md)
 
 Vertex is a statically-typed systems and application programming language built
 for explicit control, zero-overhead C interop, and first-class concurrency.
@@ -9,54 +9,118 @@ unified pointer system make it uniquely suited to systems work — from GPU
 kernels and AI inference to networking, file I/O, and low-level kernel
 programming.
 
-Vertex compiles to native binaries and WebAssembly.
+Vertex compiles to native binaries on Linux, Windows, and Darwin.
+Upcoming targets: `browser/wasm`, `android`, and `browser/js`.
 
 ---
 
-## Installation
+## Contents
 
-Install the Vertex compiler via Go:
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Language Tour](#language-tour)
+  - [Variables and Types](#variables-and-types)
+  - [Functions and Pointers](#functions-and-pointers)
+  - [Structs and Classes](#structs-and-classes)
+  - [Arrays and Maps](#arrays-and-maps)
+  - [Concurrency](#concurrency)
+  - [Error Handling](#error-handling)
+  - [Native Interface](#native-interface)
+  - [Testing](#testing)
+- [Compiler](#compiler)
+- [Platform Support](#platform-support)
 
-```bash
+---
+
+## Install
+
+Requires Go 1.21 or later.
+
+```sh
 go install github.com/vertex-language/vertex/cmd/vertex@latest
 ```
 
-### Compiler Usage
+Verify:
 
-```bash
-# Compile a single file
-vertex main.vs -o myapp
-
-# Compile an entire package directory
-vertex -o myapp ./cmd/myapp
-
-# Emit WebAssembly
-vertex -wasm main.vs -o myapp.wasm
-
-# Cross-compile
-vertex -platform linux  -o myapp_linux  main.vs
-vertex -platform darwin -o myapp_darwin main.vs
-
-# Custom entry point
-vertex -entry start -wasm -o lib.wasm lib.vs
-
-# Disable dead-code elimination
-vertex -no-dce -o debug main.vs
+```sh
+vertex -version
+# Vertex compiler 0.2.0
 ```
 
-**All flags:**
+---
 
-| Flag        | Default    | Meaning                                        |
-|-------------|------------|------------------------------------------------|
-| `-o`        | `a.out`    | Output file path                               |
-| `-wasm`     | off        | Emit `.wasm` module instead of a native binary |
-| `-platform` | `linux`    | Target platform: `linux`, `darwin`, `windows`  |
-| `-tags`     | —          | Comma-separated extra build tags               |
-| `-module`   | —          | Module path prefix                             |
-| `-root`     | source dir | Module root directory                          |
-| `-entry`    | `main`     | Entry-point function name                      |
-| `-no-dce`   | off        | Disable dead-code elimination                  |
-| `-v`        | —          | Print version and exit                         |
+## Quick Start
+
+```vertex
+package main
+build linux
+
+import "linux/lib/c"
+
+class C : c {
+    func printf(fmt:  ...*const char) -> int
+}
+
+// fibRecursive computes the nth Fibonacci number using classic recursion.
+func fibRecursive(n: int32) -> int32 {
+    if n <= 1 {
+        return n
+    }
+    return fibRecursive(n - 1) + fibRecursive(n - 2)
+}
+
+// fibIterative computes the nth Fibonacci number in O(n) time and O(1) space.
+func fibIterative(n: int32) -> int32 {
+    if n <= 1 {
+        return n
+    }
+    var a: int32 = 0
+    var b: int32 = 1
+    var i: int32 = 2
+    while true {
+        if i > n {
+            break
+        }
+        var tmp: int32 = a + b
+        a = b
+        b = tmp
+        i = i + 1
+    }
+    return b
+}
+
+func main() -> int {
+
+    var libc = C()
+
+    libc.printf("--- Recursive ---\n")
+    var i: int32 = 0
+    while true {
+        if i >= 10 {
+            break
+        }
+        libc.printf("fib(%d) = %d\n", i, fibRecursive(i))
+        i = i + 1
+    }
+
+    libc.printf("--- Iterative ---\n")
+    var j: int32 = 0
+    while true {
+        if j >= 10 {
+            break
+        }
+        libc.printf("fib(%d) = %d\n", j, fibIterative(j))
+        j = j + 1
+    }
+
+    return 0
+}
+```
+
+```sh
+vertex -lc -o fib fib.vs
+./fib
+```
 
 ---
 
@@ -64,187 +128,231 @@ vertex -no-dce -o debug main.vs
 
 ### Variables and Types
 
-`let` declares an immutable binding. `var` declares a mutable one.
+`let` declares an immutable binding; `var` declares a mutable one.
 All numeric conversions are explicit — there is no implicit coercion.
 
-```swift
-let limit: int   = 100
-let ratio: float = float(limit) / 3.0
-var count        = 0
+```vertex
+let x: int32  = 42
+var y: float  = float(x)   // explicit int → float
+let name: string = "vertex"
+let flag: bool = true
 
-// Multiline strings use backticks
-let message = `
-Hello,
-World!
+// multiline string
+let banner: string = `
+  Vertex 2.1
+  systems · concurrency · zero-overhead interop
 `
-
-// Numeric literals support underscores, binary, octal, and hex
-let mask   = 0xFF_00_FF
-let flags  = 0b1010_0011
-let big    = 1_000_000
-let hfloat = 0xFp2      // hex float = 60.0
 ```
 
-**Primitive types:**
+Scalar types map directly to C:
 
-| Category | Types                                         |
-|----------|-----------------------------------------------|
-| Signed   | `int` `int8` `int16` `int32` `int64`          |
-| Unsigned | `uint` `uint8` `uint16` `uint32` `uint64`     |
-| Float    | `float` `double`                              |
-| Other    | `bool` `string` `char` `void`                 |
+| Vertex          | C type     |
+|-----------------|------------|
+| `int` / `int32` | `int32_t`  |
+| `int64`         | `int64_t`  |
+| `uint8`         | `uint8_t`  |
+| `float`         | `float`    |
+| `float64`       | `double`   |
+| `bool`          | `bool`     |
+| `string`        | see docs   |
 
-**Numeric conversion** uses `targetType(value)` — no cast keyword:
+---
 
-```swift
-let i: int   = 42
-let f: float = float(i)    // int → float, always safe
-let b: int8  = int8(i)     // narrowing — wraps on overflow
-let t: int   = int(3.99)   // float → int, truncates toward zero
+### Functions and Pointers
+
+```vertex
+func add(a: int32, b: int32) -> int32 {
+    return a + b
+}
+
+// pointer parameter — mutations affect the caller
+func increment(n: *int32) {
+    n += 1    // auto-dereferenced
+}
+
+var count = 0
+increment(n: &count)   // count is now 1
 ```
+
+`let`/`var` and `*const` are orthogonal: `let` locks the binding;
+`*const` locks the data. All four combinations are valid.
 
 ---
 
 ### Structs and Classes
 
-**Structs** are stack-allocated value types. Assignment always copies.
-**Classes** are heap-allocated reference types.
+**Structs** are value types — stack-allocated, always copied on assignment.
 
-```swift
-struct Point {
-    let x: int
-    var y: int
+```vertex
+struct Vec2 {
+    x: float
+    y: float
 }
 
+func (v: *Vec2) scale(factor: float) {
+    v.x *= factor
+    v.y *= factor
+}
+
+var pos = Vec2{x: 1.0, y: 2.0}
+pos.scale(factor: 2.0)    // pos.x == 2.0, pos.y == 4.0
+```
+
+**Classes** are heap-allocated. The programmer controls lifetime explicitly
+via `.delete()`, or opts into reference counting with `.new()`.
+
+```vertex
 class Animal {
-    var name: string
-}
-```
-
-Struct literals use brace syntax — all field labels are required:
-
-```swift
-let p = Point{x: 3, y: 4}
-var q = Point{x: 3, y: 4}
-q.y   = 10
-
-// Multiline — trailing comma valid
-let p = Point{
-    x: 3,
-    y: 4,
-}
-```
-
-Classes support manual lifetime management or opt-in reference counting:
-
-```swift
-// Manual — call .delete() explicitly; deinit fires automatically
-let a = Animal(name: "Rex")
-defer a.delete()
-
-// Reference counted — freed when all owners go out of scope
-let a = Animal(name: "Rex").new()
-
-// Non-owning weak reference — does not increment the count
-weak let b = a   // b: Animal?
-if let animal = b {
-    // safe — animal: Animal within this scope
-}
-```
-
-`init` and `deinit` are reserved associated function names. `init` is called
-automatically after allocation; `deinit` fires when `.delete()` is called or
-when a ref-counted instance's count reaches zero.
-
-```swift
-func init(a: mut Animal, name: string) {
-    a.name = name
+    name: string
+    health: int32
 }
 
-func deinit(a: mut Animal) {
-    // cleanup before memory is freed
+func (a: *Animal) init(name: string, health: int32) {
+    a.name   = name
+    a.health = health
 }
+
+func (a: *Animal) deinit() {
+    // cleanup before free
+}
+
+// manual lifetime
+let dog = Animal(name: "Rex", health: 100)
+defer dog.delete()
+
+// reference counted
+let cat = Animal(name: "Luna", health: 100).new()
+weak let observer = cat    // observer: Animal? — non-owning
 ```
 
 ---
 
-### Associated Functions
+### Arrays and Maps
 
-Any function whose first parameter is a known struct or class is automatically
-an associated function of that type — no `self`, no method block.
+**Fixed arrays** are stack-allocated:
 
-```swift
-class YourClass {
-    var x: int32
-    var y: int32
-}
-
-func setX(s: mut YourClass, x: int32) { s.x = x }
-func getX(s: YourClass) -> int32      { return s.x }
-
-var m = YourClass(x: 0, y: 0).new()
-m.setX(x: int32(10))
-let x = m.getX()
+```vertex
+var buf  = [uint8](1024)             // 1024 zero bytes, stack
+var mask = [uint8](repeating: 0xFF, count: 64)
 ```
 
-Mutable receivers require `mut` on the parameter and `&` at the call site:
+**Growable arrays** are heap-allocated and must be freed:
 
-```swift
-func reset(p: mut Point) {
-    p.x = 0
-    p.y = 0
-}
+```vertex
+var items = [int32]()
+defer items.delete()
 
-var p = Point{x: 3, y: 4}
-p.reset()
+items.push(10)
+items.push(20)
+
+var doubled = items.map(func(x: int32) -> int32 { return x * 2 })
+defer doubled.delete()
 ```
 
-To write a utility function that takes a known type without it acting as the
-receiver, place the known type at parameter index 1 or later.
+**Maps:**
+
+```vertex
+var config = map[string]int32()
+defer config.delete()
+
+config["workers"] = 4
+config["verbose"] = 1
+config["verbose"] = nil    // removes key
+
+let w = config["workers"]  // int32? — nil if absent
+```
 
 ---
 
-### Enums
+### Concurrency
 
-```swift
-enum Direction { case north, south, east, west }
+Vertex exposes four execution models through a unified postfix syntax.
+The qualifier sits between the parameter list and the return arrow.
 
-enum Status: int {
-    case inactive = 0
-    case active   = 1
-    case pending  = 2
+**Async / Await:**
+
+```vertex
+func fetchUser(id: int32) async -> User {
+    // non-blocking I/O
 }
 
-let raw = Status.active.rawValue          // 1
-let s   = Status(rawValue: 1)             // Status?
+let user = fetchUser(id: 1).await()
 ```
 
-Raw value types are `int` or `string`. String raw values default to the case
-name if omitted. A switch over an enum with all cases covered needs no
-`default`.
+**Threads** — shared memory, lightweight:
+
+```vertex
+func crunch(data: [float]) thread -> [float] {
+    // parallel compute over shared memory
+}
+
+let result = crunch(data: input).spawn(threads: 4)
+```
+
+**Processes** — fully isolated memory:
+
+```vertex
+func isolatedWork(data: [float]) process -> [float] {
+    // separate address space
+}
+
+let result = isolatedWork(data: input).fork(processes: 4)
+```
+
+**GPU Kernels:**
+
+```vertex
+func vectorAdd(a: [float], b: [float]) gpu -> [float] {
+    // emits PTX / shader IR
+}
+
+let output = vectorAdd(a: x, b: y).dispatch()
+```
+
+**Channels** wire concurrent functions together:
+
+```vertex
+let ch = float.channel(size: 256)
+
+func(data: [float], out: chan float) thread {
+    for chunk in data {
+        out.send(process(chunk))
+    }
+    out.close()
+}(dataset, ch).spawn()
+
+while true {
+    let val = ch.tryReceive() ?? break
+    // consume val
+}
+```
 
 ---
 
 ### Error Handling
 
-Vertex has no exceptions. Errors are values.
+Three primitives — choose based on what the caller needs to know:
 
-**Optionals** — when a value may simply be absent:
-
-```swift
-func findUser(id: int) -> User? {
+```vertex
+// T? — value may simply not exist
+func findUser(id: int32) -> User? {
     if id < 0 { return nil }
     return User(id)
 }
 
-if let user = findUser(id: 1) { }
-let name = findUser(id: -1) ?? defaultUser
-```
+if let user = findUser(id: 42) { }
+let u = findUser(id: -1) ?? defaultUser
 
-**Result** — when the caller must handle `Ok` or `Err` explicitly:
+// (T, E?) tuple — value and error together
+func divide(a: int32, b: int32) -> (int32, string?) {
+    if b == 0 { return (0, "division by zero") }
+    return (a / b, nil)
+}
 
-```swift
-func parseInt(s: string) -> Result(int, string) {
+let (result, err) = divide(a: 10, b: 0)
+
+// Result(T, E) — explicit Ok / Err
+func parseInt(s: string) -> Result(int32, string) {
     if s == "" { return Result(Err, "empty string") }
     return Result(Ok, 42)
 }
@@ -257,436 +365,145 @@ case Err(let msg):
 }
 ```
 
-**`.try()`** — propagate a Result error up the call stack:
-
-```swift
-func process(s: string) -> Result(int, string) {
-    let n = parseInt(s: s).try()
-    let d = divide(a: n, b: 2).try()
-    return Result(Ok, d)
-}
-```
-
-**Choosing the right primitive:**
-
-| Situation                               | Use              |
-|-----------------------------------------|------------------|
-| Value may simply not exist              | `T?`             |
-| Caller needs value and error together   | `(T, E?)` tuple  |
-| Caller must handle Ok or Err explicitly | `Result(T, E)`   |
-
----
-
-### Control Flow
-
-```swift
-// if / else if / else
-if x > 0 {
-    // positive
-} else if x < 0 {
-    // negative
-} else {
-    // zero
-}
-
-// switch — no implicit fallthrough
-switch status {
-case .active:
-    // ...
-case .inactive, .pending:
-    // multiple values per case
-default:
-    // required unless exhaustive
-}
-
-// explicit fallthrough
-switch x {
-case 0:
-    fallthrough
-case 1:
-    // reached from 0 or 1
-default:
-    // other
-}
-
-// for-in ranges and arrays
-for i in 0..<10 { }
-for i in 0...10 { }   // closed — includes 10
-for item in items { }
-
-// while
-var n = 0
-while n < 5 { n += 1 }
-```
-
----
-
-### Defer
-
-`defer` executes at scope exit. Multiple defers run in LIFO order.
-
-```swift
-let handle = fopen(path.any(), "r".any())
-defer fclose(handle)
-
-// Multi-statement cleanup
-defer func() {
-    cleanup(a)
-    cleanup(b)
-}()
-```
-
----
-
-### Generics
-
-```swift
-func identity<T>(value: T) -> T {
-    return value
-}
-
-struct Box<T> {
-    var value: T
-}
-
-let b      = Box{value: 42}
-let result = identity(value: "hello")
-```
-
----
-
-### Tuples
-
-```swift
-let pair  = (1, true)
-let point = (x: 10, y: 20)
-
-// Destructuring
-let (a, b) = pair
-
-// Function return
-func minMax(values: [int]) -> (min: int, max: int) {
-    return (0, 100)
-}
-let (lo, hi) = minMax(values: [3, 1, 4])
-```
-
----
-
-### First-Class Functions and Anonymous Functions
-
-```swift
-// Function type variable
-let double: func(int) -> int
-
-// Anonymous function
-let add = func(a: int, b: int) -> int { return a + b }
-
-// Higher-order
-func apply(values: [int], f: func(int) -> int) -> [int] { }
-```
-
-Anonymous functions capture by value. Use `mut` parameters for writeback:
-
-```swift
-var total = 0
-run(n: &total, f: func(n: mut int) {
-    n += 10
-})
-```
-
----
-
-### Concurrency
-
-Execution contexts are declared in the function signature and dispatched at
-the call site with a postfix. There is no separate concurrency API to learn.
-
-```swift
-// Async
-func fetchUser(id: int) async -> User { }
-let user = fetchUser(id: 1).await()
-
-// OS threads — shared memory, zero-copy
-func crunchData(data: [float]) thread -> [float] { }
-let result = crunchData(data: x).spawn(threads: 4)
-
-// Processes — fully isolated memory
-func isolatedWork(data: [float]) process -> [float] { }
-let result = isolatedWork(data: x).fork(processes: 4)
-
-// GPU kernels
-func vectorAdd(a: [float], b: [float]) gpu -> [float] {
-    let i = gpu.threadId
-    return a[i] + b[i]
-}
-let result = vectorAdd(a: x, b: y).dispatch(gpu: 0, mem: 256)
-```
-
-**Channels** work across all contexts:
-
-```swift
-let ch: channel float = Channel(size: 8)
-ch.send(42.0)
-let val = ch.receive()
-ch.close()
-```
-
-| Context   | Transport                       |
-|-----------|---------------------------------|
-| `async`   | shared memory, non-blocking     |
-| `thread`  | shared memory, lightweight      |
-| `process` | ring buffer, high-speed IPC     |
-
 ---
 
 ### Native Interface
 
-Vertex reaches outside the managed runtime through a unified three-part
-pattern: an **import path**, a **class declaration**, and a **package**.
+Every foreign target — C libraries, OS syscalls, COM, CUDA, bare metal
+interrupts — is expressed through the same three-part pattern:
+an **import path**, a **class declaration**, and a **package**.
 
-The import path is the single source of truth for how the compiler emits.
-Build tags are pure platform selectors — they never affect emission strategy.
+The import prefix is the single source of truth for how the compiler emits:
 
-```swift
+| Prefix       | Strategy                              |
+|--------------|---------------------------------------|
+| `lib/`       | linked call (validated at link time)  |
+| `linux/`     | inline syscall instruction            |
+| `darwin/`    | `objc_msgSend` / selector dispatch    |
+| `windows/`   | COM vtable slot dispatch              |
+| `gpu/`       | PTX / shader kernel emission          |
+| `metal/`     | hardware interrupt instruction        |
+
+**C standard library:**
+
+```vertex
 package libc
 build linux
 import "lib/c"
 
 class C : c {
-    func fopen(path: any char, mode: any char) -> any opaque?
-    func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
-    func fclose(stream: mut any opaque) -> int
-    func printf(fmt: any char, ...) -> int
+    func fopen(path: *const char, mode: *const char) -> *void?
+    func fwrite(ptr: *const void, size: uint64, count: uint64, stream: *void) -> uint64
+    func fclose(stream: *void) -> int32
+    func printf(fmt: *const char, ...) -> int32
 }
 ```
 
-**Import path → emission strategy:**
+```vertex
+var c = libc.C()
+let f = c.fopen("/tmp/out.bin", "wb")
+defer c.fclose(f)
 
-| Prefix     | Strategy                                        |
-|------------|-------------------------------------------------|
-| `lib/`     | linked call — signatures validated at link time |
-| `linux/`   | inline syscall instruction, no linker           |
-| `darwin/`  | `objc_msgSend` + selector dispatch              |
-| `windows/` | vtable / COM slot dispatch                      |
-| `gpu/`     | PTX / shader kernel emission                    |
-| `metal/`   | hardware interrupt instruction, no linker       |
-
-**Build tags — platform selectors only:**
-
-| Tag       | Meaning                          |
-|-----------|----------------------------------|
-| `linux`   | compile this file for Linux      |
-| `darwin`  | compile this file for Darwin     |
-| `windows` | compile this file for Windows    |
-| `metal`   | compile this file for bare metal |
-
-Native class instances are zero-size compile-time dispatch surfaces — the
-backend removes them entirely at compile time, no allocation, no runtime
-overhead.
-
-**Multi-platform packages** use filename suffixes instead of explicit build
-tags:
-
-```
-tcp.vs          # all platforms — shared types and public API
-tcp_linux.vs    # import "linux/syscalls"
-tcp_darwin.vs   # import "darwin/objc/..."
-tcp_windows.vs  # import "windows/com/..."
+var data = [uint8](repeating: 0xFF, count: 256)
+c.fwrite(&data, 1, data.byteSize(), f)
+c.printf("wrote %d bytes\n", data.length)
 ```
 
----
+**Linux syscalls:**
 
-### Pointer Types and `.any()`
-
-`any` in type position declares a read-only raw pointer. `mut any` declares a
-mutable one. `.any()` is the postfix escape that produces a raw pointer from
-any value — zero cost, no allocation, no copy.
-
-**Type mapping:**
-
-| Vertex annotation      | C equivalent    |
-|------------------------|-----------------|
-| `name: any char`       | `const char*`   |
-| `name: mut any char`   | `char*`         |
-| `name: any void`       | `const void*`   |
-| `name: mut any void`   | `void*`         |
-| `name: any opaque`     | `const struct*` |
-| `name: mut any opaque` | `struct*`       |
-
-**`.any()` — what it produces:**
-
-| Value            | `.any()` type   |
-|------------------|-----------------|
-| `string`         | `const char*`   |
-| `[T]`            | `const T*`      |
-| `struct`         | `const struct*` |
-| `class instance` | `const struct*` |
-
-The returned pointer is valid only as long as the backing value is alive. For
-ref-counted instances, retain the owning reference for the full duration of any
-native call that holds the pointer.
-
-**C interop example:**
-
-```swift
-extern "C" {
-    func fopen(path: any char, mode: any char) -> mut any opaque?
-    func fwrite(ptr: any void, size: int, count: int, stream: mut any opaque) -> int
-    func fclose(stream: mut any opaque) -> int
-    func printf(fmt: any char, ...) -> int
-}
-
-let f = fopen("/tmp/out.bin".any(), "wb".any())
-defer fclose(f)
-
-let data = [uint8](repeating: 0xFF, count: 256)
-fwrite(data.any(), 1, data.byteSize(), f)
-printf("wrote %d bytes\n".any(), data.len)
-```
-
-**Syscall example:**
-
-```swift
-package syscalls
+```vertex
+package syscall
 build linux
 import "linux/syscalls"
 
 class Syscalls : syscalls {
-    func write(fd: int, buf: any void, count: uint) -> int
-    func exit(status: int) -> int
+    func write(fd: int32, buf: *const void, count: uint64) -> int32
+    func read(fd: int32, buf: *void, count: uint64) -> int32
 }
 ```
 
-**Objective-C example:**
+Native class instances are zero-size — the backend removes them entirely.
+No allocation, no runtime overhead.
 
-```swift
-package foundation
-build darwin
-import "darwin/objc/foundation"
+---
 
-class NSString : foundation {
-    func length(s: NSString) -> int
-    func UTF8String(s: NSString) -> any char
-    func stringWithUTF8String(str: any char) -> NSString?
-}
+### Testing
 
-var ns  = foundation.NSString()
-let str = ns.stringWithUTF8String("hello".any())
-let len = ns.length(str)
+Test functions use the `test` qualifier and are auto-discovered by the
+test runner. Declare them in files tagged `build test`.
+
+```vertex
+package arithmetic_test
+build test
+
+import "arithmetic"
+
+func test_add()        test -> Expected("15")   { return add(a: 10, b: 5) }
+func test_comparison() test -> Expected("true") { return 5 > 3 }
+func test_no_crash()   test                     { add(a: 0, b: 0) }
 ```
 
-**COM / vtable example:**
-
-```swift
-package d3d11
-build windows
-import "windows/com/d3d11"
-
-class IUnknown : d3d11 {
-    func QueryInterface(obj: IUnknown, riid: any opaque, ppv: mut any opaque) -> int
-    func AddRef(obj: IUnknown) -> uint
-    func Release(obj: IUnknown) -> uint
-}
-
-class ID3D11Device : IUnknown {
-    func CreateBuffer(
-        d: ID3D11Device, desc: mut any opaque,
-        init: mut any opaque, ppBuffer: mut any opaque) -> int
-}
+```sh
+vertex -test arithmetic_test.vs        # run tests in one file
+vertex -test -dir .                    # run all tests recursively
 ```
 
-**Bare metal example:**
+A test passes when its return value — auto-formatted to stdout — matches
+the `Expected` string. Omitting `Expected` means the test passes if it
+completes without crashing.
 
-```swift
-package bios
-build metal
-import "metal/int10h"
+---
 
-class Int10h : int10h {
-    func set_video_mode(mode: uint8)
-    func set_cursor_pos(page: uint8, row: uint8, col: uint8)
-    func write_tty(char: uint8, page: uint8, color: uint8)
-}
+## Compiler
 
-var b = bios.Int10h()
-b.set_video_mode(0x03)
-b.set_cursor_pos(0, 0, 0)
-b.write_tty(0x41, 0, 0x07)
+```
+Usage:
+  vertex [flags] <source.vs>
+
+Flags:
+  -o file           write output to file
+  -target string    linux-amd64 (default), darwin-amd64, windows-amd64
+  -emit-c           emit C source instead of native binary
+  -c                compile and assemble, do not link (outputs .o)
+  -I path           add a package search path (repeatable)
+  -L dir            add a library search dir — ELF targets only (repeatable)
+  -l name           link against libname e.g. -lc -lm (repeatable)
+  -test             compile and run build-test functions
+  -dir directory    run tests recursively in directory (with -test)
+  -version          print version and exit
+
+Examples:
+  vertex -o main main.vs                    # native executable
+  vertex -lc -lm -o main main.vs            # link against libc and libm
+  vertex -c -o main.o main.vs               # object file only
+  vertex -emit-c -o main.c main.vs          # emit C source
+  vertex -test arithmetic_test.vs           # run tests in file
+  vertex -test -dir .                       # run all tests recursively
+  vertex -target darwin-amd64 -o app main.vs
 ```
 
 ---
 
-### Type Intrinsics
+## Platform Support
 
-```swift
-SockAddrIn.sizeof()     // compile-time size in bytes — called on type name
-SockAddrIn.alignof()    // compile-time alignment in bytes
-
-let data: [float] = [0.0, 1.0, 2.0]
-data.byteSize()         // runtime byte length of array instance
-data.len                // element count
-```
-
----
-
-### Type Aliases
-
-```swift
-type FILE    = any opaque
-type size_t  = uint64
-type errno_t = int
-```
-
-Aliases are resolved at compile time and may only appear at package level.
+| Target           | Status     |
+|------------------|------------|
+| `linux-amd64`    | Supported  |
+| `darwin-amd64`   | Supported  |
+| `windows-amd64`  | Supported  |
+| `browser/wasm`   | Upcoming   |
+| `android`        | Upcoming   |
+| `browser/js`     | Upcoming   |
 
 ---
 
-## Postfix Reference
+## Documentation
 
-| Postfix                                  | Meaning                               |
-|------------------------------------------|---------------------------------------|
-| `.new()`                                 | opt class instance into ref counting  |
-| `.delete()`                              | manually free a class instance        |
-| `.any()`                                 | escape value to raw C pointer         |
-| `.try()`                                 | propagate Result error upward         |
-| `.await()`                               | suspend until async function resolves |
-| `.spawn()` / `.spawn(threads: n)`        | run on OS thread(s)                   |
-| `.fork()` / `.fork(processes: n)`        | run in isolated process(es)           |
-| `.dispatch()` / `.dispatch(gpu: n, mem:n)` | run on GPU                          |
-| `.sizeof()`                              | compile-time size of type in bytes    |
-| `.alignof()`                             | compile-time alignment in bytes       |
-| `.byteSize()`                            | runtime byte length of an array       |
-| `.len`                                   | element count of an array             |
-
----
-
-## Out of Scope in 1.9
-
-| Feature                                       | Status   |
-|-----------------------------------------------|----------|
-| Inheritance                                   | Removed  |
-| String interpolation `\()`                    | Removed  |
-| `_` parameter labels                          | Removed  |
-| `self` keyword                                | Removed  |
-| `static` keyword                              | Removed  |
-| Methods inside structs or classes             | Removed  |
-| `mutating` keyword                            | Removed  |
-| Protocols                                     | Removed  |
-| Extensions                                    | Removed  |
-| `try` / `throws` / `do-catch`                | Removed  |
-| Nested structs or classes                     | Removed  |
-| Generic constraints (`where T:`)              | Deferred |
-| Enums with associated values                  | Deferred |
-| Access control                                | Deferred |
-| `async let` / `TaskGroup` concurrency         | Deferred |
-| `actor` keyword                               | Deferred |
-| `select` over multiple channels               | Deferred |
-| Labeled `break` / `continue`                  | Deferred |
-| GPU grid/block control                        | Deferred |
+- [Grammar Specification 2.1](docs/grammar.md)
+- [Native Interface](docs/native_interface.md)
 
 ---
 
 ## License
 
-MIT
+See [LICENSE](LICENSE).

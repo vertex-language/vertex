@@ -54,26 +54,26 @@ type Decl interface {
 type FuncDecl struct {
 	Pos        Pos
 	Name       string
-	Receiver   *Receiver   // nil for free functions
-	TypeParams []string    // generic param names, e.g. ["T"]
+	Receiver   *Receiver  // nil for free functions
+	TypeParams []string   // generic param names, e.g. ["T"]
 	Params     []*Param
 	Qualifier  FuncQual
-	RetType    TypeExpr // nil → void
+	RetType    TypeExpr   // nil → void
 	Body       *BlockStmt
 }
 
 type Receiver struct {
-	Pos    Pos
-	Name   string
-	Type   TypeExpr
-	IsPtr  bool // *T receiver (computed by resolver)
+	Pos   Pos
+	Name  string
+	Type  TypeExpr
+	IsPtr bool // *T receiver (computed by resolver)
 }
 
 type Param struct {
-    Pos        Pos
-    Name       string
-    Type       TypeExpr
-    IsVariadic bool // true for the trailing '...' parameter
+	Pos        Pos
+	Name       string
+	Type       TypeExpr
+	IsVariadic bool // true for the trailing '...' parameter
 }
 
 type FuncQual int
@@ -84,6 +84,7 @@ const (
 	FuncQualThread           // deferred
 	FuncQualProcess          // deferred
 	FuncQualGPU              // deferred
+	FuncQualTest             // test function: return → printf, gets its own main()
 )
 
 type StructDecl struct {
@@ -217,6 +218,18 @@ type ChanTypeExpr struct {
 	Elem TypeExpr
 }
 
+// ExpectedTypeExpr is the return-type annotation on a test-qualified function:
+//
+//	func test_add() test -> Expected(stdout, "15")
+//
+// Channel is the named output channel ("stdout", "exitCode").
+// Value is the expected output string that the test runner will compare against.
+type ExpectedTypeExpr struct {
+	Pos     Pos
+	Channel string // e.g. "stdout"
+	Value   string // e.g. "15"
+}
+
 func (*NamedTypeExpr) typeExprNode()    {}
 func (*PointerTypeExpr) typeExprNode()  {}
 func (*ArrayTypeExpr) typeExprNode()    {}
@@ -225,6 +238,7 @@ func (*FuncTypeExpr) typeExprNode()     {}
 func (*TupleTypeExpr) typeExprNode()    {}
 func (*ResultTypeExpr) typeExprNode()   {}
 func (*ChanTypeExpr) typeExprNode()     {}
+func (*ExpectedTypeExpr) typeExprNode() {}
 
 func (t *NamedTypeExpr) nodePos() Pos    { return t.Pos }
 func (t *PointerTypeExpr) nodePos() Pos  { return t.Pos }
@@ -234,6 +248,7 @@ func (t *FuncTypeExpr) nodePos() Pos     { return t.Pos }
 func (t *TupleTypeExpr) nodePos() Pos    { return t.Pos }
 func (t *ResultTypeExpr) nodePos() Pos   { return t.Pos }
 func (t *ChanTypeExpr) nodePos() Pos     { return t.Pos }
+func (t *ExpectedTypeExpr) nodePos() Pos { return t.Pos }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Statements
@@ -366,33 +381,33 @@ type ExprStmt struct {
 }
 
 // Stmt markers.
-func (*BlockStmt) stmtNode()      {}
-func (*LocalDeclStmt) stmtNode()  {}
-func (*IfStmt) stmtNode()         {}
-func (*WhileStmt) stmtNode()      {}
-func (*ForInStmt) stmtNode()      {}
-func (*SwitchStmt) stmtNode()     {}
-func (*ReturnStmt) stmtNode()     {}
-func (*DeferStmt) stmtNode()      {}
-func (*BreakStmt) stmtNode()      {}
-func (*ContinueStmt) stmtNode()   {}
+func (*BlockStmt) stmtNode()       {}
+func (*LocalDeclStmt) stmtNode()   {}
+func (*IfStmt) stmtNode()          {}
+func (*WhileStmt) stmtNode()       {}
+func (*ForInStmt) stmtNode()       {}
+func (*SwitchStmt) stmtNode()      {}
+func (*ReturnStmt) stmtNode()      {}
+func (*DeferStmt) stmtNode()       {}
+func (*BreakStmt) stmtNode()       {}
+func (*ContinueStmt) stmtNode()    {}
 func (*FallthroughStmt) stmtNode() {}
-func (*AssignStmt) stmtNode()     {}
-func (*ExprStmt) stmtNode()       {}
+func (*AssignStmt) stmtNode()      {}
+func (*ExprStmt) stmtNode()        {}
 
-func (s *BlockStmt) nodePos() Pos      { return s.Pos }
-func (s *LocalDeclStmt) nodePos() Pos  { return s.Pos }
-func (s *IfStmt) nodePos() Pos         { return s.Pos }
-func (s *WhileStmt) nodePos() Pos      { return s.Pos }
-func (s *ForInStmt) nodePos() Pos      { return s.Pos }
-func (s *SwitchStmt) nodePos() Pos     { return s.Pos }
-func (s *ReturnStmt) nodePos() Pos     { return s.Pos }
-func (s *DeferStmt) nodePos() Pos      { return s.Pos }
-func (s *BreakStmt) nodePos() Pos      { return s.Pos }
-func (s *ContinueStmt) nodePos() Pos   { return s.Pos }
+func (s *BlockStmt) nodePos() Pos       { return s.Pos }
+func (s *LocalDeclStmt) nodePos() Pos   { return s.Pos }
+func (s *IfStmt) nodePos() Pos          { return s.Pos }
+func (s *WhileStmt) nodePos() Pos       { return s.Pos }
+func (s *ForInStmt) nodePos() Pos       { return s.Pos }
+func (s *SwitchStmt) nodePos() Pos      { return s.Pos }
+func (s *ReturnStmt) nodePos() Pos      { return s.Pos }
+func (s *DeferStmt) nodePos() Pos       { return s.Pos }
+func (s *BreakStmt) nodePos() Pos       { return s.Pos }
+func (s *ContinueStmt) nodePos() Pos    { return s.Pos }
 func (s *FallthroughStmt) nodePos() Pos { return s.Pos }
-func (s *AssignStmt) nodePos() Pos     { return s.Pos }
-func (s *ExprStmt) nodePos() Pos       { return s.Pos }
+func (s *AssignStmt) nodePos() Pos      { return s.Pos }
+func (s *ExprStmt) nodePos() Pos        { return s.Pos }
 
 func (*IfLetCond) ifCondNode()  {}
 func (*IfExprCond) ifCondNode() {}
@@ -405,10 +420,10 @@ func (*EnumShortPattern) switchPatternNode() {}
 func (*ResultOkPattern) switchPatternNode()  {}
 func (*ResultErrPattern) switchPatternNode() {}
 
-func (p *ExprPattern) nodePos() Pos       { return p.Pos }
-func (p *EnumShortPattern) nodePos() Pos  { return p.Pos }
-func (p *ResultOkPattern) nodePos() Pos   { return p.Pos }
-func (p *ResultErrPattern) nodePos() Pos  { return p.Pos }
+func (p *ExprPattern) nodePos() Pos      { return p.Pos }
+func (p *EnumShortPattern) nodePos() Pos { return p.Pos }
+func (p *ResultOkPattern) nodePos() Pos  { return p.Pos }
+func (p *ResultErrPattern) nodePos() Pos { return p.Pos }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expressions
@@ -448,12 +463,10 @@ type FloatLitExpr struct {
 }
 
 // ReinterpretExpr is reinterpret<T>(expr) — zero-cost raw pointer reinterpretation.
-// TargetType must resolve to a pointer type; Value must be a pointer or addressable.
-// Validated by the backend; the lowerer emits a plain C cast.
 type ReinterpretExpr struct {
-    exprBase
-    TargetType TypeExpr
-    Value      Expr
+	exprBase
+	TargetType TypeExpr
+	Value      Expr
 }
 
 type BoolLitExpr struct {
@@ -499,13 +512,10 @@ type ArrayLitExpr struct {
 }
 
 // ArrayCtorExpr is the [T]() / [T](capacity:N) / [T](N) family.
-// The builder synthesizes this when it detects the pattern
-//
-//	CallExpr{ Func: ArrayLitExpr{ [IdentExpr(typeName)] }, Args: ... }
 type ArrayCtorExpr struct {
 	exprBase
 	ElemTypeName string
-	Args         []*Arg // positional size OR capacity:/repeating:/count: labels
+	Args         []*Arg
 }
 
 type TupleLitExpr struct {
@@ -531,7 +541,7 @@ type BinaryExpr struct {
 type BinOp int
 
 const (
-	BinAdd BinOp = iota
+	BinAdd           BinOp = iota
 	BinSub
 	BinMul
 	BinDiv
@@ -544,13 +554,13 @@ const (
 	BinLte
 	BinGt
 	BinGte
-	BinAnd        // &&
-	BinOr         // ||
-	BinNilCoalesce // ??
-	BinOverflowAdd // &+
-	BinOverflowSub // &-
-	BinOverflowMul // &*
-	BinRangeHalfOpen // ..<
+	BinAnd           // &&
+	BinOr            // ||
+	BinNilCoalesce   // ??
+	BinOverflowAdd   // &+
+	BinOverflowSub   // &-
+	BinOverflowMul   // &*
+	BinRangeHalfOpen // ..
 	BinRangeClosed   // ...
 	BinIdentityEq    // ===
 	BinIdentityNeq   // !==
@@ -612,7 +622,6 @@ type IndexExpr struct {
 }
 
 // TypeConvExpr is a type conversion: float(x), int8(y), etc.
-// The Resolver synthesises this when a CallExpr's function resolves to a type.
 type TypeConvExpr struct {
 	exprBase
 	TargetType TypeExpr

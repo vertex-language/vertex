@@ -1659,7 +1659,7 @@ let val = ch.tryReceive()    // T?   — nil if channel is empty
 
 ## 44. Native Interface
 
-```swift
+```vertex
 package windows_d3d11
 build windows
 import "windows/com/d3d11"
@@ -1688,29 +1688,28 @@ class ID3D11Device : IUnknown {
 }
 ```
 
-Looking at `intrinsics.md`, the grammar elements that need to be formally specified are: `build` tags, `package` declarations (both used in §44 but never formally specified), and the `asm()` expression with its full operand syntax. I'll add three sections continuing from §44.
-
 ---
 
 ## 45. Build Tags
 
 ```vertex
-build intrinsics_amd64
+package mypackage
+build amd64
 
-build builtin_amd64
-build arm64
-
+package mypackage
 build windows
+
+package mypackage
+build intrinsics_amd64
 ```
 
 **Rules:**
 
 * `build <tag>` is a file-level declaration that restricts the file to a specific
   build condition.
-* Multiple `build` tags may appear in the same file; all conditions must hold for
-  the file to be compiled.
-* `build` declarations must appear at the top of a file, after any `package`,
-  `import`, or top-level declarations.
+* Exactly one `build` tag may appear per file.
+* `build` declarations must appear after the `package` declaration and before
+  any `import` declarations.
 * The recognised architecture tags are `amd64` and `arm64`. The compiler
   selects exactly one architecture tag per target.
 * The recognised layer tags are `intrinsics`, `builtin`, and `core`. These
@@ -1718,6 +1717,7 @@ build windows
 * Arbitrary platform tags (e.g. `windows`) are valid and may be defined by
   the build system.
 * A file with no `build` tag is compiled unconditionally on all targets.
+build intrinsics_amd64
 
 ---
 
@@ -1833,6 +1833,79 @@ clobber("reg", "reg", ...)    // registers are trashed — not inputs or outputs
   compiler-resolved hints. They carry no `asm()` body; the backend emits branch
   weight metadata directly. Declaring a body for them is a compile error.
 
+---
+
+### 48. Compiler Testing
+
+#### 48.1 The `test` Qualifier
+
+`test` is a function qualifier. It occupies the same position as `async`, `thread`, `process`, and `gpu`—between the parameter list and the return arrow. Test functions are auto-discovered by the test runner and are never called directly from user code.
+
+```vertex
+package arithmetic_test
+build test
+
+import "arithmetic"
+
+func test_literal()    test -> Expected("42")   { return 42 }
+func test_add()        test -> Expected("15")   { return add(a: 10, b: 5) }
+func test_comparison() test -> Expected("true") { return 5 > 3 }
+func test_no_crash()   test                     { square(n: 0) }
+
+```
+
+#### 48.2 `Expected`
+
+`Expected` is the return type annotation for test functions. It dictates the string value the test runner expects to capture from standard output (`stdout`).
+
+```vertex
+Expected(string_literal)
+
+```
+
+* **`string_literal`**: The exact string the function's output must match to pass the test.
+
+#### 48.3 Return Value Formatting
+
+When a test function returns a value, the compiler automatically emits a `printf` call to write the formatted value to `stdout` before the process exits. The format is fixed:
+
+| Return type | Auto-emitted format | `Expected` string for value `5` |
+| --- | --- | --- |
+| `int32` | `%d` | `"5"` |
+| `int64` | `%lld` | `"5"` |
+| `uint32` | `%u` | `"5"` |
+| `float` | `%f` | `"5.000000"` |
+| `bool` | `%d` | `"1"` (true) / `"0"` (false) |
+| `string` | `%s` | `"hello"` |
+
+*(Note: The boolean format maps to the C backend's integer representation).*
+
+#### 48.4 `build test`
+
+Test files are identified by the `build test` tag. The compiler excludes them from normal builds and compiles them into standalone executables only when running in test mode.
+
+```vertex
+package arithmetic_test
+build test
+
+import "arithmetic"
+
+func test_add() test -> Expected("15") {
+    return add(a: 10, b: 5)
+}
+
+```
+
+**Testing Rules:**
+
+* **Placement**: The `test` qualifier sits between the parameter list and `->`. A `test`-qualified function may declare no parameters.
+* **Return Type**: The return type must be `Expected(string_literal)` or omitted.
+* **Implicit Passing**: Omitting `Expected` means the test passes if the function completes without crashing (no output is checked).
+* **Auto-Printing**: Returning a value inside a test function causes that value to be auto-formatted and written to `stdout` before exiting.
+* **Compile-Time Only**: `Expected` is a compile-time metadata annotation; it does not affect standard type checking.
+* **File Scoping**: `test`-qualified functions are only valid in files tagged `build test`. Declaring a `test` function elsewhere is a compile error.
+
+---
 
 ## Explicitly Out of Scope in 2.1
 

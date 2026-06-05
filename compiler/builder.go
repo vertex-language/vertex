@@ -133,6 +133,8 @@ func (b *ASTBuilder) buildFuncQual(ctx parser.IFuncQualifierContext) FuncQual {
 		return FuncQualProcess
 	case ctx.GPU() != nil:
 		return FuncQualGPU
+	case ctx.TEST() != nil:
+		return FuncQualTest
 	}
 	return FuncQualNone
 }
@@ -322,8 +324,33 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			te.RetType = b.buildTypeExpr(subExprs[len(subExprs)-1])
 		}
 		return te
+		
+	// ── Test & Error Types (MUST precede generic tuple LPAREN) ───────────────
+	
+	case ctx.RESULT() != nil:
+		// Result(T, E)
+		rt := &ResultTypeExpr{Pos: pos}
+		if len(subExprs) >= 2 {
+			rt.Ok = b.buildTypeExpr(subExprs[0])
+			rt.Err = b.buildTypeExpr(subExprs[1])
+		}
+		return rt
+	case ctx.EXPECTED() != nil:
+		// Supports both explicit Expected(stdout, "15") and shorthand Expected("15")
+		channel := "stdout" // Sensible default
+		if ctx.IDENTIFIER() != nil {
+			channel = ctx.IDENTIFIER().GetText()
+		}
+		val := ""
+		if ctx.STRING_LIT() != nil {
+			val = unquote(ctx.STRING_LIT().GetText())
+		}
+		return &ExpectedTypeExpr{Pos: pos, Channel: channel, Value: val}
+
+	// ── Tuples & Named Types ──────────────────────────────────────────────────
+	
 	case ctx.LPAREN() != nil && ctx.RPAREN() != nil:
-		// () or (T,T) tuple
+		// () or (T, T) tuple
 		tt := &TupleTypeExpr{Pos: pos}
 		if ctx.TupleTypeElems() != nil {
 			for _, te := range ctx.TupleTypeElems().AllTupleTypeElem() {
@@ -336,14 +363,6 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			}
 		}
 		return tt
-	case ctx.RESULT() != nil:
-		// Result(T, E)
-		rt := &ResultTypeExpr{Pos: pos}
-		if len(subExprs) >= 2 {
-			rt.Ok = b.buildTypeExpr(subExprs[0])
-			rt.Err = b.buildTypeExpr(subExprs[1])
-		}
-		return rt
 	case ctx.BaseType() != nil:
 		// Named type, possibly optional
 		bt := ctx.BaseType()
