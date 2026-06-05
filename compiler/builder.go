@@ -808,6 +808,12 @@ func (b *ASTBuilder) detectBinOp(ctx parser.IExprContext) (BinOp, bool) {
 		return BinShl, true
 	case ctx.RSHIFT() != nil:
 		return BinShr, true
+	case ctx.AMP() != nil:        // §9 bitwise AND  (only reached when nExprs==2)
+		return BinBitAnd, true
+	case ctx.CARET() != nil:      // §9 bitwise XOR
+		return BinBitXor, true
+	case ctx.PIPE() != nil:       // §9 bitwise OR
+		return BinBitOr, true
 	case ctx.EQ() != nil:
 		return BinEq, true
 	case ctx.NEQ() != nil:

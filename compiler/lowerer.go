@@ -832,6 +832,12 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 		return b.Shl(left, right)
 	case BinShr:
 		return b.Shr(left, right)
+	case BinBitAnd:
+		return b.BitAnd(left, right)
+	case BinBitXor:
+		return b.BitXor(left, right)
+	case BinBitOr:
+		return b.BitOr(left, right)
 	case BinEq:
 		return b.Eq(left, right)
 	case BinNeq:
@@ -849,7 +855,6 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 	case BinOr:
 		return b.LogOr(left, right)
 	case BinNilCoalesce:
-		// left ?? right  →  tmp = left; result = (tmp != NULL) ? tmp : right
 		ct := l.vtypeToCIRFallback(e.Left.GetVType())
 		tmp := b.Local(l.tempName(), ct)
 		result := b.Local(l.tempName(), ct)

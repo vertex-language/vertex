@@ -9,6 +9,7 @@
 //   binary    << >>
 //             * / % &*
 //             + - &+ &-
+//             & ^ |                                  (bitwise AND, XOR, OR)
 //             ... ..
 //             ??                                    (right-associative)
 //             == != < > <= >= === !==
@@ -376,6 +377,13 @@ assignOp
 // Because REINTERPRET is a dedicated keyword, the parser knows that any LT
 // immediately following it opens a type-argument list, not a comparison.
 // No semantic predicate or lookahead conflict arises.
+//
+// ── Bitwise binary vs. address-of prefix ambiguity note ──────────────────────
+// AMP serves two roles: binary bitwise AND ('expr AMP expr') and unary
+// address-of ('AMP expr'). ANTLR4's left-recursion rewriting resolves this
+// unambiguously: when an expr is already on the stack and AMP is the next
+// token, the binary alternative wins; when AMP appears with no left-hand
+// expr, the prefix alternative wins. No semantic predicate is required.
 // ════════════════════════════════════════════════════════════════════════════
 
 expr
@@ -398,6 +406,9 @@ expr
     | expr (LSHIFT | RSHIFT) expr                            // §9  shift
     | expr (STAR | SLASH | PERCENT | OVERFLOW_MUL) expr      // §7, §10 multiplicative
     | expr (PLUS | MINUS | OVERFLOW_ADD | OVERFLOW_SUB) expr // §7, §10 additive
+    | expr AMP   expr                                         // §9  bitwise AND
+    | expr CARET expr                                         // §9  bitwise XOR
+    | expr PIPE  expr                                         // §9  bitwise OR
     | expr (ELLIPSIS | HALF_OPEN) expr                       // §13 range
     | <assoc=right> expr NIL_COALESCE expr                   // §15 ?? right-assoc
     | expr (EQ | NEQ | LT | GT | LEQ | GEQ

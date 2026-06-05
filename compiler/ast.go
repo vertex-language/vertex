@@ -553,6 +553,9 @@ const (
 	BinMod
 	BinShl
 	BinShr
+	BinBitAnd        // &   bitwise AND
+	BinBitXor        // ^   bitwise XOR
+	BinBitOr         // |   bitwise OR
 	BinEq
 	BinNeq
 	BinLt

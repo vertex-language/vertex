@@ -1103,6 +1103,8 @@ func (s *ExprContext) AsmExpr() IAsmExprContext
 
 func (s *ExprContext) BANG() antlr.TerminalNode
 
+func (s *ExprContext) CARET() antlr.TerminalNode
+
 func (s *ExprContext) COLON() antlr.TerminalNode
 
 func (s *ExprContext) COMMA(i int) antlr.TerminalNode
@@ -1172,6 +1174,8 @@ func (s *ExprContext) OVERFLOW_MUL() antlr.TerminalNode
 func (s *ExprContext) OVERFLOW_SUB() antlr.TerminalNode
 
 func (s *ExprContext) PERCENT() antlr.TerminalNode
+
+func (s *ExprContext) PIPE() antlr.TerminalNode
 
 func (s *ExprContext) PLUS() antlr.TerminalNode
 
@@ -1829,6 +1833,8 @@ type IExprContext interface {
 	PLUS() antlr.TerminalNode
 	OVERFLOW_ADD() antlr.TerminalNode
 	OVERFLOW_SUB() antlr.TerminalNode
+	CARET() antlr.TerminalNode
+	PIPE() antlr.TerminalNode
 	ELLIPSIS() antlr.TerminalNode
 	HALF_OPEN() antlr.TerminalNode
 	NIL_COALESCE() antlr.TerminalNode
