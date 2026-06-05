@@ -284,10 +284,12 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		if e.Is32Bit {
 			t = &VFloat{Bits: 32}
 		} else {
-			t = &VFloat{Bits: 64} 
+			t = &VFloat{Bits: 64}
 		}
 	case *BoolLitExpr:
 		t = &VBool{}
+	case *CharLitExpr:
+		t = &VChar{}
 	case *StringLitExpr:
 		t = &VString{Mutable: false}
 	case *NilLitExpr:

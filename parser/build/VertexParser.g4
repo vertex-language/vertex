@@ -58,11 +58,11 @@ packageDecl
 
 // §45  One 'build <tag>' per line; multiple tags in a file are all required.
 // TEST is listed explicitly because 'test' is a keyword token and would not
-// match IDENTIFIER. All other build tags (release, debug, …) remain plain  // ← NEW
-// identifiers and continue to match the IDENTIFIER alternative.            // ← NEW
+// match IDENTIFIER. All other build tags (release, debug, …) remain plain
+// identifiers and continue to match the IDENTIFIER alternative.
 buildDecl
     : BUILD IDENTIFIER   // e.g. build release, build debug
-    | BUILD TEST         // ← NEW  'build test' — test is a keyword, not IDENTIFIER
+    | BUILD TEST         // 'build test' — test is a keyword, not IDENTIFIER
     ;
 
 // §33  Single or grouped imports. Grouped form is newline-separated (no commas).
@@ -120,13 +120,13 @@ genericParams
     ;
 
 // §36, §39–41  Qualifier sits between the closing ')' and the return arrow.
-// compiler_testing §4.1  TEST added — occupies the same syntactic position. // ← NEW
+// compiler_testing §4.1  TEST added — occupies the same syntactic position.
 funcQualifier
     : ASYNC
     | THREAD
     | PROCESS
     | GPU
-    | TEST   // ← NEW  compiler_testing §4.1
+    | TEST
     ;
 
 // §21  Parameter list. A variadic parameter, if present, must be last.
@@ -531,9 +531,7 @@ typeExpr
     | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T…)->T function type
     | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / () void
     | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T, E)
-    // 👇 UPDATED: Identifier & Comma are now optional.
-    | EXPECTED LPAREN (IDENTIFIER COMMA)? STRING_LIT RPAREN          // ← NEW  compiler_testing §4.2
-                                                                     //        Expected("42") or Expected(stdout, "42")
+    | EXPECTED LPAREN (IDENTIFIER COMMA)? STRING_LIT RPAREN          // compiler_testing §4.2
     | baseType QUESTION?                                             // named type T, or optional T?
     ;
 
@@ -564,8 +562,8 @@ tupleTypeElem
 // ════════════════════════════════════════════════════════════════════════════
 // Negative numeric literals do not exist as tokens. Unary MINUS in the expr
 // rule produces negative values at compile time.
-// char and string share STRING_LIT; distinction is resolved by the backend
-// based on the declared type of the binding.
+// char values use CHAR_LIT ('A', '\n'); string values use STRING_LIT ("…").  // ← UPDATED
+// The backend validates that a CHAR_LIT contains exactly one code unit.      // ← UPDATED
 literal
     : DEC_INT_LIT
     | HEX_INT_LIT
@@ -573,6 +571,7 @@ literal
     | BIN_INT_LIT
     | DEC_FLOAT_LIT
     | HEX_FLOAT_LIT
+    | CHAR_LIT                                                                 // ← NEW
     | STRING_LIT
     | MULTILINE_STRING_LIT
     | TRUE

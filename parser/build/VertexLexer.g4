@@ -27,6 +27,9 @@
 //   • reinterpret is a keyword so that 'reinterpret<T>(expr)' is unambiguous
 //     at the parser level — the LT/GT tokens cannot be mistaken for
 //     comparison operators when immediately preceded by this token.
+//   • char values use single-quote literals ('A', '\n') — a distinct token  // ← UPDATED
+//     from double-quoted STRING_LIT. The backend validates that exactly one  // ← UPDATED
+//     Unicode code unit is represented. string continues to use "…".        // ← UPDATED
 
 lexer grammar VertexLexer;
 
@@ -76,11 +79,11 @@ THREAD  : 'thread' ;
 PROCESS : 'process' ;
 GPU     : 'gpu' ;
 
-// ── Testing qualifier (compiler_testing §4.1) ─────────────────────────────────  // ← NEW
+// ── Testing qualifier (compiler_testing §4.1) ─────────────────────────────────
 // Promoted to a keyword so funcQualifier can reference it as a token,
 // matching the pattern of the concurrency qualifiers above.
 // 'build test' is handled in buildDecl by explicitly accepting TEST there.
-TEST : 'test' ;                                                                    // ← NEW
+TEST : 'test' ;
 
 // ── Channel type keyword (§42) ────────────────────────────────────────────────
 CHAN : 'chan' ;
@@ -104,7 +107,7 @@ CLOBBER : 'clobber' ;
 RESULT   : 'Result' ;
 OK       : 'Ok' ;
 ERR_KW   : 'Err' ;
-EXPECTED : 'Expected' ;  // ← NEW  compiler_testing §4.2
+EXPECTED : 'Expected' ;
 
 // ── Boolean / nil literals (§1) ───────────────────────────────────────────────
 TRUE  : 'true' ;
@@ -189,17 +192,24 @@ DEC_FLOAT_LIT : DEC_SEQ '.' DEC_SEQ DEC_EXP?
 
 DEC_INT_LIT   : DEC_DIGIT (DEC_DIGIT | '_')* ;
 
-// ── String and character literals (§1, §3) ─────────────────────────────────────
+// ── String and character literals (§1, §3) ─────────────────────────────────────  // ← UPDATED
 //
-// char is a type annotation, not a distinct literal form. Both 'char' and
-// 'string' values use double-quote syntax ("A" vs "hello"). The semantic
-// layer validates that a char-typed binding holds exactly one code unit.
+// char values use single-quote syntax ('A', '\n'). The lexer enforces exactly  // ← UPDATED
+// one CHAR_CHAR (a raw code unit or a recognised escape sequence) between the  // ← UPDATED
+// delimiters, so invalid forms like '' or 'AB' are rejected at lex time.       // ← UPDATED
+// The backend additionally validates that the code unit fits the declared       // ← UPDATED
+// char type width (e.g. ASCII-range for *const char in native interop).        // ← UPDATED
+//
+// string values continue to use double-quote syntax ("hello"). Both may        // ← UPDATED
+// appear in the same source file without ambiguity — their opening             // ← UPDATED
+// delimiters are distinct characters.                                          // ← UPDATED
 //
 // Multiline strings use backtick delimiters (§3). Content is verbatim:
 // no escape sequences are processed, and no indentation is stripped.
 
-STRING_LIT          : '"' STR_CHAR* '"' ;
-MULTILINE_STRING_LIT: '`' .*? '`' ;
+CHAR_LIT            : '\'' CHAR_CHAR '\'' ;                                      // ← NEW
+STRING_LIT          : '"'  STR_CHAR*  '"' ;
+MULTILINE_STRING_LIT: '`'  .*?        '`' ;
 
 // ── Identifiers ────────────────────────────────────────────────────────────────
 // Placed after all keyword rules. ANTLR lexes the longest keyword match
@@ -218,6 +228,7 @@ fragment BIN_DIGIT : [01] ;
 fragment DEC_DIGIT : [0-9] ;
 fragment DEC_SEQ   : DEC_DIGIT (DEC_DIGIT | '_')* ;
 fragment DEC_EXP   : [eE] [+\-]? DEC_DIGIT+ ;
+fragment CHAR_CHAR : ~['\\\r\n] | '\\' [nrtbf'\\] ;                              // ← NEW  single code unit or escape
 fragment STR_CHAR  : ~["\\\r\n] | '\\' [nrtbf"\\] ;
 fragment ID_START  : [a-zA-Z_] ;
 fragment ID_CONT   : [a-zA-Z0-9_] ;

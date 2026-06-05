@@ -864,17 +864,50 @@ func (b *ASTBuilder) buildLiteral(pos Pos, ctx parser.ILiteralContext) Expr {
 		return &FloatLitExpr{exprBase: exprBase{Pos: pos}, Value: parseFloat(ctx.DEC_FLOAT_LIT().GetText())}
 	case ctx.HEX_FLOAT_LIT() != nil:
 		return &FloatLitExpr{exprBase: exprBase{Pos: pos}, Value: parseFloat(ctx.HEX_FLOAT_LIT().GetText())}
+	case ctx.CHAR_LIT() != nil:
+		return &CharLitExpr{exprBase: exprBase{Pos: pos}, Value: parseCharLit(ctx.CHAR_LIT().GetText())}
 	case ctx.STRING_LIT() != nil:
 		return &StringLitExpr{exprBase: exprBase{Pos: pos}, Value: unquote(ctx.STRING_LIT().GetText())}
 	case ctx.MULTILINE_STRING_LIT() != nil:
 		raw := ctx.MULTILINE_STRING_LIT().GetText()
-		// Strip surrounding backticks.
 		if len(raw) >= 2 {
 			raw = raw[1 : len(raw)-1]
 		}
 		return &StringLitExpr{exprBase: exprBase{Pos: pos}, Value: raw}
 	}
 	return &NilLitExpr{exprBase: exprBase{Pos: pos}}
+}
+
+// parseCharLit strips the surrounding single-quotes and decodes the one
+// character or escape sequence that the lexer guarantees is inside.
+func parseCharLit(s string) rune {
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		s = s[1 : len(s)-1]
+	}
+	if len(s) == 0 {
+		return 0
+	}
+	if s[0] == '\\' && len(s) == 2 {
+		switch s[1] {
+		case 'n':
+			return '\n'
+		case 'r':
+			return '\r'
+		case 't':
+			return '\t'
+		case 'b':
+			return '\b'
+		case 'f':
+			return '\f'
+		case '\'':
+			return '\''
+		case '\\':
+			return '\\'
+		}
+		return rune(s[1])
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return r
 }
 
 func (b *ASTBuilder) buildResultExpr(pos Pos, ctx parser.IExprContext) Expr {

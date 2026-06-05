@@ -474,6 +474,11 @@ type BoolLitExpr struct {
 	Value bool
 }
 
+type CharLitExpr struct {
+	exprBase
+	Value rune // the single decoded code point
+}
+
 type StringLitExpr struct {
 	exprBase
 	Value string // unescaped content (backslash sequences already processed)

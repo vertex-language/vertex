@@ -708,13 +708,16 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		}
 		return cir.IntLit(e.Value)
 	case *FloatLitExpr:
-		// Use the resolved VType to determine literal size
 		if vt, ok := e.GetVType().(*VFloat); ok && vt.Bits == 32 {
 			return cir.FloatLit32(e.Value)
 		}
 		return cir.FloatLit(e.Value)
 	case *BoolLitExpr:
 		return cir.BoolLit(e.Value)
+	case *CharLitExpr:
+		// A char literal is a single code point; emit it as an integer constant
+		// so it is compatible with C's char arithmetic and comparisons.
+		return cir.IntLit(int64(e.Value))
 	case *StringLitExpr:
 		return l.mod.StringLit(l.tempName(), e.Value)
 	case *NilLitExpr:
@@ -767,10 +770,6 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		}
 		return inner
 
-	// ── reinterpret<T>(expr) ─────────────────────────────────────────────────
-	// Lowers to a plain C cast: (T)expr.
-	// vtypeToCIR handles all pointer forms (*T, *const T) via VPointer.CIRType().
-	// vtypeToCIRFallback catches any remaining cases (class ptrs, void*, etc.).
 	case *ReinterpretExpr:
 		inner := l.lowerExpr(b, e.Value, fc)
 		targetVT := l.resolveTypeExprVType(e.TargetType)
@@ -1543,6 +1542,8 @@ func (l *Lowerer) printfFormatFor(vt VType) string {
 		return "%g"
 	case *VBool:
 		return "%d"
+	case *VChar:
+		return "%c"
 	case *VString:
 		return "%s"
 	default:

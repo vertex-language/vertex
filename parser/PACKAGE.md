@@ -98,11 +98,12 @@ const (
 	VertexLexerBIN_INT_LIT          = 93
 	VertexLexerDEC_FLOAT_LIT        = 94
 	VertexLexerDEC_INT_LIT          = 95
-	VertexLexerSTRING_LIT           = 96
-	VertexLexerMULTILINE_STRING_LIT = 97
-	VertexLexerIDENTIFIER           = 98
-	VertexLexerWS                   = 99
-	VertexLexerLINE_COMMENT         = 100
+	VertexLexerCHAR_LIT             = 96
+	VertexLexerSTRING_LIT           = 97
+	VertexLexerMULTILINE_STRING_LIT = 98
+	VertexLexerIDENTIFIER           = 99
+	VertexLexerWS                   = 100
+	VertexLexerLINE_COMMENT         = 101
 )
     VertexLexer tokens.
 
@@ -203,11 +204,12 @@ const (
 	VertexParserBIN_INT_LIT          = 93
 	VertexParserDEC_FLOAT_LIT        = 94
 	VertexParserDEC_INT_LIT          = 95
-	VertexParserSTRING_LIT           = 96
-	VertexParserMULTILINE_STRING_LIT = 97
-	VertexParserIDENTIFIER           = 98
-	VertexParserWS                   = 99
-	VertexParserLINE_COMMENT         = 100
+	VertexParserCHAR_LIT             = 96
+	VertexParserSTRING_LIT           = 97
+	VertexParserMULTILINE_STRING_LIT = 98
+	VertexParserIDENTIFIER           = 99
+	VertexParserWS                   = 100
+	VertexParserLINE_COMMENT         = 101
 )
     VertexParser tokens.
 
@@ -2046,6 +2048,7 @@ type ILiteralContext interface {
 	BIN_INT_LIT() antlr.TerminalNode
 	DEC_FLOAT_LIT() antlr.TerminalNode
 	HEX_FLOAT_LIT() antlr.TerminalNode
+	CHAR_LIT() antlr.TerminalNode
 	STRING_LIT() antlr.TerminalNode
 	MULTILINE_STRING_LIT() antlr.TerminalNode
 	TRUE() antlr.TerminalNode
@@ -2603,6 +2606,8 @@ func NewLiteralContext(parser antlr.Parser, parent antlr.ParserRuleContext, invo
 func (s *LiteralContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 
 func (s *LiteralContext) BIN_INT_LIT() antlr.TerminalNode
+
+func (s *LiteralContext) CHAR_LIT() antlr.TerminalNode
 
 func (s *LiteralContext) DEC_FLOAT_LIT() antlr.TerminalNode
 
