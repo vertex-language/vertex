@@ -437,16 +437,43 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		vtype = &VUnknown{}
 	}
 
+	// [T] hint on a fixed literal may still arrive as VDynArray here if the
+	// resolver path was the global one; promote to VFixedArray so we never
+	// try to GLib-allocate a stack literal.
+	if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+		if da, isDyn := vtype.(*VDynArray); isDyn {
+			vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
+		}
+	}
+
 	for i, name := range d.Binding.Names {
-		// For tuple destructuring, skip elements beyond what the value provides.
 		_ = i
 		ref := l.declareLocal(b, name, vtype, d.IsLet)
 		fc.locals[name] = ref
 
-		// Emit initialiser.
+		// Fixed-array literal: C does not allow array-to-array assignment after
+		// the declaration, so we store each element directly by index and skip
+		// the normal Assign path entirely.
+		if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+			if fa, isFixed := vtype.(*VFixedArray); isFixed {
+				elemCIR := l.vtypeToCIR(fa.Elem)
+				if elemCIR == nil {
+					elemCIR = l.vtypeToCIRFallback(fa.Elem)
+				}
+				for j, elem := range arrLit.Elems {
+					val := l.lowerExpr(b, elem, fc)
+					if elemCIR != nil {
+						val = b.Cast(elemCIR, val)
+					}
+					b.Assign(b.Index(ref, cir.IntLit(int64(j))), val)
+				}
+				continue
+			}
+		}
+
+		// Normal scalar / struct init.
 		initExpr := l.lowerExpr(b, d.Value, fc)
 		if initExpr != nil {
-			// NEW: Safely cast the initializer to the target variable's type
 			if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
 				initExpr = b.Cast(targetCT, initExpr)
 			}
@@ -563,10 +590,6 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			cond = b.Lte(iRef, hi)
 		}
 
-		// Use For instead of While so that `continue` jumps to the post
-		// expression (the increment) rather than back to the condition check.
-		// With While, `continue` skips the bottom-of-body increment entirely,
-		// causing an infinite loop whenever the loop variable is not advanced.
 		post := &cir.AssignExpr{
 			LHS: iRef,
 			RHS: b.Add(iRef, cir.IntLit(1)),
@@ -583,6 +606,28 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 		return
 	}
 	switch it := iterType.(type) {
+	case *VFixedArray:
+		if it.Size <= 0 {
+			l.diags.Warnf(st.Pos, "for-in over fixed array with unknown size; skipping")
+			return
+		}
+		elemCIR := l.vtypeToCIR(it.Elem)
+		if elemCIR == nil {
+			elemCIR = l.vtypeToCIRFallback(it.Elem)
+		}
+		iRef := b.Local(l.tempName(), cir.UInt32)
+		b.Assign(iRef, cir.UIntLit(0))
+		post := &cir.AssignExpr{
+			LHS: iRef,
+			RHS: b.Add(iRef, cir.UIntLit(1)),
+		}
+		b.For(nil, b.Lt(iRef, cir.UIntLit(uint64(it.Size))), post, cir.B(func(b *cir.Builder) {
+			elemRef := b.Local(st.Var, elemCIR)
+			fc.locals[st.Var] = elemRef
+			b.Assign(elemRef, b.Index(iter, iRef))
+			l.lowerBlock(b, st.Body, fc)
+		}))
+
 	case *VDynArray:
 		elemCIR := l.vtypeToCIR(it.Elem)
 		if elemCIR == nil {
@@ -599,6 +644,7 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			l.lowerBlock(b, st.Body, fc)
 			b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
 		}))
+
 	default:
 		l.diags.Warnf(st.Pos, "for-in over unsupported type %v; skipping", iterType)
 	}
@@ -1338,7 +1384,6 @@ func (l *Lowerer) lowerArrayLit(b *cir.Builder, e *ArrayLitExpr, fc *funcCtx) ci
 	if len(e.Elems) == 0 {
 		return cir.NullPtr()
 	}
-	// Fixed array literal: const T arr[] = { ... }
 	vt := e.GetVType()
 	fa, ok := vt.(*VFixedArray)
 	if !ok {
@@ -1348,12 +1393,19 @@ func (l *Lowerer) lowerArrayLit(b *cir.Builder, e *ArrayLitExpr, fc *funcCtx) ci
 	if elemCIR == nil {
 		elemCIR = l.vtypeToCIRFallback(fa.Elem)
 	}
-	var elems []cir.Expr
-	for _, el := range e.Elems {
-		elems = append(elems, l.lowerExpr(b, el, fc))
+	// Allocate a temp local and assign each element by index.
+	// We never use cir.CompoundLit for arrays: C compound literals of array
+	// type are not valid as assignment RHS, and the MIR rejects them.
+	arrType := cir.Array(elemCIR, len(e.Elems))
+	tmp := b.Local(l.tempName(), arrType)
+	for i, el := range e.Elems {
+		val := l.lowerExpr(b, el, fc)
+		if elemCIR != nil {
+			val = b.Cast(elemCIR, val)
+		}
+		b.Assign(b.Index(tmp, cir.IntLit(int64(i))), val)
 	}
-	arrType := cir.Array(elemCIR, len(elems))
-	return cir.CompoundLit(arrType, cir.InitArray(elems...))
+	return tmp
 }
 
 func (l *Lowerer) lowerMapLit(b *cir.Builder, e *MapLitExpr, fc *funcCtx) cir.Expr {

@@ -78,24 +78,24 @@ const bool    flag = true;
 
 ## 2. Type Annotations
 
-| Vertex type   | C type     |
-|---------------|------------|
-| `int`         | `int32_t`  |
-| `int8`        | `int8_t`   |
-| `int16`       | `int16_t`  |
-| `int32`       | `int32_t`  |
-| `int64`       | `int64_t`  |
-| `uint`        | `uint32_t` |
-| `uint8`       | `uint8_t`  |
-| `uint16`      | `uint16_t` |
-| `uint32`      | `uint32_t` |
-| `uint64`      | `uint64_t` |
-| `float32 / float`       | `float`    |
-| `float64`     | `double`   |
-| `bool`        | `bool`     |
-| `string`      | see §6     |
-| `char`        | `char`     |
-| `void` / `()` | `void`     |
+| Vertex type         | C type     |
+|---------------------|------------|
+| `int`               | `int32_t`  |
+| `int8`              | `int8_t`   |
+| `int16`             | `int16_t`  |
+| `int32`             | `int32_t`  |
+| `int64`             | `int64_t`  |
+| `uint`              | `uint32_t` |
+| `uint8`             | `uint8_t`  |
+| `uint16`            | `uint16_t` |
+| `uint32`            | `uint32_t` |
+| `uint64`            | `uint64_t` |
+| `float32 / float`   | `float`    |
+| `float64`           | `double`   |
+| `bool`              | `bool`     |
+| `string`            | see §7     |
+| `char`              | `char`     |
+| `void` / `()`       | `void`     |
 
 ---
 
@@ -104,10 +104,10 @@ const bool    flag = true;
 **Vertex**
 ```vertex
 let i: int    = 42
-let f: float  = float(i)     // widening — always safe
+let f: float  = float(i)       // widening — always safe
 let d: float64 = float64(f)    // widening — always safe
-let i2: int   = int(3.99)    // truncates toward zero → 3
-let b: int8   = int8(i)      // narrowing — wraps on overflow
+let i2: int   = int(3.99)      // truncates toward zero → 3
+let b: int8   = int8(i)        // narrowing — wraps on overflow
 ```
 
 **C**
@@ -237,10 +237,12 @@ nums[0]       = 99;
 ```
 
 **Rules**
-- Fixed arrays are stack-allocated (`uint8_t buf[n]`).
-- `[T](n)` / `[T](repeating: 0, count: n)` → `memset(..., 0, ...)`.
+- Fixed arrays are stack-allocated (`T name[N]`).
+- `[T](n)` / `[T](repeating: 0, count: n)` → `T name[n]; memset(..., 0, ...)`.
 - `[T](repeating: v, count: n)` with `v ≠ 0` → `memset(..., v, ...)`.
-- Size must be a compile-time literal; no `.delete()` needed.
+- Literals → C initializer list; `let` adds `const`.
+- Size must be a compile-time integer literal.
+- No `.delete()` needed — stack frame is freed automatically on scope exit.
 
 ---
 
@@ -318,10 +320,12 @@ g_array_index(items, int32_t, 0) = 99;
 
 **Vertex**
 ```vertex
-let idx = items.indexOf(42)   // int  (-1 if absent)
+let idx = items.indexOf(42)   // int32  (-1 if absent)
 let has = items.includes(42)  // bool
 
 let val = items.find(func(x: int32) -> bool { return x > 10 })
+
+let i = items.findIndex(func(x: int32) -> bool { return x > 10 })
 ```
 
 **C**
@@ -341,6 +345,11 @@ for (uint32_t _i = 0; _i < items->len; _i++) {
     int32_t *_p = &g_array_index(items, int32_t, _i);
     if (*_p > 10) { found = _p; break; }
 }
+
+int32_t find_idx = -1;
+for (uint32_t _i = 0; _i < items->len; _i++) {
+    if (g_array_index(items, int32_t, _i) > 10) { find_idx = (int32_t)_i; break; }
+}
 ```
 
 ### 9.5 In-Place Mutation (no allocation)
@@ -350,6 +359,7 @@ for (uint32_t _i = 0; _i < items->len; _i++) {
 items.sort(func(a: int32, b: int32) -> int32 { return a - b })
 items.reverse()
 items.fill(0)
+items.fill(0, from: 1, to: 3)
 ```
 
 **C**
@@ -359,7 +369,6 @@ gint _cmp_int32(gconstpointer a, gconstpointer b) {
 }
 g_array_sort(items, _cmp_int32);
 
-// reverse — in-place swap
 for (uint32_t _lo = 0, _hi = items->len - 1; _lo < _hi; _lo++, _hi--) {
     int32_t _t = g_array_index(items, int32_t, _lo);
     g_array_index(items, int32_t, _lo) = g_array_index(items, int32_t, _hi);
@@ -367,6 +376,9 @@ for (uint32_t _lo = 0, _hi = items->len - 1; _lo < _hi; _lo++, _hi--) {
 }
 
 memset(items->data, 0, items->len * sizeof(int32_t));
+
+// fill(0, from: 1, to: 3)
+memset((int32_t *)items->data + 1, 0, (3 - 1) * sizeof(int32_t));
 ```
 
 ### 9.6 Allocating Methods (caller must `.delete()`)
@@ -393,26 +405,26 @@ for (uint32_t _i = 0; _i < items->len; _i++) {
     int32_t _x = g_array_index(items, int32_t, _i), _out = _x * 2;
     g_array_append_val(doubled, _out);
 }
-g_array_free(doubled, TRUE);
+g_array_free(doubled, TRUE);   // from defer
 
 GArray *evens = g_array_new(FALSE, FALSE, sizeof(int32_t));
 for (uint32_t _i = 0; _i < items->len; _i++) {
     int32_t _x = g_array_index(items, int32_t, _i);
     if (_x % 2 == 0) g_array_append_val(evens, _x);
 }
-g_array_free(evens, TRUE);
+g_array_free(evens, TRUE);     // from defer
 
 GArray *sub = g_array_new(FALSE, FALSE, sizeof(int32_t));
 for (uint32_t _i = 1; _i < 3 && _i < items->len; _i++) {
     int32_t _x = g_array_index(items, int32_t, _i);
     g_array_append_val(sub, _x);
 }
-g_array_free(sub, TRUE);
+g_array_free(sub, TRUE);       // from defer
 
 GArray *all = g_array_sized_new(FALSE, FALSE, sizeof(int32_t), a->len + b->len);
 g_array_append_vals(all, a->data, a->len);
 g_array_append_vals(all, b->data, b->len);
-g_array_free(all, TRUE);
+g_array_free(all, TRUE);       // from defer
 ```
 
 ### 9.7 Iteration
@@ -446,7 +458,7 @@ for (uint32_t _i = 0; _i < items->len; _i++) {
 **Vertex**
 ```vertex
 struct Vec2   { x: float; y: float }
-struct Player { id: int; position: Vec2; health: int }
+struct Player { id: int32; position: Vec2; health: int32 }
 
 var players = [Player]()
 defer players.delete()
@@ -457,15 +469,29 @@ players[0].health = 50
 
 let found = players.find(func(p: Player) -> bool { return p.health < 100 })
 
-players.sort(func(a: Player, b: Player) -> int { return a.health - b.health })
+let idx = players.findIndex(func(p: Player) -> bool { return p.id == 2 })
+
+players.sort(func(a: Player, b: Player) -> int32 { return a.health - b.health })
+
+var alive = players.filter(func(p: Player) -> bool { return p.health > 0 })
+defer alive.delete()
+
+var ids = players.map(func(p: Player) -> int32 { return p.id })
+defer ids.delete()
+
+players.forEach(func(p: Player) { })
 ```
 
 **C**
 ```c
+typedef struct { float x; float y; }                          Vec2;
+typedef struct { int32_t id; Vec2 position; int32_t health; } Player;
+
 GArray *players = g_array_new(FALSE, FALSE, sizeof(Player));
+g_array_free(players, TRUE);   // from defer
 
 Player _p1 = { .id = 1, .position = { .x = 0.0f, .y = 0.0f }, .health = 100 };
-g_array_append_val(players, _p1);            // struct copied by value
+g_array_append_val(players, _p1);   // copied by value
 
 g_array_index(players, Player, 0).health = 50;
 
@@ -475,15 +501,37 @@ for (uint32_t _i = 0; _i < players->len; _i++) {
     if (_p->health < 100) { found = _p; break; }
 }
 
+int32_t idx = -1;
+for (uint32_t _i = 0; _i < players->len; _i++) {
+    if (g_array_index(players, Player, _i).id == 2) { idx = (int32_t)_i; break; }
+}
+
 gint _cmp_player_health(gconstpointer a, gconstpointer b) {
     return ((const Player *)a)->health - ((const Player *)b)->health;
 }
 g_array_sort(players, _cmp_player_health);
 
-g_array_free(players, TRUE);
+GArray *alive = g_array_new(FALSE, FALSE, sizeof(Player));
+for (uint32_t _i = 0; _i < players->len; _i++) {
+    Player _p = g_array_index(players, Player, _i);
+    if (_p.health > 0) g_array_append_val(alive, _p);
+}
+g_array_free(alive, TRUE);     // from defer
+
+GArray *ids = g_array_sized_new(FALSE, FALSE, sizeof(int32_t), players->len);
+for (uint32_t _i = 0; _i < players->len; _i++) {
+    int32_t _id = g_array_index(players, Player, _i).id;
+    g_array_append_val(ids, _id);
+}
+g_array_free(ids, TRUE);       // from defer
+
+for (uint32_t _i = 0; _i < players->len; _i++) {
+    Player p = g_array_index(players, Player, _i);
+    (void)p;
+}
 ```
 
-Structs are copied by value into the `GArray` on every `push`.
+Structs are copied by value into `GArray` on every `push` and out again on iteration.
 
 ---
 
@@ -951,8 +999,8 @@ Labels are erased at the call site; the lowered C call is always positional.
 
 **Vertex**
 ```vertex
-let float64 = func(n: int32) -> int32 { return n * 2 }
-let r = float64(21)
+let double_fn = func(n: int32) -> int32 { return n * 2 }
+let r = double_fn(21)
 ```
 
 **C**
@@ -1204,8 +1252,32 @@ for (int32_t i = 0; i <= 5; i++) { }
 
 ### 27.2 For-In (array)
 
+The lowering depends on whether the array is fixed or growable.
+
+**Fixed array**
+
 **Vertex**
 ```vertex
+let nums = [1, 2, 3]
+for n in nums { }
+```
+
+**C**
+```c
+const int32_t nums[3] = { 1, 2, 3 };
+for (uint32_t _i = 0; _i < 3; _i++) {
+    int32_t n = nums[_i];
+    (void)n;
+}
+```
+
+The length is emitted as a compile-time literal — the compiler knows the count from the type.
+
+**Growable array**
+
+**Vertex**
+```vertex
+var items = [int32]()
 for n in items { }
 ```
 

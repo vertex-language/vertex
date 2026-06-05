@@ -232,7 +232,15 @@ func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
 	valType := r.resolveExpr(d.Value, scope)
 
 	if d.TypeHint != nil {
-		valType = r.resolveTypeExpr(d.TypeHint, scope)
+		hinted := r.resolveTypeExpr(d.TypeHint, scope)
+		// [T] on a fixed-size literal → keep VFixedArray, adopt hint's element type.
+		// e.g. let bytes: [uint8] = [0x00, 0xFF] should stay a fixed array.
+		if da, isDyn := hinted.(*VDynArray); isDyn {
+			if fa, isFixed := valType.(*VFixedArray); isFixed {
+				hinted = &VFixedArray{Elem: da.Elem, Size: fa.Size}
+			}
+		}
+		valType = hinted
 	}
 
 	if s, ok := valType.(*VString); ok {
