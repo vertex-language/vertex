@@ -1576,22 +1576,30 @@ func (l *Lowerer) lowerTestFuncDecl(fn *FuncDecl) {
 
 // injectTestMain emits:
 func (l *Lowerer) injectTestMain() {
-    l.ensurePrintf()
+	l.ensurePrintf()
+	entryName := l.testEntryFunc
 
-    vt := l.testEntryVType
-    if vt == nil {
-        vt = &VInt{Bits: 32, Signed: true}
-    }
-    fmtStr := l.printfFormatFor(vt) + "\n"
+	vt := l.testEntryVType
+	if vt == nil {
+		vt = &VInt{Bits: 32, Signed: true}
+	}
+	fmtStr := l.printfFormatFor(vt) + "\n"
 
-    entryName := l.testEntryFunc
-    def := l.mod.Func("main", cir.Returns(cir.Int32))
-    def.Body(func(b *cir.Builder) {
-        result  := b.Call(entryName)
-        fmtLit  := l.mod.StringLit(l.tempName(), fmtStr)
-        b.Stmt(b.Call("printf", fmtLit, result))
-        b.ReturnVal(cir.IntLit(0))
-    })
+	retCIR := l.vtypeToCIR(vt)
+	if retCIR == nil {
+		retCIR = cir.Int32
+	}
+
+	def := l.mod.Func("main", cir.Returns(cir.Int32))
+	def.Body(func(b *cir.Builder) {
+		// Store in a typed local so MIR knows the register class
+		// (float → XMM0, int → RAX) when fetching the return value.
+		tmp := b.Local(l.tempName(), retCIR)
+		b.Assign(tmp, b.Call(entryName))
+		fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
+		b.Stmt(b.Call("printf", fmtLit, tmp))
+		b.ReturnVal(cir.IntLit(0))
+	})
 }
 
 // ensurePrintf registers printf as a C extern and adds <stdio.h> to the module
