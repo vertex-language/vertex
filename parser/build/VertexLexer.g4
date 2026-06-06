@@ -5,7 +5,7 @@
 //   • Newlines are plain whitespace — Vertex has no automatic semicolon
 //     insertion, so no NEWLINE token is produced. Statement boundaries are
 //     determined by the syntactic structure of the parser rules.
-//   • Scalar type names (int, int32, float, bool, char, string, void …) are
+//   • Scalar type names (int, int32, float32, float64, bool, char, string, void …) are
 //     identifiers, not keywords. This keeps the keyword set small and lets
 //     users shadow them in theory (backend may warn).
 //   • Concurrency postfix names (await, spawn, fork, dispatch, channel, new,
@@ -27,9 +27,9 @@
 //   • reinterpret is a keyword so that 'reinterpret<T>(expr)' is unambiguous
 //     at the parser level — the LT/GT tokens cannot be mistaken for
 //     comparison operators when immediately preceded by this token.
-//   • char values use single-quote literals ('A', '\n') — a distinct token  // ← UPDATED
-//     from double-quoted STRING_LIT. The backend validates that exactly one  // ← UPDATED
-//     Unicode code unit is represented. string continues to use "…".        // ← UPDATED
+//   • char values use single-quote literals ('A', '\n') — a distinct token
+//     from double-quoted STRING_LIT. The backend validates that exactly one
+//     Unicode code unit is represented. string continues to use "…".
 
 lexer grammar VertexLexer;
 
@@ -192,22 +192,22 @@ DEC_FLOAT_LIT : DEC_SEQ '.' DEC_SEQ DEC_EXP?
 
 DEC_INT_LIT   : DEC_DIGIT (DEC_DIGIT | '_')* ;
 
-// ── String and character literals (§1, §3) ─────────────────────────────────────  // ← UPDATED
+// ── String and character literals (§1, §3) ─────────────────────────────────────
 //
-// char values use single-quote syntax ('A', '\n'). The lexer enforces exactly  // ← UPDATED
-// one CHAR_CHAR (a raw code unit or a recognised escape sequence) between the  // ← UPDATED
-// delimiters, so invalid forms like '' or 'AB' are rejected at lex time.       // ← UPDATED
-// The backend additionally validates that the code unit fits the declared       // ← UPDATED
-// char type width (e.g. ASCII-range for *const char in native interop).        // ← UPDATED
+// char values use single-quote syntax ('A', '\n'). The lexer enforces exactly
+// one CHAR_CHAR (a raw code unit or a recognised escape sequence) between the
+// delimiters, so invalid forms like '' or 'AB' are rejected at lex time.
+// The backend additionally validates that the code unit fits the declared
+// char type width (e.g. ASCII-range for *const char in native interop).
 //
-// string values continue to use double-quote syntax ("hello"). Both may        // ← UPDATED
-// appear in the same source file without ambiguity — their opening             // ← UPDATED
-// delimiters are distinct characters.                                          // ← UPDATED
+// string values continue to use double-quote syntax ("hello"). Both may
+// appear in the same source file without ambiguity — their opening
+// delimiters are distinct characters.
 //
 // Multiline strings use backtick delimiters (§3). Content is verbatim:
 // no escape sequences are processed, and no indentation is stripped.
 
-CHAR_LIT            : '\'' CHAR_CHAR '\'' ;                                      // ← NEW
+CHAR_LIT            : '\'' CHAR_CHAR '\'' ;
 STRING_LIT          : '"'  STR_CHAR*  '"' ;
 MULTILINE_STRING_LIT: '`'  .*?        '`' ;
 
@@ -228,7 +228,7 @@ fragment BIN_DIGIT : [01] ;
 fragment DEC_DIGIT : [0-9] ;
 fragment DEC_SEQ   : DEC_DIGIT (DEC_DIGIT | '_')* ;
 fragment DEC_EXP   : [eE] [+\-]? DEC_DIGIT+ ;
-fragment CHAR_CHAR : ~['\\\r\n] | '\\' [nrtbf'\\] ;                              // ← NEW  single code unit or escape
+fragment CHAR_CHAR : ~['\\\r\n] | '\\' [nrtbf'\\] ;                              // single code unit or escape
 fragment STR_CHAR  : ~["\\\r\n] | '\\' [nrtbf"\\] ;
 fragment ID_START  : [a-zA-Z_] ;
 fragment ID_CONT   : [a-zA-Z0-9_] ;

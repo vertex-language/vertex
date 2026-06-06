@@ -133,7 +133,7 @@ All numeric conversions are explicit — there is no implicit coercion.
 
 ```vertex
 let x: int32  = 42
-var y: float  = float(x)   // explicit int → float
+var y: float32  = float32(x)   // explicit int → float32
 let name: string = "vertex"
 let flag: bool = true
 
@@ -151,7 +151,7 @@ Scalar types map directly to C:
 | `int` / `int32` | `int32_t`  |
 | `int64`         | `int64_t`  |
 | `uint8`         | `uint8_t`  |
-| `float`         | `float`    |
+| `float32`       | `float`    |
 | `float64`       | `double`   |
 | `bool`          | `bool`     |
 | `string`        | see docs   |
@@ -185,11 +185,11 @@ increment(n: &count)   // count is now 1
 
 ```vertex
 struct Vec2 {
-    x: float
-    y: float
+    x: float32
+    y: float32
 }
 
-func (v: *Vec2) scale(factor: float) {
+func (v: *Vec2) scale(factor: float32) {
     v.x *= factor
     v.y *= factor
 }
@@ -282,7 +282,7 @@ let user = fetchUser(id: 1).await()
 **Threads** — shared memory, lightweight:
 
 ```vertex
-func crunch(data: [float]) thread -> [float] {
+func crunch(data: [float32]) thread -> [float32] {
     // parallel compute over shared memory
 }
 
@@ -292,7 +292,7 @@ let result = crunch(data: input).spawn(threads: 4)
 **Processes** — fully isolated memory:
 
 ```vertex
-func isolatedWork(data: [float]) process -> [float] {
+func isolatedWork(data: [float32]) process -> [float32] {
     // separate address space
 }
 
@@ -302,7 +302,7 @@ let result = isolatedWork(data: input).fork(processes: 4)
 **GPU Kernels:**
 
 ```vertex
-func vectorAdd(a: [float], b: [float]) gpu -> [float] {
+func vectorAdd(a: [float32], b: [float32]) gpu -> [float32] {
     // emits PTX / shader IR
 }
 
@@ -312,9 +312,9 @@ let output = vectorAdd(a: x, b: y).dispatch()
 **Channels** wire concurrent functions together:
 
 ```vertex
-let ch = float.channel(size: 256)
+let ch = float32.channel(size: 256)
 
-func(data: [float], out: chan float) thread {
+func(data: [float32], out: chan float32) thread {
     for chunk in data {
         out.send(process(chunk))
     }

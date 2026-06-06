@@ -22,14 +22,14 @@
 0xBadFace
 0x0123_4567_89ab_cdef   // underscores valid in any base
 
-// Floats — decimal
+// float32s — decimal
 3.14
 1_000.000_1
 1.25e2          // = 1.25 × 10²  = 125.0
 1.25e-2         // = 1.25 × 10⁻² = 0.0125
 1.25E2          // uppercase E — equivalent
 
-// Floats — hex (binary exponent)
+// float32s — hex (binary exponent)
 0xFp2           // = 15 × 2²  = 60.0
 0xFp-2          // = 15 × 2⁻² = 3.75
 0xC.3p0         // fractional hex mantissa
@@ -70,7 +70,7 @@ let g: uint8  = 255
 let h: uint16 = 65535
 let i: uint32 = 4294967295
 let j: uint64 = 18446744073709551615
-let k: float  = 3.14
+let k: float32  = 3.14
 let l: float64 = 3.14159265358979
 let m: bool   = true
 let n: string = "hello"
@@ -97,7 +97,7 @@ backtick and ends before the closing backtick. No indentation stripping is appli
 | `uint8`           | `uint8_t`  |                        |
 | `uint16`          | `uint16_t` |                        |
 | `uint64`          | `uint64_t` |                        |
-| `float`           | `float`    |                        |
+| `float32`           | `float32`    |                        |
 | `float64`          | `double`   |                        |
 | `bool`            | `bool`     |                        |
 | `char`            | `char`     |                        |
@@ -211,8 +211,8 @@ numeric types.
 
 ```vertex
 let i: int    = 42
-let f: float  = float(i)       // int → float, always safe
-let d: double = double(f)      // float → double, always safe
+let f: float32  = float32(i)       // int → float32, always safe
+let d: double = double(f)      // float32 → double, always safe
 let i2: int   = int(3.99)      // truncates toward zero → 3
 let b: int8   = int8(i)        // narrowing — wraps on overflow
 ```
@@ -221,7 +221,7 @@ let b: int8   = int8(i)        // narrowing — wraps on overflow
 
 * Conversion syntax is `targetType(value)` — no cast keyword.
 * No implicit numeric conversion at any point.
-* Float-to-integer conversion truncates toward zero.
+* float32-to-integer conversion truncates toward zero.
 * Narrowing integer conversions wrap on overflow, identical to `&+`, `&-`, `&*`.
 * Widening conversions (e.g. `int` → `double`) are always value-preserving.
 
@@ -487,9 +487,9 @@ are mutually exclusive.
 
 ```vertex
 func fetchUser(id: int32) async -> User { }
-func crunch(data: [float]) thread -> [float] { }
-func isolated(data: [float]) process -> [float] { }
-func vectorAdd(a: [float], b: [float]) gpu -> [float] { }
+func crunch(data: [float32]) thread -> [float32] { }
+func isolated(data: [float32]) process -> [float32] { }
+func vectorAdd(a: [float32], b: [float32]) gpu -> [float32] { }
 ```
 
 **Rules:**
@@ -579,7 +579,7 @@ let bytes: [uint8] = [
 
 // nested (multidimensional)
 let matrix = [[1, 2], [3, 4]]
-let grid: [[float]] = [
+let grid: [[float32]] = [
     [0.0, 1.0],
     [1.0, 0.0],
 ]
@@ -730,8 +730,8 @@ Structs are copied by value on push — consistent with Vertex value semantics.
 
 ```vertex
 struct Vec2 {
-    x: float
-    y: float
+    x: float32
+    y: float32
 }
 
 struct Player {
@@ -1313,9 +1313,9 @@ func(params) gpu -> ReturnType { body }(args).dispatch(gpu: n, mem: n)
 
 ```vertex
 // thread — inline parallel workload
-let results = float.channel(size: 64)
+let results = float32.channel(size: 64)
 
-func(data: [float], out: chan float) thread {
+func(data: [float32], out: chan float32) thread {
     for chunk in data {
         out.send(process(chunk))
     }
@@ -1323,7 +1323,7 @@ func(data: [float], out: chan float) thread {
 }(dataset, results).spawn()
 
 // process — isolated compute feeding a channel
-func(data: [float], out: chan float) process {
+func(data: [float32], out: chan float32) process {
     for chunk in data {
         out.send(heavyCompute(chunk))
     }
@@ -1336,7 +1336,7 @@ let user = func(id: int32) async -> User {
 }(userId).await()
 
 // gpu — inline kernel dispatch
-let output = func(a: [float], b: [float]) gpu -> [float] {
+let output = func(a: [float32], b: [float32]) gpu -> [float32] {
     return vectorAdd(a: a, b: b)
 }(x, y).dispatch()
 ```
@@ -1513,7 +1513,7 @@ func process(s: string) -> Result(int32, string) {
 ## 39. GPU Kernels
 
 ```vertex
-func vectorAdd(a: [float], b: [float]) gpu -> [float] {
+func vectorAdd(a: [float32], b: [float32]) gpu -> [float32] {
     // body
     return result
 }
@@ -1533,7 +1533,7 @@ let result = vectorAdd(a: x, b: y).dispatch(gpu: 0, mem: 256)
 ## 40. Threads
 
 ```vertex
-func crunchData(data: [float]) thread -> [float] {
+func crunchData(data: [float32]) thread -> [float32] {
     // runs in a thread, shared memory
 }
 
@@ -1552,7 +1552,7 @@ let result = crunchData(data: x).spawn(threads: 4)
 ## 41. Processes
 
 ```vertex
-func isolatedWork(data: [float]) process -> [float] {
+func isolatedWork(data: [float32]) process -> [float32] {
     // runs in a separate process, full memory isolation
 }
 
@@ -1874,7 +1874,7 @@ When a test function returns a value, the compiler automatically emits a `printf
 | `int32` | `%d` | `"5"` |
 | `int64` | `%lld` | `"5"` |
 | `uint32` | `%u` | `"5"` |
-| `float` | `%f` | `"5.000000"` |
+| `float32` | `%f` | `"5.000000"` |
 | `bool` | `%d` | `"1"` (true) / `"0"` (false) |
 | `string` | `%s` | `"hello"` |
 

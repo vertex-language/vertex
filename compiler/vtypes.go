@@ -387,7 +387,6 @@ var BuiltinTypes = map[string]VType{
 	"uint16":  &VInt{Bits: 16, Signed: false},
 	"uint32":  &VInt{Bits: 32, Signed: false},
 	"uint64":  &VInt{Bits: 64, Signed: false},
-	"float":   &VFloat{Bits: 32},
 	"float32": &VFloat{Bits: 32},
 	"float64": &VFloat{Bits: 64},
 	"bool":    &VBool{},

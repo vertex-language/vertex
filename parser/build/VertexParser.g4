@@ -522,8 +522,8 @@ asmClobberDecl
 // ════════════════════════════════════════════════════════════════════════════
 // TYPE EXPRESSIONS  §3–§4, §24, §34, §37, §38.3, §42
 //
-// All scalar type names (int, int32, float, float64, bool, char, string, void,
-// etc.) are plain identifiers matched by baseType. They are not keywords.
+// All scalar type names (int, int32, float32, float64, bool, char, string,
+// void, etc.) are plain identifiers matched by baseType. They are not keywords.
 //
 // Pointer vs. scalar optional (§4, §26):
 //   *T   starts with STAR   → pointer rule handles it  (including *T? nullable)
@@ -573,8 +573,8 @@ tupleTypeElem
 // ════════════════════════════════════════════════════════════════════════════
 // Negative numeric literals do not exist as tokens. Unary MINUS in the expr
 // rule produces negative values at compile time.
-// char values use CHAR_LIT ('A', '\n'); string values use STRING_LIT ("…").  // ← UPDATED
-// The backend validates that a CHAR_LIT contains exactly one code unit.      // ← UPDATED
+// char values use CHAR_LIT ('A', '\n'); string values use STRING_LIT ("…").
+// The backend validates that a CHAR_LIT contains exactly one code unit.
 literal
     : DEC_INT_LIT
     | HEX_INT_LIT
@@ -582,7 +582,7 @@ literal
     | BIN_INT_LIT
     | DEC_FLOAT_LIT
     | HEX_FLOAT_LIT
-    | CHAR_LIT                                                                 // ← NEW
+    | CHAR_LIT
     | STRING_LIT
     | MULTILINE_STRING_LIT
     | TRUE
