@@ -214,7 +214,19 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 		}
 	case *ReturnStmt:
 		if st.Value != nil {
-			r.resolveExpr(st.Value, scope)
+			valType := r.resolveExpr(st.Value, scope)
+			// Guard: Prevent returning values from void functions
+			if _, isVoid := retType.(*VVoid); isVoid {
+				r.diags.Errorf(st.Pos, "void function cannot return a value")
+			} else if !valType.Equal(retType) {
+				// Guard: Ensure the returned value matches the declared return type
+				r.diags.Errorf(st.Pos, "type mismatch: expected %s, got %s", retType, valType)
+			}
+		} else {
+			// Guard: Prevent empty returns in non-void functions
+			if _, isVoid := retType.(*VVoid); !isVoid {
+				r.diags.Errorf(st.Pos, "missing return value, expected %s", retType)
+			}
 		}
 	case *DeferStmt:
 		r.resolveExpr(st.Call, scope)
