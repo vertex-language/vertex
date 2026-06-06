@@ -1631,7 +1631,14 @@ func (l *Lowerer) injectTestMain() {
 		// Store in a typed local so MIR knows the register class
 		// (float → XMM0, int → RAX) when fetching the return value.
 		tmp := b.Local(l.tempName(), retCIR)
-		b.Assign(tmp, b.Call(entryName))
+		
+		// FIX: Stamp the return type onto the call node so MIR reads XMM0
+		callExpr := b.Call(entryName)
+		if ce, ok := callExpr.(*cir.CallExpr); ok {
+			ce.Type = retCIR
+		}
+		
+		b.Assign(tmp, callExpr)
 		fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
 		b.Stmt(b.Call("printf", fmtLit, tmp))
 		b.ReturnVal(cir.IntLit(0))
@@ -1671,7 +1678,7 @@ func (l *Lowerer) printfFormatFor(vt VType) string {
 		}
 		return "%u"
 	case *VFloat:
-		return "%g"
+		return "%f" // FIX: Changed from "%g" to "%f" to preserve trailing zeros for the test runner
 	case *VBool:
 		return "%d"
 	case *VChar:
