@@ -1844,41 +1844,39 @@ clobber("reg", "reg", ...)    // registers are trashed — not inputs or outputs
 ```vertex
 package arithmetic_test
 build test
-
 import "arithmetic"
 
-func test_literal()    test -> Expected("42")   { return 42 }
-func test_add()        test -> Expected("15")   { return add(a: 10, b: 5) }
-func test_comparison() test -> Expected("true") { return 5 > 3 }
-func test_no_crash()   test                     { square(n: 0) }
-
+func test_literal()    test -> Expected(int32, "42") { return 42 }
+func test_add()        test -> Expected(int32, "15") { return add(a: 10, b: 5) }
+func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
+func test_no_crash()   test                          { square(n: 0) }
 ```
 
 #### 48.2 `Expected`
 
-`Expected` is the return type annotation for test functions. It dictates the string value the test runner expects to capture from standard output (`stdout`).
+`Expected` is the return type annotation for test functions. It declares both the return type of the function and the exact string the test runner expects to capture from standard output (`stdout`).
 
 ```vertex
-Expected(string_literal)
-
+Expected(type, string_literal)
 ```
 
+* **`type`**: The concrete return type of the test function. Must match the type of the value actually returned.
 * **`string_literal`**: The exact string the function's output must match to pass the test.
 
 #### 48.3 Return Value Formatting
 
 When a test function returns a value, the compiler automatically emits a `printf` call to write the formatted value to `stdout` before the process exits. The format is fixed:
 
-| Return type | Auto-emitted format | `Expected` string for value `5` |
+| Return type | Auto-emitted format | `Expected` syntax for value `5` |
 | --- | --- | --- |
-| `int32` | `%d` | `"5"` |
-| `int64` | `%lld` | `"5"` |
-| `uint32` | `%u` | `"5"` |
-| `float32` | `%f` | `"5.000000"` |
-| `bool` | `%d` | `"1"` (true) / `"0"` (false) |
-| `string` | `%s` | `"hello"` |
+| `int32` | `%d` | `Expected(int32, "5")` |
+| `int64` | `%lld` | `Expected(int64, "5")` |
+| `uint32` | `%u` | `Expected(uint32, "5")` |
+| `float32` | `%f` | `Expected(float32, "5.000000")` |
+| `bool` | `%d` | `Expected(bool, "1")` (true) / `Expected(bool, "0")` (false) |
+| `string` | `%s` | `Expected(string, "hello")` |
 
-*(Note: The boolean format maps to the C backend's integer representation).*
+*(Note: The boolean format maps to the C backend's integer representation.)*
 
 #### 48.4 `build test`
 
@@ -1887,19 +1885,17 @@ Test files are identified by the `build test` tag. The compiler excludes them fr
 ```vertex
 package arithmetic_test
 build test
-
 import "arithmetic"
 
-func test_add() test -> Expected("15") {
+func test_add() test -> Expected(int32, "15") {
     return add(a: 10, b: 5)
 }
-
 ```
 
 **Testing Rules:**
 
 * **Placement**: The `test` qualifier sits between the parameter list and `->`. A `test`-qualified function may declare no parameters.
-* **Return Type**: The return type must be `Expected(string_literal)` or omitted.
+* **Return Type**: The return type must be `Expected(type, string_literal)` or omitted. The `type` argument must exactly match the type of the returned value.
 * **Implicit Passing**: Omitting `Expected` means the test passes if the function completes without crashing (no output is checked).
 * **Auto-Printing**: Returning a value inside a test function causes that value to be auto-formatted and written to `stdout` before exiting.
 * **Compile-Time Only**: `Expected` is a compile-time metadata annotation; it does not affect standard type checking.
