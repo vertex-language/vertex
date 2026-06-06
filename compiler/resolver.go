@@ -665,9 +665,15 @@ func (r *Resolver) resolveTypeExpr(te TypeExpr, scope *Scope) VType {
 	case *ChanTypeExpr:
 		return &VChan{Elem: r.resolveTypeExpr(t.Elem, scope)}
 	case *ExpectedTypeExpr:
-		// Test annotation: resolve to VExpected so the lowerer can read
-		// Channel/Value without needing to inspect the raw TypeExpr again.
-		return &VExpected{Channel: t.Channel, Value: t.Value}
+		var retVType VType
+		if t.ReturnType != nil {
+			retVType = r.resolveTypeExpr(t.ReturnType, scope)
+		}
+		return &VExpected{
+			Channel:    t.Channel,
+			Value:      t.Value,
+			ReturnType: retVType,
+		}
 	}
 	return &VVoid{}
 }

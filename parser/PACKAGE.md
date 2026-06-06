@@ -2451,7 +2451,6 @@ type ITypeExprContext interface {
 	COMMA() antlr.TerminalNode
 	EXPECTED() antlr.TerminalNode
 	STRING_LIT() antlr.TerminalNode
-	IDENTIFIER() antlr.TerminalNode
 	BaseType() IBaseTypeContext
 
 	// IsTypeExprContext differentiates from other interfaces.
@@ -3253,8 +3252,6 @@ func (s *TypeExprContext) FuncTypeParams() IFuncTypeParamsContext
 func (s *TypeExprContext) GetParser() antlr.Parser
 
 func (s *TypeExprContext) GetRuleContext() antlr.RuleContext
-
-func (s *TypeExprContext) IDENTIFIER() antlr.TerminalNode
 
 func (*TypeExprContext) IsTypeExprContext()
 

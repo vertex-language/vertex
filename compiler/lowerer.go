@@ -25,10 +25,8 @@ type Lowerer struct {
 	enumTypes     map[string]cir.Type
 	nativeClasses map[string]bool
 
-	// testEntryFunc, when non-empty, identifies the single test function being
-	// compiled. lowerFunctions skips all other test-qualified functions and
-	// injects a main() that calls this one.
-	testEntryFunc string
+    testEntryFunc  string
+    testEntryVType VType  // NEW: actual return type of the test entry function
 
 	tempSeq int
 }
@@ -335,7 +333,6 @@ type funcCtx struct {
 	params     map[string]bool
 	locals     map[string]cir.Expr
 	defers     []func(*cir.Builder)
-	isTestFunc bool // when true, return-expr → printf + void return
 }
 
 func newFuncCtx() *funcCtx {
@@ -385,17 +382,7 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 	case *ReturnStmt:
 		fc.emitDefers(b)
 		if st.Value != nil {
-			val := l.lowerExpr(b, st.Value, fc)
-			if fc.isTestFunc {
-				// Test mode: write the value to stdout then void-return.
-				// The format specifier is derived from the expression's resolved type.
-				fmtStr := l.printfFormatFor(st.Value.GetVType()) + "\n"
-				fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
-				b.Stmt(b.Call("printf", fmtLit, val))
-				b.Return()
-			} else {
-				b.ReturnVal(val)
-			}
+			b.ReturnVal(l.lowerExpr(b, st.Value, fc))
 		} else {
 			b.Return()
 		}
@@ -1551,41 +1538,60 @@ func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 // lowerTestFuncDecl emits a void function whose return statements are rewritten
 // to printf calls so the value appears on stdout for the test runner to capture.
 func (l *Lowerer) lowerTestFuncDecl(fn *FuncDecl) {
-	l.ensurePrintf()
+    // Determine the actual return type from Expected(type, "value").
+    var retCIR cir.Type = cir.Int32
+    var retVT  VType    = &VInt{Bits: 32, Signed: true}
 
-	def := l.mod.Func(fn.Name, cir.Returns(cir.Void))
-	if fn.Body == nil {
-		return
-	}
+    if fn.RetType != nil {
+        if exp, ok := fn.RetType.(*ExpectedTypeExpr); ok && exp.ReturnType != nil {
+            vt := l.resolveTypeExprVType(exp.ReturnType)
+            if ct := l.vtypeToCIR(vt); ct != nil {
+                retCIR = ct
+                retVT  = vt
+            }
+        }
+    }
 
-	fc := newFuncCtx()
-	fc.isTestFunc = true
-	for _, p := range fn.Params {
-		fc.params[p.Name] = true
-	}
+    // Save so injectTestMain can build the right printf format.
+    l.testEntryVType = retVT
 
-	def.Body(func(b *cir.Builder) {
-		l.lowerBlock(b, fn.Body, fc)
-		// Each ReturnStmt already emits a void return via lowerStmt.
-		// Only add a fallback return for functions that fall off the end
-		// without any return statement at all.
-		if !blockEndsWithReturn(fn.Body) {
-			fc.emitDefers(b)
-			b.Return()
-		}
-	})
+    def := l.mod.Func(fn.Name, cir.Returns(retCIR))
+    if fn.Body == nil {
+        return
+    }
+
+    fc := newFuncCtx()
+    for _, p := range fn.Params {
+        fc.params[p.Name] = true
+    }
+
+    def.Body(func(b *cir.Builder) {
+        l.lowerBlock(b, fn.Body, fc)
+        if !blockEndsWithReturn(fn.Body) {
+            fc.emitDefers(b)
+            b.Return()
+        }
+    })
 }
 
 // injectTestMain emits:
-//
-//	int main() { <testEntryFunc>(); return 0; }
 func (l *Lowerer) injectTestMain() {
-	entryName := l.testEntryFunc
-	def := l.mod.Func("main", cir.Returns(cir.Int32))
-	def.Body(func(b *cir.Builder) {
-		b.Stmt(b.Call(entryName))
-		b.ReturnVal(cir.IntLit(0))
-	})
+    l.ensurePrintf()
+
+    vt := l.testEntryVType
+    if vt == nil {
+        vt = &VInt{Bits: 32, Signed: true}
+    }
+    fmtStr := l.printfFormatFor(vt) + "\n"
+
+    entryName := l.testEntryFunc
+    def := l.mod.Func("main", cir.Returns(cir.Int32))
+    def.Body(func(b *cir.Builder) {
+        result  := b.Call(entryName)
+        fmtLit  := l.mod.StringLit(l.tempName(), fmtStr)
+        b.Stmt(b.Call("printf", fmtLit, result))
+        b.ReturnVal(cir.IntLit(0))
+    })
 }
 
 // ensurePrintf registers printf as a C extern and adds <stdio.h> to the module

@@ -83,12 +83,24 @@ type VMap struct {
 	Value VType
 }
 
-// VExpected is the resolved type of an Expected(channel, value) test annotation.
-// It carries no runtime representation; it is only used by the compiler to
-// route test-function lowering and to store the expected output string.
 type VExpected struct {
-	Channel string // "stdout" | "exitCode"
-	Value   string // expected output, e.g. "15"
+    Channel    string
+    Value      string
+    ReturnType VType  // NEW
+}
+
+func (t *VExpected) String() string {
+    return fmt.Sprintf("Expected(%v,%q)", t.ReturnType, t.Value)
+}
+
+func (t *VExpected) Equal(o VType) bool {
+    u, ok := o.(*VExpected)
+    if !ok {
+        return false
+    }
+    retEq := (t.ReturnType == nil && u.ReturnType == nil) ||
+        (t.ReturnType != nil && u.ReturnType != nil && t.ReturnType.Equal(u.ReturnType))
+    return retEq && t.Channel == u.Channel && t.Value == u.Value
 }
 
 // ─── Named user types ─────────────────────────────────────────────────────────

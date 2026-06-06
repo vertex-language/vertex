@@ -225,9 +225,10 @@ type ChanTypeExpr struct {
 // Channel is the named output channel ("stdout", "exitCode").
 // Value is the expected output string that the test runner will compare against.
 type ExpectedTypeExpr struct {
-	Pos     Pos
-	Channel string // e.g. "stdout"
-	Value   string // e.g. "15"
+    Pos        Pos
+    ReturnType TypeExpr // NEW: e.g. int32, uint8 — the real return type
+    Channel    string   // "stdout" (default)
+    Value      string   // "6", "255", etc.
 }
 
 func (*NamedTypeExpr) typeExprNode()    {}

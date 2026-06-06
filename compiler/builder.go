@@ -336,16 +336,21 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 		}
 		return rt
 	case ctx.EXPECTED() != nil:
-		// Supports both explicit Expected(stdout, "15") and shorthand Expected("15")
-		channel := "stdout" // Sensible default
-		if ctx.IDENTIFIER() != nil {
-			channel = ctx.IDENTIFIER().GetText()
+		// Expected(typeExpr, "value")
+		var returnType TypeExpr
+		if len(subExprs) > 0 {
+			returnType = b.buildTypeExpr(subExprs[0])
 		}
 		val := ""
 		if ctx.STRING_LIT() != nil {
 			val = unquote(ctx.STRING_LIT().GetText())
 		}
-		return &ExpectedTypeExpr{Pos: pos, Channel: channel, Value: val}
+		return &ExpectedTypeExpr{
+			Pos:        pos,
+			ReturnType: returnType,
+			Channel:    "stdout",
+			Value:      val,
+		}
 
 	// ── Tuples & Named Types ──────────────────────────────────────────────────
 	

@@ -542,7 +542,7 @@ typeExpr
     | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T…)->T function type
     | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / () void
     | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T, E)
-    | EXPECTED LPAREN (IDENTIFIER COMMA)? STRING_LIT RPAREN          // compiler_testing §4.2
+    | EXPECTED LPAREN typeExpr COMMA STRING_LIT RPAREN                // compiler_testing §4.2
     | baseType QUESTION?                                             // named type T, or optional T?
     ;
 
