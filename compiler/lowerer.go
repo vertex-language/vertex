@@ -438,8 +438,7 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 	}
 
 	// [T] hint on a fixed literal may still arrive as VDynArray here if the
-	// resolver path was the global one; promote to VFixedArray so we never
-	// try to GLib-allocate a stack literal.
+	// resolver path was the global one; promote so we never GLib-allocate a literal.
 	if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
 		if da, isDyn := vtype.(*VDynArray); isDyn {
 			vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
@@ -452,8 +451,7 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		fc.locals[name] = ref
 
 		// Fixed-array literal: C does not allow array-to-array assignment after
-		// the declaration, so we store each element directly by index and skip
-		// the normal Assign path entirely.
+		// the declaration, so store each element directly by index.
 		if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
 			if fa, isFixed := vtype.(*VFixedArray); isFixed {
 				elemCIR := l.vtypeToCIR(fa.Elem)
@@ -465,13 +463,12 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 					if elemCIR != nil {
 						val = b.Cast(elemCIR, val)
 					}
-					b.Assign(b.Index(ref, cir.IntLit(int64(j))), val)
+					b.Assign(b.Index(ref, cir.IntLit(int64(j)), elemCIR), val)
 				}
 				continue
 			}
 		}
 
-		// Normal scalar / struct init.
 		initExpr := l.lowerExpr(b, d.Value, fc)
 		if initExpr != nil {
 			if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
@@ -624,7 +621,7 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 		b.For(nil, b.Lt(iRef, cir.UIntLit(uint64(it.Size))), post, cir.B(func(b *cir.Builder) {
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
-			b.Assign(elemRef, b.Index(iter, iRef))
+			b.Assign(elemRef, b.Index(iter, iRef, elemCIR))
 			l.lowerBlock(b, st.Body, fc)
 		}))
 
@@ -640,7 +637,7 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, "data"))
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
-			b.Assign(elemRef, b.Index(dataPtr, iRef))
+			b.Assign(elemRef, b.Index(dataPtr, iRef, elemCIR))
 			l.lowerBlock(b, st.Body, fc)
 			b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
 		}))
@@ -1077,7 +1074,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 			cir.B(func(b *cir.Builder) {
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 				idx := b.Sub(lenRef, cir.UIntLit(1))
-				b.Assign(tmp, b.Index(dataPtr, idx))
+				b.Assign(tmp, b.Index(dataPtr, idx, elemCIR))
 				b.Stmt(b.Call("g_array_remove_index", recv, idx))
 			}),
 		)
@@ -1088,7 +1085,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.If(b.Gt(lenRef, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-				b.Assign(tmp, b.Index(dataPtr, cir.UIntLit(0)))
+				b.Assign(tmp, b.Index(dataPtr, cir.UIntLit(0), elemCIR))
 				b.Stmt(b.Call("g_array_remove_index", recv, cir.UIntLit(0)))
 			}),
 		)
@@ -1110,9 +1107,9 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(lo, hi),
 			cir.B(func(b *cir.Builder) {
-				b.Assign(tmp2, b.Index(dataPtr, lo))
-				b.Assign(b.Index(dataPtr, lo), b.Index(dataPtr, hi))
-				b.Assign(b.Index(dataPtr, hi), tmp2)
+				b.Assign(tmp2, b.Index(dataPtr, lo, elemCIR))
+				b.Assign(b.Index(dataPtr, lo, elemCIR), b.Index(dataPtr, hi, elemCIR))
+				b.Assign(b.Index(dataPtr, hi, elemCIR), tmp2)
 				b.Assign(lo, b.Add(lo, cir.UIntLit(1)))
 				b.Assign(hi, b.Sub(hi, cir.UIntLit(1)))
 			}),
@@ -1131,7 +1128,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
-				b.If(b.Eq(b.Index(dataPtr, i), val),
+				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
 						b.Assign(result, b.Cast(cir.Int32, i))
 						b.Break()
@@ -1150,7 +1147,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
-				b.If(b.Eq(b.Index(dataPtr, i), val),
+				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
 						b.Assign(found, cir.BoolLit(true))
 						b.Break()
@@ -1169,7 +1166,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
-				elem := b.AddrOf(b.Index(dataPtr, i))
+				elem := b.AddrOf(b.Index(dataPtr, i, elemCIR))
 				b.If(b.CallPtr(cmpFn, b.Deref(elem)),
 					cir.B(func(b *cir.Builder) {
 						b.Assign(resultPtr, elem)
@@ -1192,7 +1189,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
 				mapped := b.Local(l.tempName(), elemCIR)
-				b.Assign(mapped, b.CallPtr(mapFn, b.Index(dataPtr, i)))
+				b.Assign(mapped, b.CallPtr(mapFn, b.Index(dataPtr, i, elemCIR)))
 				b.Stmt(b.Call("g_array_append_vals", out, b.AddrOf(mapped), cir.UIntLit(1)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
@@ -1208,7 +1205,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
-				elem := b.Index(dataPtr, i)
+				elem := b.Index(dataPtr, i, elemCIR)
 				b.If(b.CallPtr(filterFn, elem),
 					cir.B(func(b *cir.Builder) {
 						tmp := b.Local(l.tempName(), elemCIR)
@@ -1232,7 +1229,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.While(b.LogAnd(b.Lt(i, b.Cast(cir.UInt32, end)), b.Lt(i, b.GetField(recv, "len"))),
 			cir.B(func(b *cir.Builder) {
 				tmp := b.Local(l.tempName(), elemCIR)
-				b.Assign(tmp, b.Index(dataPtr, i))
+				b.Assign(tmp, b.Index(dataPtr, i, elemCIR))
 				b.Stmt(b.Call("g_array_append_vals", out, b.AddrOf(tmp), cir.UIntLit(1)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
@@ -1256,7 +1253,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
 		b.While(b.Lt(i, b.GetField(recv, "len")),
 			cir.B(func(b *cir.Builder) {
-				b.Stmt(b.CallPtr(forEachFn, b.Index(dataPtr, i)))
+				b.Stmt(b.CallPtr(forEachFn, b.Index(dataPtr, i, elemCIR)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
 		)
@@ -1357,11 +1354,15 @@ func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.
 			elemCIR = l.vtypeToCIRFallback(rt.Elem)
 		}
 		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		return b.Index(dataPtr, idx)
+		return b.Index(dataPtr, idx, elemCIR)
 	case *VFixedArray:
-		return b.Index(recv, idx)
+		elemCIR := l.vtypeToCIR(rt.Elem)
+		if elemCIR == nil {
+			elemCIR = l.vtypeToCIRFallback(rt.Elem)
+		}
+		return b.Index(recv, idx, elemCIR)
 	}
-	return b.Index(recv, idx)
+	return b.Index(recv, idx, cir.VoidPtr)
 }
 
 func (l *Lowerer) lowerStructLit(b *cir.Builder, e *StructLitExpr, fc *funcCtx) cir.Expr {
@@ -1394,8 +1395,8 @@ func (l *Lowerer) lowerArrayLit(b *cir.Builder, e *ArrayLitExpr, fc *funcCtx) ci
 		elemCIR = l.vtypeToCIRFallback(fa.Elem)
 	}
 	// Allocate a temp local and assign each element by index.
-	// We never use cir.CompoundLit for arrays: C compound literals of array
-	// type are not valid as assignment RHS, and the MIR rejects them.
+	// cir.CompoundLit is never used for arrays: C does not allow compound
+	// literals of array type as assignment RHS, and MIR rejects them.
 	arrType := cir.Array(elemCIR, len(e.Elems))
 	tmp := b.Local(l.tempName(), arrType)
 	for i, el := range e.Elems {
@@ -1403,7 +1404,7 @@ func (l *Lowerer) lowerArrayLit(b *cir.Builder, e *ArrayLitExpr, fc *funcCtx) ci
 		if elemCIR != nil {
 			val = b.Cast(elemCIR, val)
 		}
-		b.Assign(b.Index(tmp, cir.IntLit(int64(i))), val)
+		b.Assign(b.Index(tmp, cir.IntLit(int64(i)), elemCIR), val)
 	}
 	return tmp
 }
