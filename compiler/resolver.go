@@ -218,8 +218,9 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 			// Guard: Prevent returning values from void functions
 			if _, isVoid := retType.(*VVoid); isVoid {
 				r.diags.Errorf(st.Pos, "void function cannot return a value")
-			} else if !valType.Equal(retType) {
-				// Guard: Ensure the returned value matches the declared return type
+			} else if _, isTestExp := retType.(*VExpected); !isTestExp && !valType.Equal(retType) {
+				// Guard: Ensure the returned value matches the declared return type,
+				// UNLESS it's a test function with an Expected(...) annotation.
 				r.diags.Errorf(st.Pos, "type mismatch: expected %s, got %s", retType, valType)
 			}
 		} else {
