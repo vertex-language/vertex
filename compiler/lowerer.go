@@ -466,6 +466,17 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		}
 	}
 
+	// Auto-deref: if the init value is pointer-typed and there is no explicit
+	// type hint, treat this as a load through the pointer.
+	// e.g.  let tmp = ptrParam  →  int32 tmp = *ptrParam
+	autoDeref := false
+	if d.TypeHint == nil {
+		if ptr, isPtr := vtype.(*VPointer); isPtr {
+			vtype = ptr.Elem
+			autoDeref = true
+		}
+	}
+
 	for i, name := range d.Binding.Names {
 		_ = i
 		ref := l.declareLocal(b, name, vtype, d.IsLet)
@@ -491,6 +502,9 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		}
 
 		initExpr := l.lowerExpr(b, d.Value, fc)
+		if autoDeref && initExpr != nil {
+			initExpr = b.Deref(initExpr)
+		}
 		if initExpr != nil {
 			if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
 				initExpr = b.Cast(targetCT, initExpr)
@@ -548,6 +562,35 @@ func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
 	if lhs == nil || rhs == nil {
 		return
 	}
+
+	// If the LHS is pointer-typed, all operations go through the pointer.
+	if _, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
+		storeLHS := b.Deref(lhs)
+		// If RHS is also a pointer-typed param (e.g. swap: a = b → *a = *b),
+		// deref it to load the value. Don't deref locals — they were already
+		// auto-deref'd at declaration time (e.g. tmp in swap).
+		if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
+			if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
+				rhs = b.Deref(rhs)
+			}
+		}
+		switch st.Op {
+		case OpAssign:
+			b.Assign(storeLHS, rhs)
+		case OpAddAssign:
+			b.Assign(storeLHS, b.Add(b.Deref(lhs), rhs))
+		case OpSubAssign:
+			b.Assign(storeLHS, b.Sub(b.Deref(lhs), rhs))
+		case OpMulAssign:
+			b.Assign(storeLHS, b.Mul(b.Deref(lhs), rhs))
+		case OpDivAssign:
+			b.Assign(storeLHS, b.Div(b.Deref(lhs), rhs))
+		case OpModAssign:
+			b.Assign(storeLHS, b.Mod(b.Deref(lhs), rhs))
+		}
+		return
+	}
+
 	switch st.Op {
 	case OpAssign:
 		b.Assign(lhs, rhs)
