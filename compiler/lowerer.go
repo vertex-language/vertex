@@ -961,33 +961,59 @@ func (l *Lowerer) lowerTernary(b *cir.Builder, e *TernaryExpr, fc *funcCtx) cir.
 	return tmp
 }
 
-func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Expr {
-    if id, ok := e.Func.(*IdentExpr); ok {
-        if bt, isBT := BuiltinTypes[id.Name]; isBT {
-            ct := bt.CIRType()
-            if ct != nil && len(e.Args) == 1 {
-                inner := l.lowerExpr(b, e.Args[0].Value, fc)
-                return b.Cast(ct, inner)
-            }
-        }
-        // Regular or native-interface class instantiation.
-        if _, isClass := l.classTypes[id.Name]; isClass {
-            return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
-        }
-        if l.nativeClasses[id.Name] {
-            return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
-        }
-    }
+// callReturnCIRType resolves a VType to its CIR representation for use as a
+// call return type. Falls back to Void when the type cannot be mapped.
+func (l *Lowerer) callReturnCIRType(vt VType) cir.Type {
+	if vt == nil {
+		return cir.Void
+	}
+	ct := l.vtypeToCIR(vt)
+	if ct == nil {
+		ct = l.vtypeToCIRFallback(vt)
+	}
+	if ct == nil {
+		return cir.Void
+	}
+	return ct
+}
 
-    fn := l.lowerExpr(b, e.Func, fc)
-    var args []cir.Expr
-    for _, a := range e.Args {
-        args = append(args, l.lowerExpr(b, a.Value, fc))
-    }
-    if id, ok := e.Func.(*IdentExpr); ok {
-        return b.Call(id.Name, args...)
-    }
-    return b.CallPtr(fn, args...)
+func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Expr {
+	if id, ok := e.Func.(*IdentExpr); ok {
+		if bt, isBT := BuiltinTypes[id.Name]; isBT {
+			ct := bt.CIRType()
+			if ct != nil && len(e.Args) == 1 {
+				inner := l.lowerExpr(b, e.Args[0].Value, fc)
+				return b.Cast(ct, inner)
+			}
+		}
+		if _, isClass := l.classTypes[id.Name]; isClass {
+			return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
+		}
+		if l.nativeClasses[id.Name] {
+			return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
+		}
+	}
+
+	fn := l.lowerExpr(b, e.Func, fc)
+	var args []cir.Expr
+	for _, a := range e.Args {
+		args = append(args, l.lowerExpr(b, a.Value, fc))
+	}
+
+	retCIR := l.callReturnCIRType(e.GetVType())
+
+	if id, ok := e.Func.(*IdentExpr); ok {
+		ce := b.Call(id.Name, args...)
+		if callNode, ok := ce.(*cir.CallExpr); ok {
+			callNode.Type = retCIR
+		}
+		return ce
+	}
+	ce := b.CallPtr(fn, args...)
+	if callNode, ok := ce.(*cir.CallPtrExpr); ok {
+		callNode.Type = retCIR
+	}
+	return ce
 }
 
 func (l *Lowerer) lowerClassInstantiate(b *cir.Builder, className string, args []*Arg, fc *funcCtx) cir.Expr {
@@ -1012,31 +1038,41 @@ func (l *Lowerer) lowerClassInstantiate(b *cir.Builder, className string, args [
 func (l *Lowerer) lowerMethodCall(b *cir.Builder, e *MethodCallExpr, fc *funcCtx) cir.Expr {
 	recv := l.lowerExpr(b, e.Recv, fc)
 	recvType := e.Recv.GetVType()
+	retCIR := l.callReturnCIRType(e.GetVType())
 
+	var result cir.Expr
 	switch rt := recvType.(type) {
 	case *VDynArray:
-		return l.lowerDynArrayMethod(b, recv, rt, e.Method, e.Args, fc)
+		result = l.lowerDynArrayMethod(b, recv, rt, e.Method, e.Args, fc)
 	case *VString:
-		return l.lowerStringMethod(b, recv, rt, e.Method, e.Args, fc)
+		result = l.lowerStringMethod(b, recv, rt, e.Method, e.Args, fc)
 	case *VClass:
-		return l.lowerClassMethod(b, recv, rt.Name, e.Method, e.Args, fc)
+		result = l.lowerClassMethod(b, recv, rt.Name, e.Method, e.Args, fc)
 	case *VStruct:
-		return l.lowerStructMethod(b, recv, rt.Name, e.Method, e.Args, fc)
-	}
-
-	// Generic method call: ClassName__method(recv, args...)
-	if typeName := vtypeBaseName(recvType); typeName != "" {
-		cName := typeName + "__" + e.Method
-		var args []cir.Expr
-		args = append(args, recv)
-		for _, a := range e.Args {
-			args = append(args, l.lowerExpr(b, a.Value, fc))
+		result = l.lowerStructMethod(b, recv, rt.Name, e.Method, e.Args, fc)
+	default:
+		if typeName := vtypeBaseName(recvType); typeName != "" {
+			cName := typeName + "__" + e.Method
+			var args []cir.Expr
+			args = append(args, recv)
+			for _, a := range e.Args {
+				args = append(args, l.lowerExpr(b, a.Value, fc))
+			}
+			result = b.Call(cName, args...)
+		} else {
+			l.diags.Warnf(e.Pos, "method %q on type %v not lowered", e.Method, recvType)
+			return cir.NullPtr()
 		}
-		return b.Call(cName, args...)
 	}
 
-	l.diags.Warnf(e.Pos, "method %q on type %v not lowered", e.Method, recvType)
-	return cir.NullPtr()
+	// Stamp the resolved return type onto the CIR call node so the backend
+	// can route float returns through XMM registers correctly.
+	if result != nil {
+		if ce, ok := result.(*cir.CallExpr); ok {
+			ce.Type = retCIR
+		}
+	}
+	return result
 }
 
 func (l *Lowerer) lowerDynArrayMethod(
