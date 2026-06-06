@@ -570,7 +570,7 @@ func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
-	// Range check first — before lowerExpr and the type switch.
+	// Range check first
 	if be, ok := st.Iter.(*BinaryExpr); ok &&
 		(be.Op == BinRangeHalfOpen || be.Op == BinRangeClosed) {
 		lo := l.lowerExpr(b, be.Left, fc)
@@ -589,7 +589,8 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 
 		post := &cir.AssignExpr{
 			LHS: iRef,
-			RHS: b.Add(iRef, cir.IntLit(1)),
+			// FIX: explicitly cast the increment literal to Int32
+			RHS: b.Add(iRef, b.Cast(cir.Int32, cir.IntLit(1))),
 		}
 		b.For(nil, cond, post, cir.B(func(b *cir.Builder) {
 			l.lowerBlock(b, st.Body, fc)
@@ -613,12 +614,16 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			elemCIR = l.vtypeToCIRFallback(it.Elem)
 		}
 		iRef := b.Local(l.tempName(), cir.UInt32)
-		b.Assign(iRef, cir.UIntLit(0))
+		
+		// FIX: Cast initialization and conditions to match the 32-bit loop counter
+		b.Assign(iRef, b.Cast(cir.UInt32, cir.UIntLit(0)))
 		post := &cir.AssignExpr{
 			LHS: iRef,
-			RHS: b.Add(iRef, cir.UIntLit(1)),
+			RHS: b.Add(iRef, b.Cast(cir.UInt32, cir.UIntLit(1))),
 		}
-		b.For(nil, b.Lt(iRef, cir.UIntLit(uint64(it.Size))), post, cir.B(func(b *cir.Builder) {
+		
+		limit := b.Cast(cir.UInt32, cir.UIntLit(uint64(it.Size)))
+		b.For(nil, b.Lt(iRef, limit), post, cir.B(func(b *cir.Builder) {
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
 			b.Assign(elemRef, b.Index(iter, iRef, elemCIR))
@@ -631,15 +636,18 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			elemCIR = l.vtypeToCIRFallback(it.Elem)
 		}
 		iRef := b.Local(l.tempName(), cir.UInt32)
-		b.Assign(iRef, cir.UIntLit(0))
+		
+		// FIX: Cast initialization and conditions to match the 32-bit loop counter
+		b.Assign(iRef, b.Cast(cir.UInt32, cir.UIntLit(0)))
 		arrLen := b.GetField(iter, "len")
+		
 		b.While(b.Lt(iRef, arrLen), cir.B(func(b *cir.Builder) {
 			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, "data"))
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
 			b.Assign(elemRef, b.Index(dataPtr, iRef, elemCIR))
 			l.lowerBlock(b, st.Body, fc)
-			b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
+			b.Assign(iRef, b.Add(iRef, b.Cast(cir.UInt32, cir.UIntLit(1))))
 		}))
 
 	default:
