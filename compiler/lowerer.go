@@ -19,34 +19,63 @@ type Lowerer struct {
 	diags   *Diagnostics
 	mod     *cir.Module
 	gt      *glibTypes
+	pkg     string // package name for C name mangling
 
 	structTypes   map[string]*cir.StructType
 	classTypes    map[string]*cir.StructType
 	enumTypes     map[string]cir.Type
 	nativeClasses map[string]bool
+	userFuncs     map[string]bool // every Vertex-defined function name in this file
 
-    testEntryFunc  string
-    testEntryVType VType  // NEW: actual return type of the test entry function
+	testEntryFunc  string
+	testEntryVType VType
 
 	tempSeq int
 }
 
 func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
-    gt := newGlibTypes()
-    setupGLib(mod, gt)
-    return &Lowerer{
-        diags:         diags,
-        mod:           mod,
-        gt:            gt,
-        structTypes:   make(map[string]*cir.StructType),
-        classTypes:    make(map[string]*cir.StructType),
-        enumTypes:     make(map[string]cir.Type),
-        nativeClasses: make(map[string]bool),
-    }
+	gt := newGlibTypes()
+	setupGLib(mod, gt)
+	return &Lowerer{
+		diags:         diags,
+		mod:           mod,
+		gt:            gt,
+		structTypes:   make(map[string]*cir.StructType),
+		classTypes:    make(map[string]*cir.StructType),
+		enumTypes:     make(map[string]cir.Type),
+		nativeClasses: make(map[string]bool),
+		userFuncs:     make(map[string]bool),
+	}
+}
+
+// cFuncName returns the C-level name for a Vertex free function.
+// "main" is always kept as-is — it is the C entry point.
+// All other user functions are prefixed with the package name so Vertex
+// symbols can never collide with C stdlib or linker-reserved names.
+func (l *Lowerer) cFuncName(name string) string {
+	if name == "main" || l.pkg == "" {
+		return name
+	}
+	return l.pkg + "_" + name
+}
+
+// cTypeName returns the C-level name for a Vertex-defined struct / class / enum.
+func (l *Lowerer) cTypeName(name string) string {
+	if l.pkg == "" {
+		return name
+	}
+	return l.pkg + "_" + name
+}
+
+// cMethodName returns the C-level name for a receiver or associated method.
+// e.g. pkg="main", type="Dog", method="bark" → "main_Dog__bark"
+func (l *Lowerer) cMethodName(typeName, methodName string) string {
+	return l.cTypeName(typeName) + "__" + methodName
 }
 
 // LowerFile drives both lowering passes over file.
 func (l *Lowerer) LowerFile(file *File) {
+	l.pkg = file.Package // captured once; used by all cFuncName/cTypeName calls
 	l.registerTypes(file)
 	l.lowerFunctions(file)
 }
@@ -79,37 +108,35 @@ func (l *Lowerer) registerStruct(d *StructDecl) {
 			fields = append(fields, cir.Field(f.Name, ft))
 		}
 	}
-	st := cir.Struct(d.Name, fields...)
+	st := cir.Struct(l.cTypeName(d.Name), fields...)
 	l.mod.RegisterType(st)
-	l.structTypes[d.Name] = st
+	l.structTypes[d.Name] = st // map key stays original name for all internal lookups
 }
 
 func (l *Lowerer) registerClass(d *ClassDecl) {
-    // Native-interface class (class Foo : pkg): register C externs, not a struct.
-    if d.BaseName != "" {
-        l.nativeClasses[d.Name] = true
-        for _, m := range d.Members {
-            if m.IsField {
-                continue
-            }
-            l.registerNativeMethod(m)
-        }
-        return
-    }
-    // Regular class: emit a struct definition.
-    var fields []cir.FieldDef
-    for _, m := range d.Members {
-        if !m.IsField {
-            continue
-        }
-        ft := l.resolvedFieldCIRType(m.Type)
-        if ft != nil {
-            fields = append(fields, cir.Field(m.Name, ft))
-        }
-    }
-    st := cir.Struct(d.Name, fields...)
-    l.mod.RegisterType(st)
-    l.classTypes[d.Name] = st
+	if d.BaseName != "" {
+		l.nativeClasses[d.Name] = true
+		for _, m := range d.Members {
+			if m.IsField {
+				continue
+			}
+			l.registerNativeMethod(m)
+		}
+		return
+	}
+	var fields []cir.FieldDef
+	for _, m := range d.Members {
+		if !m.IsField {
+			continue
+		}
+		ft := l.resolvedFieldCIRType(m.Type)
+		if ft != nil {
+			fields = append(fields, cir.Field(m.Name, ft))
+		}
+	}
+	st := cir.Struct(l.cTypeName(d.Name), fields...)
+	l.mod.RegisterType(st)
+	l.classTypes[d.Name] = st // map key stays original name
 }
 
 // registerNativeMethod forwards a native-interface method signature as a C extern.
@@ -192,10 +219,17 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 // ─── Pass 2: function lowering ────────────────────────────────────────────────
 
 func (l *Lowerer) lowerFunctions(file *File) {
+	// Pre-pass: record every Vertex-defined function name so that call sites
+	// can resolve to the prefixed C name even for forward references.
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*FuncDecl); ok {
+			l.userFuncs[fn.Name] = true
+		}
+	}
+
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *FuncDecl:
-			// In test mode, skip every test function except the active entry.
 			if l.testEntryFunc != "" &&
 				d.Qualifier == FuncQualTest &&
 				d.Name != l.testEntryFunc {
@@ -206,7 +240,6 @@ func (l *Lowerer) lowerFunctions(file *File) {
 			l.lowerGlobalVar(d)
 		}
 	}
-	// Inject a standalone main() when compiling a single test function.
 	if l.testEntryFunc != "" {
 		l.injectTestMain()
 	}
@@ -246,7 +279,6 @@ func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
 
 // lowerFuncDecl emits one ir/c FuncDef for a Vertex function or method.
 func (l *Lowerer) lowerFuncDecl(fn *FuncDecl) {
-	// Test-qualified functions use their own lowering path.
 	if fn.Qualifier == FuncQualTest {
 		l.lowerTestFuncDecl(fn)
 		return
@@ -255,10 +287,12 @@ func (l *Lowerer) lowerFuncDecl(fn *FuncDecl) {
 		l.diags.Warnf(fn.Pos, "function qualifier %v is not yet supported; ignoring", fn.Qualifier)
 	}
 
-	cName := fn.Name
+	var cName string
 	if fn.Receiver != nil {
 		recvTypeName := extractTypeName(fn.Receiver.Type)
-		cName = recvTypeName + "__" + fn.Name
+		cName = l.cMethodName(recvTypeName, fn.Name)
+	} else {
+		cName = l.cFuncName(fn.Name)
 	}
 
 	retType := cir.Void
@@ -1003,7 +1037,12 @@ func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Ex
 	retCIR := l.callReturnCIRType(e.GetVType())
 
 	if id, ok := e.Func.(*IdentExpr); ok {
-		ce := b.Call(id.Name, args...)
+		// Vertex user functions get a package prefix; C externs do not.
+		cName := id.Name
+		if l.userFuncs[id.Name] {
+			cName = l.cFuncName(id.Name)
+		}
+		ce := b.Call(cName, args...)
 		if callNode, ok := ce.(*cir.CallExpr); ok {
 			callNode.Type = retCIR
 		}
@@ -1017,22 +1056,20 @@ func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Ex
 }
 
 func (l *Lowerer) lowerClassInstantiate(b *cir.Builder, className string, args []*Arg, fc *funcCtx) cir.Expr {
-    // Native-interface class: no underlying struct, no malloc/init.
-    // The variable is a void* null used only to drive method dispatch.
-    if l.nativeClasses[className] {
-        return cir.NullPtr()
-    }
-    st := l.classTypes[className]
-    ptrType := cir.Ptr(st)
-    tmp := b.Local(l.tempName(), ptrType)
-    b.Assign(tmp, b.Cast(ptrType, b.Call("malloc", b.SizeOf(st))))
-    var initArgs []cir.Expr
-    initArgs = append(initArgs, tmp)
-    for _, a := range args {
-        initArgs = append(initArgs, l.lowerExpr(b, a.Value, fc))
-    }
-    b.Stmt(b.Call(className+"__init", initArgs...))
-    return tmp
+	if l.nativeClasses[className] {
+		return cir.NullPtr()
+	}
+	st := l.classTypes[className]
+	ptrType := cir.Ptr(st)
+	tmp := b.Local(l.tempName(), ptrType)
+	b.Assign(tmp, b.Cast(ptrType, b.Call("malloc", b.SizeOf(st))))
+	var initArgs []cir.Expr
+	initArgs = append(initArgs, tmp)
+	for _, a := range args {
+		initArgs = append(initArgs, l.lowerExpr(b, a.Value, fc))
+	}
+	b.Stmt(b.Call(l.cMethodName(className, "init"), initArgs...))
+	return tmp
 }
 
 func (l *Lowerer) lowerMethodCall(b *cir.Builder, e *MethodCallExpr, fc *funcCtx) cir.Expr {
@@ -1052,13 +1089,12 @@ func (l *Lowerer) lowerMethodCall(b *cir.Builder, e *MethodCallExpr, fc *funcCtx
 		result = l.lowerStructMethod(b, recv, rt.Name, e.Method, e.Args, fc)
 	default:
 		if typeName := vtypeBaseName(recvType); typeName != "" {
-			cName := typeName + "__" + e.Method
 			var args []cir.Expr
 			args = append(args, recv)
 			for _, a := range e.Args {
 				args = append(args, l.lowerExpr(b, a.Value, fc))
 			}
-			result = b.Call(cName, args...)
+			result = b.Call(l.cMethodName(typeName, e.Method), args...)
 		} else {
 			l.diags.Warnf(e.Pos, "method %q on type %v not lowered", e.Method, recvType)
 			return cir.NullPtr()
@@ -1313,43 +1349,41 @@ func (l *Lowerer) lowerStringMethod(
 }
 
 func (l *Lowerer) lowerClassMethod(
-    b *cir.Builder, recv cir.Expr, className, method string, args []*Arg, fc *funcCtx,
+	b *cir.Builder, recv cir.Expr, className, method string, args []*Arg, fc *funcCtx,
 ) cir.Expr {
-    // Native-interface class: emit a plain C call — no ClassName__ prefix, no receiver arg.
-    if l.nativeClasses[className] {
-        var callArgs []cir.Expr
-        for _, a := range args {
-            callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
-        }
-        return b.Call(method, callArgs...)
-    }
-    switch method {
-    case "delete":
-        b.Stmt(b.Call(className+"__deinit", recv))
-        b.Stmt(b.Call("free", recv))
-        return nil
-    case "new":
-        return recv
-    }
-    cFuncName := className + "__" + method
-    var callArgs []cir.Expr
-    callArgs = append(callArgs, recv)
-    for _, a := range args {
-        callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
-    }
-    return b.Call(cFuncName, callArgs...)
-}
-
-func (l *Lowerer) lowerStructMethod(
-	b *cir.Builder, recv cir.Expr, structName, method string, args []*Arg, fc *funcCtx,
-) cir.Expr {
-	cFuncName := structName + "__" + method
+	// Native-interface class: plain C call — no prefix, no receiver arg.
+	if l.nativeClasses[className] {
+		var callArgs []cir.Expr
+		for _, a := range args {
+			callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
+		}
+		return b.Call(method, callArgs...)
+	}
+	switch method {
+	case "delete":
+		b.Stmt(b.Call(l.cMethodName(className, "deinit"), recv))
+		b.Stmt(b.Call("free", recv))
+		return nil
+	case "new":
+		return recv
+	}
 	var callArgs []cir.Expr
 	callArgs = append(callArgs, recv)
 	for _, a := range args {
 		callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
 	}
-	return b.Call(cFuncName, callArgs...)
+	return b.Call(l.cMethodName(className, method), callArgs...)
+}
+
+func (l *Lowerer) lowerStructMethod(
+	b *cir.Builder, recv cir.Expr, structName, method string, args []*Arg, fc *funcCtx,
+) cir.Expr {
+	var callArgs []cir.Expr
+	callArgs = append(callArgs, recv)
+	for _, a := range args {
+		callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
+	}
+	return b.Call(l.cMethodName(structName, method), callArgs...)
 }
 
 func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.Expr {
@@ -1574,46 +1608,45 @@ func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 // lowerTestFuncDecl emits a void function whose return statements are rewritten
 // to printf calls so the value appears on stdout for the test runner to capture.
 func (l *Lowerer) lowerTestFuncDecl(fn *FuncDecl) {
-    // Determine the actual return type from Expected(type, "value").
-    var retCIR cir.Type = cir.Int32
-    var retVT  VType    = &VInt{Bits: 32, Signed: true}
+	var retCIR cir.Type = cir.Int32
+	var retVT VType = &VInt{Bits: 32, Signed: true}
 
-    if fn.RetType != nil {
-        if exp, ok := fn.RetType.(*ExpectedTypeExpr); ok && exp.ReturnType != nil {
-            vt := l.resolveTypeExprVType(exp.ReturnType)
-            if ct := l.vtypeToCIR(vt); ct != nil {
-                retCIR = ct
-                retVT  = vt
-            }
-        }
-    }
+	if fn.RetType != nil {
+		if exp, ok := fn.RetType.(*ExpectedTypeExpr); ok && exp.ReturnType != nil {
+			vt := l.resolveTypeExprVType(exp.ReturnType)
+			if ct := l.vtypeToCIR(vt); ct != nil {
+				retCIR = ct
+				retVT = vt
+			}
+		}
+	}
 
-    // Save so injectTestMain can build the right printf format.
-    l.testEntryVType = retVT
+	l.testEntryVType = retVT
 
-    def := l.mod.Func(fn.Name, cir.Returns(retCIR))
-    if fn.Body == nil {
-        return
-    }
+	def := l.mod.Func(l.cFuncName(fn.Name), cir.Returns(retCIR))
+	if fn.Body == nil {
+		return
+	}
 
-    fc := newFuncCtx()
-    for _, p := range fn.Params {
-        fc.params[p.Name] = true
-    }
+	fc := newFuncCtx()
+	for _, p := range fn.Params {
+		fc.params[p.Name] = true
+	}
 
-    def.Body(func(b *cir.Builder) {
-        l.lowerBlock(b, fn.Body, fc)
-        if !blockEndsWithReturn(fn.Body) {
-            fc.emitDefers(b)
-            b.Return()
-        }
-    })
+	def.Body(func(b *cir.Builder) {
+		l.lowerBlock(b, fn.Body, fc)
+		if !blockEndsWithReturn(fn.Body) {
+			fc.emitDefers(b)
+			b.Return()
+		}
+	})
 }
 
 // injectTestMain emits:
 func (l *Lowerer) injectTestMain() {
 	l.ensurePrintf()
-	entryName := l.testEntryFunc
+	// Use the prefixed C name when calling the test entry function.
+	entryCName := l.cFuncName(l.testEntryFunc)
 
 	vt := l.testEntryVType
 	if vt == nil {
@@ -1628,16 +1661,13 @@ func (l *Lowerer) injectTestMain() {
 
 	def := l.mod.Func("main", cir.Returns(cir.Int32))
 	def.Body(func(b *cir.Builder) {
-		// Store in a typed local so MIR knows the register class
-		// (float → XMM0, int → RAX) when fetching the return value.
 		tmp := b.Local(l.tempName(), retCIR)
-		
-		// FIX: Stamp the return type onto the call node so MIR reads XMM0
-		callExpr := b.Call(entryName)
+
+		callExpr := b.Call(entryCName)
 		if ce, ok := callExpr.(*cir.CallExpr); ok {
 			ce.Type = retCIR
 		}
-		
+
 		b.Assign(tmp, callExpr)
 		fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
 		b.Stmt(b.Call("printf", fmtLit, tmp))
