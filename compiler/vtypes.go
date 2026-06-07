@@ -257,10 +257,8 @@ func (t *VPointer) CIRType() cir.Type {
 }
 
 func (t *VOptional) CIRType() cir.Type {
-	if inner := t.Elem.CIRType(); inner != nil {
-		return cir.Ptr(inner)
-	}
-	return cir.VoidPtr
+	// Let the lowerer decide dynamically between Niche-Bit pointers or opt_T structs
+	return nil 
 }
 
 func (t *VFixedArray) CIRType() cir.Type {

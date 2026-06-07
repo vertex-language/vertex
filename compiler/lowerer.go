@@ -343,8 +343,12 @@ func (l *Lowerer) lowerEnumHelpers(d *EnumDecl) {
 		b.Switch(val, cases...)
 	})
 
-	// 2. from_rawValue helper: pkg_EnumName_from_rawValue(raw_type) -> int32* (Optional)
-	def2 := l.mod.Func(l.cFuncName(d.Name+"_from_rawValue"), cir.Returns(cir.Ptr(cir.Int32)), cir.Param("raw", ct))
+	// 2. from_rawValue helper: pkg_EnumName_from_rawValue(raw_type) -> opt_Enum
+	enumVT := l.resolveTypeExprVType(&NamedTypeExpr{Name: d.Name})
+	optVT := &VOptional{Elem: enumVT}
+	optCT := l.vtypeToCIRFallback(optVT) // Resolve the struct opt_Enum type
+
+	def2 := l.mod.Func(l.cFuncName(d.Name+"_from_rawValue"), cir.Returns(optCT), cir.Param("raw", ct))
 	def2.Body(func(b *cir.Builder) {
 		raw := b.Param("raw")
 		_, isStr := rawTypeVT.(*VString)
@@ -389,15 +393,20 @@ func (l *Lowerer) lowerEnumHelpers(d *EnumDecl) {
 		var build func(i int) *cir.Block
 		build = func(i int) *cir.Block {
 			if i >= len(conds) {
-				return cir.B(func(b *cir.Builder) { b.ReturnVal(cir.NullPtr()) })
+				return cir.B(func(b *cir.Builder) { 
+					// Return .none (has_value = false)
+					b.ReturnVal(cir.CompoundLit(optCT, cir.InitStruct(
+						cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
+					))) 
+				})
 			}
 			return cir.B(func(b *cir.Builder) {
 				b.IfElse(conds[i].cond, cir.B(func(b *cir.Builder) {
-					tmp := b.Local(l.tempName(), cir.Ptr(cir.Int32))
-					b.Assign(tmp, b.Cast(cir.Ptr(cir.Int32), b.Call("malloc", b.SizeOf(cir.Int32))))
-					// FIX: Use cir.Deref instead of b.Deref to pass the explicit type
-					b.Assign(cir.Deref(tmp, cir.Int32), cir.IntLit(conds[i].val))
-					b.ReturnVal(tmp)
+					// Return .some (has_value = true, value = EnumCase)
+					b.ReturnVal(cir.CompoundLit(optCT, cir.InitStruct(
+						cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
+						cir.FieldInit{Field: "value", Value: b.Cast(cir.Int32, cir.IntLit(conds[i].val))},
+					)))
 				}), build(i+1))
 			})
 		}
@@ -1281,13 +1290,14 @@ func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Ex
 			return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
 		}
 
-		// NEW: Check for Enum init(rawValue:) constructor
+		// Check for Enum init(rawValue:) constructor
 		if opt, isOpt := e.GetVType().(*VOptional); isOpt {
 			if ve, isEnum := opt.Elem.(*VEnum); isEnum && len(e.Args) == 1 && e.Args[0].Label == "rawValue" {
 				argVal := l.lowerExpr(b, e.Args[0].Value, fc)
 				ce := b.Call(l.cFuncName(ve.Name+"_from_rawValue"), argVal)
 				if callNode, ok := ce.(*cir.CallExpr); ok {
-					callNode.Type = cir.Ptr(cir.Int32)
+					// Stamp the explicit struct opt_T instead of a pointer!
+					callNode.Type = l.vtypeToCIRFallback(opt) 
 				}
 				return ce
 			}
