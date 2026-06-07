@@ -195,13 +195,19 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 		inner.Define(&Symbol{Name: st.Var, Kind: SymVar, Type: elemType})
 		r.resolveBlock(st.Body, inner, retType)
 	case *SwitchStmt:
-		r.resolveExpr(st.Subj, scope)
+		subjType := r.resolveExpr(st.Subj, scope) // CHANGED: capture subjType
 		for _, c := range st.Cases {
 			inner := NewScope(scope)
 			for _, p := range c.Patterns {
 				switch pat := p.(type) {
 				case *ExprPattern:
 					r.resolveExpr(pat.Expr, scope)
+					// NEW: Propagate switch subject type down to enum shorthands
+					if dot, ok := pat.Expr.(*DotEnumExpr); ok {
+						if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+							dot.SetVType(subjType)
+						}
+					}
 				case *ResultOkPattern:
 					inner.Define(&Symbol{Name: pat.Bind, Kind: SymVar})
 				case *ResultErrPattern:
@@ -215,6 +221,13 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 	case *ReturnStmt:
 		if st.Value != nil {
 			valType := r.resolveExpr(st.Value, scope)
+			// NEW: Propagate expected return type down to enum shorthands
+			if dot, ok := st.Value.(*DotEnumExpr); ok {
+				if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+					dot.SetVType(retType)
+					valType = retType
+				}
+			}
 			// Guard: Prevent returning values from void functions
 			if _, isVoid := retType.(*VVoid); isVoid {
 				r.diags.Errorf(st.Pos, "void function cannot return a value")
@@ -232,8 +245,14 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 	case *DeferStmt:
 		r.resolveExpr(st.Call, scope)
 	case *AssignStmt:
-		r.resolveExpr(st.LHS, scope)
+		lType := r.resolveExpr(st.LHS, scope) // CHANGED: capture LHS type
 		r.resolveExpr(st.RHS, scope)
+		// NEW: Propagate LHS type down to enum shorthands on RHS
+		if dot, ok := st.RHS.(*DotEnumExpr); ok {
+			if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+				dot.SetVType(lType)
+			}
+		}
 	case *ExprStmt:
 		r.resolveExpr(st.Expr, scope)
 	case *BlockStmt:

@@ -14,7 +14,7 @@ import (
 //   2. lowerFunctions  — emit function definitions (including receivers).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Lowerer holds all mutable state for a single module lowering.
+// Update the Lowerer struct to map to *VEnum instead of cir.Type
 type Lowerer struct {
 	diags   *Diagnostics
 	mod     *cir.Module
@@ -23,7 +23,7 @@ type Lowerer struct {
 
 	structTypes   map[string]*cir.StructType
 	classTypes    map[string]*cir.StructType
-	enumTypes     map[string]cir.Type
+	enumTypes     map[string]*VEnum // CHANGED: store the full VEnum to retain Decl access
 	nativeClasses map[string]bool
 	userFuncs     map[string]bool // every Vertex-defined function name in this file
 
@@ -33,6 +33,7 @@ type Lowerer struct {
 	tempSeq int
 }
 
+// Update NewLowerer to match the new map type
 func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 	gt := newGlibTypes()
 	setupGLib(mod, gt)
@@ -42,7 +43,7 @@ func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 		gt:            gt,
 		structTypes:   make(map[string]*cir.StructType),
 		classTypes:    make(map[string]*cir.StructType),
-		enumTypes:     make(map[string]cir.Type),
+		enumTypes:     make(map[string]*VEnum), // CHANGED
 		nativeClasses: make(map[string]bool),
 		userFuncs:     make(map[string]bool),
 	}
@@ -170,12 +171,10 @@ func (l *Lowerer) registerNativeMethod(m *ClassMember) {
     l.mod.Extern(m.Name, opts...)
 }
 
+// Update registerEnum to store the VEnum with its AST declaration
 func (l *Lowerer) registerEnum(d *EnumDecl) {
-	// Enums lower to C enums (int32_t).
-	// ir/c doesn't have a native enum builder, so we use the EnumDecl
-	// and emit the typedef via a type alias registered as Int32.
-	// The actual C enum text comes from EmitC. For now we just track the type.
-	l.enumTypes[d.Name] = cir.Int32
+	// Reconstruct the VEnum so we have it for explicit type hint resolution
+	l.enumTypes[d.Name] = &VEnum{Name: d.Name, Decl: d}
 }
 
 // resolvedFieldCIRType resolves a field's TypeExpr to a CIR type,
@@ -1632,7 +1631,7 @@ func (l *Lowerer) vtypeToCIR(vt VType) cir.Type {
 	return vt.CIRType()
 }
 
-// resolveTypeExprVType converts a syntactic TypeExpr to a VType by name lookup.
+// Update resolveTypeExprVType to handle Enums
 func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 	if te == nil {
 		return &VVoid{}
@@ -1647,6 +1646,9 @@ func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 		}
 		if _, ok := l.classTypes[t.Name]; ok {
 			return &VClass{Name: t.Name}
+		}
+		if ev, ok := l.enumTypes[t.Name]; ok { // ADDED: Resolve enum type hints
+			return ev
 		}
 		return &VUnknown{Name: t.Name}
 	case *PointerTypeExpr:
