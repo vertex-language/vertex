@@ -90,7 +90,7 @@ const bool    flag = true;
 | `uint16`            | `uint16_t` |
 | `uint32`            | `uint32_t` |
 | `uint64`            | `uint64_t` |
-| `float32 / float`   | `float`    |
+| `float32`           | `float`    |
 | `float64`           | `double`   |
 | `bool`              | `bool`     |
 | `string`            | see §7     |
@@ -104,7 +104,7 @@ const bool    flag = true;
 **Vertex**
 ```vertex
 let i: int    = 42
-let f: float  = float(i)       // widening — always safe
+let f: float32  = float32(i)       // widening — always safe
 let d: float64 = float64(f)    // widening — always safe
 let i2: int   = int(3.99)      // truncates toward zero → 3
 let b: int8   = int8(i)        // narrowing — wraps on overflow
@@ -457,7 +457,7 @@ for (uint32_t _i = 0; _i < items->len; _i++) {
 
 **Vertex**
 ```vertex
-struct Vec2   { x: float; y: float }
+struct Vec2   { x: float32; y: float32 }
 struct Player { id: int32; position: Vec2; health: int32 }
 
 var players = [Player]()
@@ -1396,7 +1396,7 @@ g_async_queue_push(ch, NULL);
 
 **Vertex**
 ```vertex
-func crunchData(data: [float]) thread -> [float] { … }
+func crunchData(data: [float32]) thread -> [float32] { … }
 let result = crunchData(data: x).spawn()
 ```
 
@@ -1450,7 +1450,7 @@ g_object_unref(_t);
 
 **Vertex**
 ```vertex
-func isolatedWork(data: [float]) process -> [float] { … }
+func isolatedWork(data: [float32]) process -> [float32] { … }
 let result = isolatedWork(data: x).fork()
 ```
 

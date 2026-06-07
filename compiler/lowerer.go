@@ -861,7 +861,8 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		return fc.varRef(b, e.Name)
 
 	case *DotEnumExpr:
-		return l.lowerDotEnum(e)
+		// NEW: Pass the builder down to lowerDotEnum
+		return l.lowerDotEnum(b, e)
 
 	case *BinaryExpr:
 		return l.lowerBinaryExpr(b, e, fc)
@@ -924,11 +925,8 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 	return cir.NullPtr()
 }
 
-func (l *Lowerer) lowerDotEnum(e *DotEnumExpr) cir.Expr {
-	// .caseName → integer literal (enum case value).
-	// Without a specific enum type in context, emit 0 as a placeholder.
-	// The resolver would need to propagate the enum type for full correctness.
-	return cir.IntLit(0)
+func (l *Lowerer) lowerDotEnum(b *cir.Builder, e *DotEnumExpr) cir.Expr {
+	return l.enumCaseExpr(b, e.GetVType(), e.Case)
 }
 
 func (l *Lowerer) enumCaseExpr(b *cir.Builder, subjType VType, caseName string) cir.Expr {
@@ -1438,8 +1436,13 @@ func (l *Lowerer) lowerStructMethod(
 }
 
 func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.Expr {
-	recv := l.lowerExpr(b, e.Recv, fc)
 	recvType := e.Recv.GetVType()
+
+	if ve, ok := recvType.(*VEnum); ok {
+		return l.enumCaseExpr(b, ve, e.Field)
+	}
+
+	recv := l.lowerExpr(b, e.Recv, fc)
 
 	switch rt := recvType.(type) {
 	case *VDynArray:

@@ -253,6 +253,12 @@ func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
 				hinted = &VFixedArray{Elem: da.Elem, Size: fa.Size}
 			}
 		}
+		
+		// NEW: Pass the type hint down to shorthand enums
+		if dot, ok := d.Value.(*DotEnumExpr); ok {
+			dot.SetVType(hinted)
+		}
+		
 		valType = hinted
 	}
 
@@ -337,7 +343,20 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 
 	case *BinaryExpr:
 		l := r.resolveExpr(e.Left, scope)
-		r.resolveExpr(e.Right, scope)
+		rt := r.resolveExpr(e.Right, scope)
+
+		// NEW: Context inference for DotEnumExpr in comparisons
+		if dot, ok := e.Left.(*DotEnumExpr); ok {
+			if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+				dot.SetVType(rt)
+			}
+		}
+		if dot, ok := e.Right.(*DotEnumExpr); ok {
+			if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+				dot.SetVType(l)
+			}
+		}
+
 		switch e.Op {
 		case BinEq, BinNeq, BinLt, BinLte, BinGt, BinGte,
 			BinAnd, BinOr, BinIdentityEq, BinIdentityNeq:
@@ -553,6 +572,14 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 	case *VString:
 		if e.Field == "length" {
 			return &VInt{Bits: 64, Signed: false}
+		}
+	case *VEnum:
+		if rt.Decl != nil {
+			for _, c := range rt.Decl.Cases {
+				if c.Name == e.Field {
+					return rt
+				}
+			}
 		}
 	}
 	return &VUnknown{Name: e.Field}
