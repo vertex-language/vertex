@@ -228,6 +228,8 @@ func (l *Lowerer) lowerFunctions(file *File) {
 
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
+		case *EnumDecl: // NEW: Generate rawValue C helpers for every enum
+			l.lowerEnumHelpers(d)
 		case *FuncDecl:
 			if l.testEntryFunc != "" &&
 				d.Qualifier == FuncQualTest &&
@@ -242,6 +244,119 @@ func (l *Lowerer) lowerFunctions(file *File) {
 	if l.testEntryFunc != "" {
 		l.injectTestMain()
 	}
+}
+
+func (l *Lowerer) lowerEnumHelpers(d *EnumDecl) {
+	var rawTypeVT VType = &VInt{Bits: 32, Signed: true}
+	if d.RawType != nil {
+		rawTypeVT = l.resolveTypeExprVType(d.RawType)
+	}
+	ct := l.vtypeToCIR(rawTypeVT)
+	if ct == nil {
+		ct = l.vtypeToCIRFallback(rawTypeVT)
+	}
+
+	// 1. rawValue helper: pkg_EnumName_rawValue(int32) -> raw_type
+	def1 := l.mod.Func(l.cFuncName(d.Name+"_rawValue"), cir.Returns(ct), cir.Param("val", cir.Int32))
+	def1.Body(func(b *cir.Builder) {
+		val := b.Param("val")
+		var cases []cir.SwitchCase
+		var currentInt int64 = 0
+		for _, c := range d.Cases {
+			var retVal cir.Expr
+			if c.RawValue != nil {
+				if il, ok := c.RawValue.(*IntLitExpr); ok {
+					currentInt = il.Value
+				}
+			}
+			
+			if _, isStr := rawTypeVT.(*VString); isStr {
+				if c.RawValue != nil {
+					if sl, ok := c.RawValue.(*StringLitExpr); ok {
+						retVal = l.mod.StringLit(l.tempName(), sl.Value)
+					}
+				} else {
+					retVal = l.mod.StringLit(l.tempName(), c.Name) // default to case name string
+				}
+			} else {
+				retVal = b.Cast(ct, cir.IntLit(currentInt))
+			}
+			
+			cases = append(cases, cir.Case(cir.IntLit(currentInt), cir.B(func(b *cir.Builder) {
+				b.ReturnVal(retVal)
+			})))
+			currentInt++
+		}
+		
+		cases = append(cases, cir.Default(cir.B(func(b *cir.Builder) {
+			if _, isStr := rawTypeVT.(*VString); isStr {
+				b.ReturnVal(cir.NullPtr())
+			} else {
+				b.ReturnVal(b.Cast(ct, cir.IntLit(0)))
+			}
+		})))
+		b.Switch(val, cases...)
+	})
+
+	// 2. from_rawValue helper: pkg_EnumName_from_rawValue(raw_type) -> int32* (Optional)
+	def2 := l.mod.Func(l.cFuncName(d.Name+"_from_rawValue"), cir.Returns(cir.Ptr(cir.Int32)), cir.Param("raw", ct))
+	def2.Body(func(b *cir.Builder) {
+		raw := b.Param("raw")
+		_, isStr := rawTypeVT.(*VString)
+		if isStr {
+			if l.mod.LookupExtern("strcmp") == nil {
+				l.mod.Extern("strcmp", cir.Returns(cir.Int32), cir.Param("s1", cir.ConstPtr(cir.Char)), cir.Param("s2", cir.ConstPtr(cir.Char)))
+			}
+		}
+
+		var currentInt int64 = 0
+		var conds []struct {
+			cond cir.Expr
+			val  int64
+		}
+		
+		for _, c := range d.Cases {
+			if c.RawValue != nil {
+				if il, ok := c.RawValue.(*IntLitExpr); ok {
+					currentInt = il.Value
+				}
+			}
+			
+			if isStr {
+				var strVal string
+				if c.RawValue != nil {
+					if sl, ok := c.RawValue.(*StringLitExpr); ok {
+						strVal = sl.Value
+					}
+				} else {
+					strVal = c.Name
+				}
+				lit := l.mod.StringLit(l.tempName(), strVal)
+				cond := b.Eq(b.Call("strcmp", raw, lit), cir.IntLit(0))
+				conds = append(conds, struct{cond cir.Expr; val int64}{cond, currentInt})
+			} else {
+				cond := b.Eq(raw, b.Cast(ct, cir.IntLit(currentInt)))
+				conds = append(conds, struct{cond cir.Expr; val int64}{cond, currentInt})
+			}
+			currentInt++
+		}
+
+		var build func(i int) *cir.Block
+		build = func(i int) *cir.Block {
+			if i >= len(conds) {
+				return cir.B(func(b *cir.Builder) { b.ReturnVal(cir.NullPtr()) })
+			}
+			return cir.B(func(b *cir.Builder) {
+				b.IfElse(conds[i].cond, cir.B(func(b *cir.Builder) {
+					tmp := b.Local(l.tempName(), cir.Ptr(cir.Int32))
+					b.Assign(tmp, b.Cast(cir.Ptr(cir.Int32), b.Call("malloc", b.SizeOf(cir.Int32))))
+					b.Assign(b.Deref(tmp, cir.Int32), cir.IntLit(conds[i].val))
+					b.ReturnVal(tmp)
+				}), build(i+1))
+			})
+		}
+		b.Inline(build(0))
+	})
 }
 
 func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
@@ -930,16 +1045,17 @@ func (l *Lowerer) lowerDotEnum(b *cir.Builder, e *DotEnumExpr) cir.Expr {
 
 func (l *Lowerer) enumCaseExpr(b *cir.Builder, subjType VType, caseName string) cir.Expr {
 	if ev, ok := subjType.(*VEnum); ok {
-		// Find the case index.
-		for i, c := range ev.Decl.Cases {
-			if c.Name == caseName {
-				if c.RawValue != nil {
-					if il, ok := c.RawValue.(*IntLitExpr); ok {
-						return cir.IntLit(il.Value)
-					}
+		var currentInt int64 = 0
+		for _, c := range ev.Decl.Cases {
+			if c.RawValue != nil {
+				if il, ok := c.RawValue.(*IntLitExpr); ok {
+					currentInt = il.Value
 				}
-				return cir.IntLit(int64(i))
 			}
+			if c.Name == caseName {
+				return cir.IntLit(currentInt)
+			}
+			currentInt++
 		}
 	}
 	return cir.IntLit(0)
@@ -1074,6 +1190,18 @@ func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Ex
 		if l.nativeClasses[id.Name] {
 			return l.lowerClassInstantiate(b, id.Name, e.Args, fc)
 		}
+
+		// NEW: Check for Enum init(rawValue:) constructor
+		if opt, isOpt := e.GetVType().(*VOptional); isOpt {
+			if ve, isEnum := opt.Elem.(*VEnum); isEnum && len(e.Args) == 1 && e.Args[0].Label == "rawValue" {
+				argVal := l.lowerExpr(b, e.Args[0].Value, fc)
+				ce := b.Call(l.cFuncName(ve.Name+"_from_rawValue"), argVal)
+				if callNode, ok := ce.(*cir.CallExpr); ok {
+					callNode.Type = cir.Ptr(cir.Int32)
+				}
+				return ce
+			}
+		}
 	}
 
 	fn := l.lowerExpr(b, e.Func, fc)
@@ -1085,7 +1213,6 @@ func (l *Lowerer) lowerCallExpr(b *cir.Builder, e *CallExpr, fc *funcCtx) cir.Ex
 	retCIR := l.callReturnCIRType(e.GetVType())
 
 	if id, ok := e.Func.(*IdentExpr); ok {
-		// Vertex user functions get a package prefix; C externs do not.
 		cName := id.Name
 		if l.userFuncs[id.Name] {
 			cName = l.cFuncName(id.Name)
@@ -1438,6 +1565,11 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 	recvType := e.Recv.GetVType()
 
 	if ve, ok := recvType.(*VEnum); ok {
+		// NEW: Intercept rawValue and invoke the generated getter.
+		if e.Field == "rawValue" {
+			recv := l.lowerExpr(b, e.Recv, fc)
+			return b.Call(l.cFuncName(ve.Name+"_rawValue"), recv)
+		}
 		return l.enumCaseExpr(b, ve, e.Field)
 	}
 

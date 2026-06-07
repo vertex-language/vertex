@@ -503,11 +503,20 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 			_ = conv
 			return bt
 		}
-		if sym, ok2 := scope.Lookup(id.Name); ok2 && sym.Kind == SymClass {
-			for _, a := range e.Args {
-				r.resolveExpr(a.Value, scope)
+		if sym, ok2 := scope.Lookup(id.Name); ok2 {
+			if sym.Kind == SymClass {
+				for _, a := range e.Args {
+					r.resolveExpr(a.Value, scope)
+				}
+				return sym.Type
 			}
-			return sym.Type
+			// NEW: Handle Enum(rawValue: X) initialization
+			if sym.Kind == SymEnum {
+				if len(e.Args) == 1 && e.Args[0].Label == "rawValue" {
+					r.resolveExpr(e.Args[0].Value, scope)
+					return &VOptional{Elem: sym.Type}
+				}
+			}
 		}
 	}
 	r.resolveExpr(e.Func, scope)
@@ -593,6 +602,10 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 			return &VInt{Bits: 64, Signed: false}
 		}
 	case *VEnum:
+		// NEW: Resolve the .rawValue property wrapper
+		if e.Field == "rawValue" {
+			return rt.RawType
+		}
 		if rt.Decl != nil {
 			for _, c := range rt.Decl.Cases {
 				if c.Name == e.Field {
