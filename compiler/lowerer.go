@@ -76,9 +76,15 @@ func (l *Lowerer) isPointerVType(vt VType) bool {
 // NEW: wrapOptional implicitly wraps a value into an Optional compound literal if needed.
 func (l *Lowerer) wrapOptional(targetVT VType, valVT VType, val cir.Expr) cir.Expr {
 	optVT, isOptTarget := targetVT.(*VOptional)
+	_, isOptVal := valVT.(*VOptional) // FIX: Check if the value is already an optional
 	_, isNilVal := valVT.(*VNil)
 	
 	if isOptTarget {
+		// FIX: If the RHS is already an optional, don't double-wrap it!
+		if isOptVal {
+			return val
+		}
+
 		if l.isPointerVType(optVT.Elem) {
 			// Pointer type: no struct needed, just return the value or NULL
 			if isNilVal { return cir.NullPtr() }
