@@ -450,68 +450,70 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
-	vtype := d.Value.GetVType()
-	if d.TypeHint != nil {
-		vtype = l.resolveTypeExprVType(d.TypeHint)
-	}
-	if vtype == nil {
-		vtype = &VUnknown{}
-	}
+    vtype := d.Value.GetVType()
+    if d.TypeHint != nil {
+        vtype = l.resolveTypeExprVType(d.TypeHint)
+    }
+    if vtype == nil {
+        vtype = &VUnknown{}
+    }
 
-	// [T] hint on a fixed literal may still arrive as VDynArray here if the
-	// resolver path was the global one; promote so we never GLib-allocate a literal.
-	if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
-		if da, isDyn := vtype.(*VDynArray); isDyn {
-			vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
-		}
-	}
+    if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+        if da, isDyn := vtype.(*VDynArray); isDyn {
+            vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
+        }
+    }
 
-	// Auto-deref: if the init value is pointer-typed and there is no explicit
-	// type hint, treat this as a load through the pointer.
-	// e.g.  let tmp = ptrParam  →  int32 tmp = *ptrParam
-	autoDeref := false
-	if d.TypeHint == nil {
-		if ptr, isPtr := vtype.(*VPointer); isPtr {
-			vtype = ptr.Elem
-			autoDeref = true
-		}
-	}
+    // Auto-deref: if the init value is pointer-typed and there is no explicit
+    // type hint, treat this as a load through the pointer.
+    // e.g.  let tmp = ptrParam  →  int32 tmp = *ptrParam
+    autoDeref := false
+    if d.TypeHint == nil {
+        if ptr, isPtr := vtype.(*VPointer); isPtr {
+            vtype = ptr.Elem
+            autoDeref = true
+        }
+    }
 
-	for i, name := range d.Binding.Names {
-		_ = i
-		ref := l.declareLocal(b, name, vtype, d.IsLet)
-		fc.locals[name] = ref
+    for i, name := range d.Binding.Names {
+        _ = i
+        ref := l.declareLocal(b, name, vtype, d.IsLet)
+        fc.locals[name] = ref
 
-		// Fixed-array literal: C does not allow array-to-array assignment after
-		// the declaration, so store each element directly by index.
-		if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
-			if fa, isFixed := vtype.(*VFixedArray); isFixed {
-				elemCIR := l.vtypeToCIR(fa.Elem)
-				if elemCIR == nil {
-					elemCIR = l.vtypeToCIRFallback(fa.Elem)
-				}
-				for j, elem := range arrLit.Elems {
-					val := l.lowerExpr(b, elem, fc)
-					if elemCIR != nil {
-						val = b.Cast(elemCIR, val)
-					}
-					b.Assign(b.Index(ref, cir.IntLit(int64(j)), elemCIR), val)
-				}
-				continue
-			}
-		}
+        if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+            if fa, isFixed := vtype.(*VFixedArray); isFixed {
+                elemCIR := l.vtypeToCIR(fa.Elem)
+                if elemCIR == nil {
+                    elemCIR = l.vtypeToCIRFallback(fa.Elem)
+                }
+                for j, elem := range arrLit.Elems {
+                    val := l.lowerExpr(b, elem, fc)
+                    if elemCIR != nil {
+                        val = b.Cast(elemCIR, val)
+                    }
+                    b.Assign(b.Index(ref, cir.IntLit(int64(j)), elemCIR), val)
+                }
+                continue
+            }
+        }
 
-		initExpr := l.lowerExpr(b, d.Value, fc)
-		if autoDeref && initExpr != nil {
-			initExpr = b.Deref(initExpr)
-		}
-		if initExpr != nil {
-			if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
-				initExpr = b.Cast(targetCT, initExpr)
-			}
-			b.Assign(ref, initExpr)
-		}
-	}
+        initExpr := l.lowerExpr(b, d.Value, fc)
+        if autoDeref && initExpr != nil {
+            // Use the typed Deref constructor so the MIR encoder knows the
+            // element width and doesn't fall back to 64-bit pointer size.
+            elemCIR := l.vtypeToCIR(vtype)
+            if elemCIR == nil {
+                elemCIR = l.vtypeToCIRFallback(vtype)
+            }
+            initExpr = cir.Deref(initExpr, elemCIR)
+        }
+        if initExpr != nil {
+            if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
+                initExpr = b.Cast(targetCT, initExpr)
+            }
+            b.Assign(ref, initExpr)
+        }
+    }
 }
 
 func (l *Lowerer) declareLocal(b *cir.Builder, name string, vt VType, isLet bool) cir.Expr {
@@ -557,54 +559,60 @@ func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 }
 
 func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
-	lhs := l.lowerExpr(b, st.LHS, fc)
-	rhs := l.lowerExpr(b, st.RHS, fc)
-	if lhs == nil || rhs == nil {
-		return
-	}
+    lhs := l.lowerExpr(b, st.LHS, fc)
+    rhs := l.lowerExpr(b, st.RHS, fc)
+    if lhs == nil || rhs == nil {
+        return
+    }
 
-	// If the LHS is pointer-typed, all operations go through the pointer.
-	if _, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
-		storeLHS := b.Deref(lhs)
-		// If RHS is also a pointer-typed param (e.g. swap: a = b → *a = *b),
-		// deref it to load the value. Don't deref locals — they were already
-		// auto-deref'd at declaration time (e.g. tmp in swap).
-		if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
-			if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
-				rhs = b.Deref(rhs)
-			}
-		}
-		switch st.Op {
-		case OpAssign:
-			b.Assign(storeLHS, rhs)
-		case OpAddAssign:
-			b.Assign(storeLHS, b.Add(b.Deref(lhs), rhs))
-		case OpSubAssign:
-			b.Assign(storeLHS, b.Sub(b.Deref(lhs), rhs))
-		case OpMulAssign:
-			b.Assign(storeLHS, b.Mul(b.Deref(lhs), rhs))
-		case OpDivAssign:
-			b.Assign(storeLHS, b.Div(b.Deref(lhs), rhs))
-		case OpModAssign:
-			b.Assign(storeLHS, b.Mod(b.Deref(lhs), rhs))
-		}
-		return
-	}
+    // If the LHS is pointer-typed, all operations go through the pointer.
+    if ptr, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
+        // Resolve the element CIR type so the DerefExpr carries the correct
+        // width and the MIR encoder emits the right operand size.
+        elemCIR := l.vtypeToCIR(ptr.Elem)
+        if elemCIR == nil {
+            elemCIR = cir.Int32
+        }
+        storeLHS := cir.Deref(lhs, elemCIR)
+        // If RHS is also a pointer-typed param (e.g. swap: a = b → *a = *b),
+        // deref it to load the value. Don't deref locals — they were already
+        // auto-deref'd at declaration time (e.g. tmp in swap).
+        if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
+            if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
+                rhs = cir.Deref(rhs, elemCIR)
+            }
+        }
+        switch st.Op {
+        case OpAssign:
+            b.Assign(storeLHS, rhs)
+        case OpAddAssign:
+            b.Assign(storeLHS, b.Add(cir.Deref(lhs, elemCIR), rhs))
+        case OpSubAssign:
+            b.Assign(storeLHS, b.Sub(cir.Deref(lhs, elemCIR), rhs))
+        case OpMulAssign:
+            b.Assign(storeLHS, b.Mul(cir.Deref(lhs, elemCIR), rhs))
+        case OpDivAssign:
+            b.Assign(storeLHS, b.Div(cir.Deref(lhs, elemCIR), rhs))
+        case OpModAssign:
+            b.Assign(storeLHS, b.Mod(cir.Deref(lhs, elemCIR), rhs))
+        }
+        return
+    }
 
-	switch st.Op {
-	case OpAssign:
-		b.Assign(lhs, rhs)
-	case OpAddAssign:
-		b.Assign(lhs, b.Add(lhs, rhs))
-	case OpSubAssign:
-		b.Assign(lhs, b.Sub(lhs, rhs))
-	case OpMulAssign:
-		b.Assign(lhs, b.Mul(lhs, rhs))
-	case OpDivAssign:
-		b.Assign(lhs, b.Div(lhs, rhs))
-	case OpModAssign:
-		b.Assign(lhs, b.Mod(lhs, rhs))
-	}
+    switch st.Op {
+    case OpAssign:
+        b.Assign(lhs, rhs)
+    case OpAddAssign:
+        b.Assign(lhs, b.Add(lhs, rhs))
+    case OpSubAssign:
+        b.Assign(lhs, b.Sub(lhs, rhs))
+    case OpMulAssign:
+        b.Assign(lhs, b.Mul(lhs, rhs))
+    case OpDivAssign:
+        b.Assign(lhs, b.Div(lhs, rhs))
+    case OpModAssign:
+        b.Assign(lhs, b.Mod(lhs, rhs))
+    }
 }
 
 func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
