@@ -246,6 +246,7 @@ func (l *Lowerer) lowerFunctions(file *File) {
 	}
 }
 
+// NEW: Generates the getter and constructor C helpers for an enum's raw values.
 func (l *Lowerer) lowerEnumHelpers(d *EnumDecl) {
 	var rawTypeVT VType = &VInt{Bits: 32, Signed: true}
 	if d.RawType != nil {
@@ -350,7 +351,8 @@ func (l *Lowerer) lowerEnumHelpers(d *EnumDecl) {
 				b.IfElse(conds[i].cond, cir.B(func(b *cir.Builder) {
 					tmp := b.Local(l.tempName(), cir.Ptr(cir.Int32))
 					b.Assign(tmp, b.Cast(cir.Ptr(cir.Int32), b.Call("malloc", b.SizeOf(cir.Int32))))
-					b.Assign(b.Deref(tmp, cir.Int32), cir.IntLit(conds[i].val))
+					// FIX: Use cir.Deref instead of b.Deref to pass the explicit type
+					b.Assign(cir.Deref(tmp, cir.Int32), cir.IntLit(conds[i].val))
 					b.ReturnVal(tmp)
 				}), build(i+1))
 			})
