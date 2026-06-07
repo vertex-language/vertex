@@ -14,7 +14,7 @@ import (
 //   2. lowerFunctions  — emit function definitions (including receivers).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Update the Lowerer struct to map to *VEnum instead of cir.Type
+// Lowerer holds all mutable state for a single module lowering.
 type Lowerer struct {
 	diags   *Diagnostics
 	mod     *cir.Module
@@ -23,7 +23,7 @@ type Lowerer struct {
 
 	structTypes   map[string]*cir.StructType
 	classTypes    map[string]*cir.StructType
-	enumTypes     map[string]*VEnum // CHANGED: store the full VEnum to retain Decl access
+	enumTypes     map[string]cir.Type
 	nativeClasses map[string]bool
 	userFuncs     map[string]bool // every Vertex-defined function name in this file
 
@@ -31,9 +31,11 @@ type Lowerer struct {
 	testEntryVType VType
 
 	tempSeq int
+
+	// NEW: Cache for generated opt_T structs
+	optionalTypes map[string]cir.Type
 }
 
-// Update NewLowerer to match the new map type
 func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 	gt := newGlibTypes()
 	setupGLib(mod, gt)
@@ -43,9 +45,10 @@ func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 		gt:            gt,
 		structTypes:   make(map[string]*cir.StructType),
 		classTypes:    make(map[string]*cir.StructType),
-		enumTypes:     make(map[string]*VEnum), // CHANGED
+		enumTypes:     make(map[string]cir.Type),
 		nativeClasses: make(map[string]bool),
 		userFuncs:     make(map[string]bool),
+		optionalTypes: make(map[string]cir.Type), // NEW
 	}
 }
 
@@ -58,6 +61,47 @@ func (l *Lowerer) cFuncName(name string) string {
 		return name
 	}
 	return l.pkg + "_" + name
+}
+
+// NEW: isPointerVType reports whether the type naturally lowers to a C pointer.
+// If true, we can safely use NULL for .none and skip generating a wrapper struct.
+func (l *Lowerer) isPointerVType(vt VType) bool {
+	switch vt.(type) {
+	case *VClass, *VDynArray, *VString, *VPointer, *VMap:
+		return true
+	}
+	return false
+}
+
+// NEW: wrapOptional implicitly wraps a value into an Optional compound literal if needed.
+func (l *Lowerer) wrapOptional(targetVT VType, valVT VType, val cir.Expr) cir.Expr {
+	optVT, isOptTarget := targetVT.(*VOptional)
+	_, isNilVal := valVT.(*VNil)
+	
+	if isOptTarget {
+		if l.isPointerVType(optVT.Elem) {
+			// Pointer type: no struct needed, just return the value or NULL
+			if isNilVal { return cir.NullPtr() }
+			return val
+		}
+
+		// Value type: We must emit a compound struct literal
+		optCT := l.vtypeToCIRFallback(targetVT)
+
+		if isNilVal {
+			// .none -> { .has_value = false }
+			return cir.CompoundLit(optCT, cir.InitStruct(
+				cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
+			))
+		}
+
+		// .some(val) -> { .has_value = true, .value = val }
+		return cir.CompoundLit(optCT, cir.InitStruct(
+			cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
+			cir.FieldInit{Field: "value", Value: val},
+		))
+	}
+	return val
 }
 
 // cTypeName returns the C-level name for a Vertex-defined struct / class / enum.
@@ -580,9 +624,6 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
         }
     }
 
-    // Auto-deref: if the init value is pointer-typed and there is no explicit
-    // type hint, treat this as a load through the pointer.
-    // e.g.  let tmp = ptrParam  →  int32 tmp = *ptrParam
     autoDeref := false
     if d.TypeHint == nil {
         if ptr, isPtr := vtype.(*VPointer); isPtr {
@@ -615,17 +656,22 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 
         initExpr := l.lowerExpr(b, d.Value, fc)
         if autoDeref && initExpr != nil {
-            // Use the typed Deref constructor so the MIR encoder knows the
-            // element width and doesn't fall back to 64-bit pointer size.
             elemCIR := l.vtypeToCIR(vtype)
             if elemCIR == nil {
                 elemCIR = l.vtypeToCIRFallback(vtype)
             }
             initExpr = cir.Deref(initExpr, elemCIR)
         }
+        
         if initExpr != nil {
-            if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
-                initExpr = b.Cast(targetCT, initExpr)
+            // NEW: Implicitly wrap optionals and nil literals
+            initExpr = l.wrapOptional(vtype, d.Value.GetVType(), initExpr)
+            
+            // Only Cast if it's NOT an optional struct (CompoundLits shouldn't be explicitly cast)
+            if _, isOpt := vtype.(*VOptional); !isOpt {
+                if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
+                    initExpr = b.Cast(targetCT, initExpr)
+                }
             }
             b.Assign(ref, initExpr)
         }
@@ -663,11 +709,34 @@ func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 	case *VEnum:
 		return cir.Int32
 	case *VOptional:
-		inner := l.vtypeToCIR(t.Elem)
-		if inner == nil {
-			inner = l.vtypeToCIRFallback(t.Elem)
+		if l.isPointerVType(t.Elem) {
+			// Swift Niche-Bit: Keep it as a raw pointer! NULL = .none
+			inner := l.vtypeToCIR(t.Elem)
+			if inner == nil {
+				inner = l.vtypeToCIRFallback(t.Elem)
+			}
+			return inner 
 		}
-		return cir.Ptr(inner)
+
+		// Value Type: Generate `struct opt_TypeName { bool has_value; T value; }`
+		typeName := vtypeName(t.Elem)
+		if cached, ok := l.optionalTypes[typeName]; ok {
+			return cached
+		}
+
+		elemCT := l.vtypeToCIR(t.Elem)
+		if elemCT == nil {
+			elemCT = l.vtypeToCIRFallback(t.Elem)
+		}
+
+		structName := l.cTypeName("opt_" + typeName)
+		st := cir.Struct(structName,
+			cir.Field("has_value", cir.Bool),
+			cir.Field("value", elemCT),
+		)
+		l.mod.RegisterType(st)
+		l.optionalTypes[typeName] = st
+		return st
 	case *VResult:
 		return cir.VoidPtr // simplified
 	}
@@ -681,23 +750,21 @@ func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
         return
     }
 
-    // If the LHS is pointer-typed, all operations go through the pointer.
     if ptr, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
-        // Resolve the element CIR type so the DerefExpr carries the correct
-        // width and the MIR encoder emits the right operand size.
         elemCIR := l.vtypeToCIR(ptr.Elem)
         if elemCIR == nil {
             elemCIR = cir.Int32
         }
         storeLHS := cir.Deref(lhs, elemCIR)
-        // If RHS is also a pointer-typed param (e.g. swap: a = b → *a = *b),
-        // deref it to load the value. Don't deref locals — they were already
-        // auto-deref'd at declaration time (e.g. tmp in swap).
         if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
             if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
                 rhs = cir.Deref(rhs, elemCIR)
             }
         }
+        
+        // NEW: Implicitly wrap optionals and nil literals
+        rhs = l.wrapOptional(ptr.Elem, st.RHS.GetVType(), rhs)
+
         switch st.Op {
         case OpAssign:
             b.Assign(storeLHS, rhs)
@@ -714,6 +781,9 @@ func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
         }
         return
     }
+
+    // NEW: Implicitly wrap optionals and nil literals
+    rhs = l.wrapOptional(st.LHS.GetVType(), st.RHS.GetVType(), rhs)
 
     switch st.Op {
     case OpAssign:
@@ -732,29 +802,47 @@ func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
-	var cond cir.Expr
-	switch c := st.Cond.(type) {
-	case *IfExprCond:
-		cond = l.lowerExpr(b, c.Expr, fc)
-	case *IfLetCond:
-		// Evaluate the optional expression.
-		val := l.lowerExpr(b, c.Expr, fc)
-		// Store into a temp, bind it.
-		tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(c.Expr.GetVType()))
-		b.Assign(tmp, val)
-		fc.locals[c.Name] = tmp
-		cond = b.Neq(tmp, cir.NullPtr())
-	}
-	if cond == nil {
-		cond = cir.BoolLit(true)
-	}
-	thenBlk := cir.B(func(b *cir.Builder) { l.lowerBlock(b, st.Then, fc) })
-	if st.Else == nil {
-		b.If(cond, thenBlk)
-	} else {
-		elseBlk := cir.B(func(b *cir.Builder) { l.lowerStmt(b, st.Else, fc) })
-		b.IfElse(cond, thenBlk, elseBlk)
-	}
+    var cond cir.Expr
+    switch c := st.Cond.(type) {
+    case *IfExprCond:
+        cond = l.lowerExpr(b, c.Expr, fc)
+    case *IfLetCond:
+        val := l.lowerExpr(b, c.Expr, fc)
+        valVT := c.Expr.GetVType()
+        optVT, isOpt := valVT.(*VOptional)
+
+        if !isOpt || l.isPointerVType(optVT.Elem) {
+            // Pointer type: standard != NULL check
+            tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(valVT))
+            b.Assign(tmp, val)
+            fc.locals[c.Name] = tmp
+            cond = b.Neq(tmp, cir.NullPtr())
+        } else {
+            // Value type struct!
+            optCT := l.vtypeToCIRFallback(valVT)
+            tmp := b.Local(l.tempName(), optCT)
+            b.Assign(tmp, val) // Copy the struct by value
+
+            // Extract the payload for the block binding
+            elemCT := l.vtypeToCIRFallback(optVT.Elem)
+            boundLocal := b.Local(c.Name, elemCT)
+            b.Assign(boundLocal, b.DotField(tmp, "value"))
+            fc.locals[c.Name] = boundLocal
+
+            // Condition is just the boolean tag
+            cond = b.DotField(tmp, "has_value")
+        }
+    }
+    if cond == nil {
+        cond = cir.BoolLit(true)
+    }
+    thenBlk := cir.B(func(b *cir.Builder) { l.lowerBlock(b, st.Then, fc) })
+    if st.Else == nil {
+        b.If(cond, thenBlk)
+    } else {
+        elseBlk := cir.B(func(b *cir.Builder) { l.lowerStmt(b, st.Else, fc) })
+        b.IfElse(cond, thenBlk, elseBlk)
+    }
 }
 
 func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
