@@ -23,7 +23,7 @@ type Lowerer struct {
 
 	structTypes   map[string]*cir.StructType
 	classTypes    map[string]*cir.StructType
-	enumTypes     map[string]cir.Type
+	enumTypes     map[string]*VEnum // FIX: Restored to *VEnum
 	nativeClasses map[string]bool
 	userFuncs     map[string]bool // every Vertex-defined function name in this file
 
@@ -32,7 +32,7 @@ type Lowerer struct {
 
 	tempSeq int
 
-	// NEW: Cache for generated opt_T structs
+	// Cache for generated opt_T structs
 	optionalTypes map[string]cir.Type
 }
 
@@ -45,10 +45,10 @@ func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 		gt:            gt,
 		structTypes:   make(map[string]*cir.StructType),
 		classTypes:    make(map[string]*cir.StructType),
-		enumTypes:     make(map[string]cir.Type),
+		enumTypes:     make(map[string]*VEnum), // FIX: Restored to *VEnum
 		nativeClasses: make(map[string]bool),
 		userFuncs:     make(map[string]bool),
-		optionalTypes: make(map[string]cir.Type), // NEW
+		optionalTypes: make(map[string]cir.Type),
 	}
 }
 
