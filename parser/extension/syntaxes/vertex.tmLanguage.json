@@ -245,11 +245,6 @@
           "match": "\\bconst\\b"
         },
         {
-          "comment": "Raw pointer reinterpretation — §44",
-          "name": "keyword.operator.cast.vertex",
-          "match": "\\breinterpret\\b"
-        },
-        {
           "comment": "Execution / concurrency qualifiers and test qualifier — §36, §39–§41, §48.1",
           "name": "keyword.other.concurrency.vertex",
           "match": "\\b(async|thread|process|gpu|test)\\b"
@@ -305,8 +300,13 @@
     },
 
     "operator": {
-      "comment": "All operators from §7–§17. Ordered longest-match first: each group must appear before any shorter prefix it shares (e.g. &+/&-/&* before &, === before ==, -> before -, << before <, += before + and =, && before &).",
+      "comment": "All operators from §6.1, §7–§17. Ordered longest-match first: each group must appear before any shorter prefix it shares (e.g. &+/&-/&* before &, === before ==, -> before -, << before <, += before + and =, && before &). The cast operator 'as' uses a word-boundary match and is listed first so it is consumed before the arithmetic/bitwise single-character patterns.",
       "patterns": [
+        {
+          "comment": "Cast operator — §6.1 — as",
+          "name": "keyword.operator.cast.vertex",
+          "match": "\\bas\\b"
+        },
         {
           "comment": "Overflow arithmetic — §10 — &+  &-  &*",
           "name": "keyword.operator.overflow.vertex",

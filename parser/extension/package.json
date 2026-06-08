@@ -3,7 +3,7 @@
   "name": "vertex-lang",
   "displayName": "Vertex Language Support",
   "description": "Syntax highlighting for the Vertex programming language (spec 2.1)",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "publisher": "vertex-language",
   "repository": {
     "type": "git",
