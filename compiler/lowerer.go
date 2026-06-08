@@ -1222,12 +1222,12 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 		result := b.Local(l.tempName(), resultType)
 
 		if isOpt && !l.isPointerVType(optVT.Elem) {
-			// Value-type optional: tmp.has_value ? tmp.value : right
+			// Value-type optional: Explicitly compare has_value == true for the backend encoder
 			optCT := l.vtypeToCIRFallback(leftVT)
 			tmp := b.Local(l.tempName(), optCT)
 			b.Assign(tmp, left) // Copy struct
 
-			b.IfElse(b.DotField(tmp, "has_value"),
+			b.IfElse(b.Eq(b.DotField(tmp, "has_value"), cir.BoolLit(true)),
 				cir.B(func(b *cir.Builder) { b.Assign(result, b.DotField(tmp, "value")) }),
 				cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
 			)
