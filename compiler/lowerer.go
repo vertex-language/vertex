@@ -1174,7 +1174,7 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 			}
 			return []Expr{expr}
 		}
-		
+
 		operands := collect(e)
 
 		finalCT := l.vtypeToCIR(e.GetVType())
@@ -1201,13 +1201,11 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 					tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(vt))
 					b.Assign(tmp, val)
 
-					// ADDED: cir.Bool type parameter to DotField
-					hasValueField := b.DotField(tmp, "has_value", cir.Bool)
+					hasValueField := b.DotField(tmp, "has_value")
 					cond := b.Eq(b.Cast(cir.Int32, hasValueField), cir.IntLit(1))
-					
+
 					thenBlk := cir.B(func(b *cir.Builder) {
-						// ADDED: finalCT type parameter to DotField
-						unwrapped := b.DotField(tmp, "value", finalCT)
+						unwrapped := b.DotField(tmp, "value")
 						b.Assign(result, b.Cast(finalCT, unwrapped))
 					})
 					b.IfElse(cond, thenBlk, build(idx+1))
@@ -1224,7 +1222,7 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 				}
 			})
 		}
-		
+
 		b.Inline(build(0))
 		return result
 	}
@@ -1232,28 +1230,28 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 	left := l.lowerExpr(b, e.Left, fc)
 	right := l.lowerExpr(b, e.Right, fc)
 	switch e.Op {
-	case BinAdd: return b.Add(left, right)
-	case BinSub: return b.Sub(left, right)
-	case BinMul: return b.Mul(left, right)
-	case BinDiv: return b.Div(left, right)
-	case BinMod: return b.Mod(left, right)
-	case BinShl: return b.Shl(left, right)
-	case BinShr: return b.Shr(left, right)
-	case BinBitAnd: return b.And(left, right)
-	case BinBitXor: return b.Xor(left, right)
-	case BinBitOr: return b.Or(left, right)
-	case BinEq: return b.Eq(left, right)
-	case BinNeq: return b.Neq(left, right)
-	case BinLt: return b.Lt(left, right)
-	case BinLte: return b.Lte(left, right)
-	case BinGt: return b.Gt(left, right)
-	case BinGte: return b.Gte(left, right)
-	case BinAnd: return b.LogAnd(left, right)
-	case BinOr: return b.LogOr(left, right)
+	case BinAdd:         return b.Add(left, right)
+	case BinSub:         return b.Sub(left, right)
+	case BinMul:         return b.Mul(left, right)
+	case BinDiv:         return b.Div(left, right)
+	case BinMod:         return b.Mod(left, right)
+	case BinShl:         return b.Shl(left, right)
+	case BinShr:         return b.Shr(left, right)
+	case BinBitAnd:      return b.And(left, right)
+	case BinBitXor:      return b.Xor(left, right)
+	case BinBitOr:       return b.Or(left, right)
+	case BinEq:          return b.Eq(left, right)
+	case BinNeq:         return b.Neq(left, right)
+	case BinLt:          return b.Lt(left, right)
+	case BinLte:         return b.Lte(left, right)
+	case BinGt:          return b.Gt(left, right)
+	case BinGte:         return b.Gte(left, right)
+	case BinAnd:         return b.LogAnd(left, right)
+	case BinOr:          return b.LogOr(left, right)
 	case BinOverflowAdd: return b.Add(b.Cast(cir.UInt32, left), b.Cast(cir.UInt32, right))
 	case BinOverflowSub: return b.Sub(b.Cast(cir.UInt32, left), b.Cast(cir.UInt32, right))
 	case BinOverflowMul: return b.Mul(b.Cast(cir.UInt32, left), b.Cast(cir.UInt32, right))
-	case BinIdentityEq: return b.Eq(left, right)
+	case BinIdentityEq:  return b.Eq(left, right)
 	case BinIdentityNeq: return b.Neq(left, right)
 	}
 	return left
@@ -1708,31 +1706,22 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 
 	recv := l.lowerExpr(b, e.Recv, fc)
 
-	// ADDED: Resolve the CIR type of the field being accessed
-	fieldVT := e.GetVType()
-	fieldCT := l.vtypeToCIR(fieldVT)
-	if fieldCT == nil {
-		fieldCT = l.vtypeToCIRFallback(fieldVT)
-	}
-
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		if e.Field == "length" {
-			return b.GetField(recv, "len", cir.UInt32)
+			return b.GetField(recv, "len")
 		}
 	case *VString:
 		if e.Field == "length" && rt.Mutable {
-			// Using UIntPtr to match standard string/array len sizing
-			return b.GetField(recv, "len", cir.UIntPtr) 
+			return b.GetField(recv, "len")
 		}
 	case *VClass:
-		return b.GetField(recv, e.Field, fieldCT) // ptr->field
+		return b.GetField(recv, e.Field)
 	case *VStruct:
-		return b.DotField(recv, e.Field, fieldCT) // val.field
+		return b.DotField(recv, e.Field)
 	}
-	
-	// Fallback
-	return b.GetField(recv, e.Field, fieldCT)
+
+	return b.GetField(recv, e.Field)
 }
 
 func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.Expr {
