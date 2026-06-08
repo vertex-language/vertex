@@ -1206,15 +1206,45 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 	case BinOr:
 		return b.LogOr(left, right)
 	case BinNilCoalesce:
-		// left ?? right  →  tmp = left; result = (tmp != NULL) ? tmp : right
-		ct := l.vtypeToCIRFallback(e.Left.GetVType())
-		tmp := b.Local(l.tempName(), ct)
-		result := b.Local(l.tempName(), ct)
-		b.Assign(tmp, left)
-		b.IfElse(b.Neq(tmp, cir.NullPtr()),
-			cir.B(func(b *cir.Builder) { b.Assign(result, tmp) }),
-			cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
-		)
+		leftVT := e.Left.GetVType()
+		optVT, isOpt := leftVT.(*VOptional)
+
+		var resultType cir.Type
+		if isOpt {
+			resultType = l.vtypeToCIR(optVT.Elem)
+			if resultType == nil {
+				resultType = l.vtypeToCIRFallback(optVT.Elem)
+			}
+		} else {
+			resultType = l.vtypeToCIRFallback(leftVT)
+		}
+
+		result := b.Local(l.tempName(), resultType)
+
+		if isOpt && !l.isPointerVType(optVT.Elem) {
+			// Value-type optional: tmp.has_value ? tmp.value : right
+			optCT := l.vtypeToCIRFallback(leftVT)
+			tmp := b.Local(l.tempName(), optCT)
+			b.Assign(tmp, left) // Copy struct
+
+			b.IfElse(b.DotField(tmp, "has_value"),
+				cir.B(func(b *cir.Builder) { b.Assign(result, b.DotField(tmp, "value")) }),
+				cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
+			)
+		} else {
+			// Pointer-type optional or non-optional fallback: tmp != NULL
+			leftCT := l.vtypeToCIR(leftVT)
+			if leftCT == nil {
+				leftCT = l.vtypeToCIRFallback(leftVT)
+			}
+			tmp := b.Local(l.tempName(), leftCT)
+			b.Assign(tmp, left)
+
+			b.IfElse(b.Neq(tmp, cir.NullPtr()),
+				cir.B(func(b *cir.Builder) { b.Assign(result, tmp) }),
+				cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
+			)
+		}
 		return result
 	case BinOverflowAdd:
 		return b.Add(b.Cast(cir.UInt32, left), b.Cast(cir.UInt32, right))
