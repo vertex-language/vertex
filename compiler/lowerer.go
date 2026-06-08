@@ -817,51 +817,50 @@ func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
-    var cond cir.Expr
-    switch c := st.Cond.(type) {
-    case *IfExprCond:
-        cond = l.lowerExpr(b, c.Expr, fc)
-    case *IfLetCond:
-        val := l.lowerExpr(b, c.Expr, fc)
-        valVT := c.Expr.GetVType()
-        optVT, isOpt := valVT.(*VOptional)
+	var cond cir.Expr
+	switch c := st.Cond.(type) {
+	case *IfExprCond:
+		cond = l.lowerExpr(b, c.Expr, fc)
+	case *IfLetCond:
+		val := l.lowerExpr(b, c.Expr, fc)
+		valVT := c.Expr.GetVType()
+		optVT, isOpt := valVT.(*VOptional)
 
-        if !isOpt || l.isPointerVType(optVT.Elem) {
-            // Pointer type: standard != NULL check
-            tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(valVT))
-            b.Assign(tmp, val)
-            fc.locals[c.Name] = tmp
-            cond = b.Neq(tmp, cir.NullPtr())
-        } else {
-            // Value type struct!
-            optCT := l.vtypeToCIRFallback(valVT)
-            tmp := b.Local(l.tempName(), optCT)
-            b.Assign(tmp, val) // Copy the struct by value
+		if !isOpt || l.isPointerVType(optVT.Elem) {
+			// Pointer optional or non-optional: standard != NULL check.
+			tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(valVT))
+			b.Assign(tmp, val)
+			fc.locals[c.Name] = tmp
+			cond = b.Neq(tmp, cir.NullPtr())
+		} else {
+			// Value-type struct optional — use the opt_T struct type for correct offsets.
+			optCT := l.vtypeToCIRFallback(valVT)
+			optSt, _ := optCT.(*cir.StructType)
+			tmp := b.Local(l.tempName(), optCT)
+			b.Assign(tmp, val)
 
-            // Extract the payload for the block binding
-            elemCT := l.vtypeToCIRFallback(optVT.Elem)
-            boundLocal := b.Local(c.Name, elemCT)
-            b.Assign(boundLocal, b.DotField(tmp, "value"))
-            fc.locals[c.Name] = boundLocal
+			elemCT := l.vtypeToCIRFallback(optVT.Elem)
+			boundLocal := b.Local(c.Name, elemCT)
+			b.Assign(boundLocal, b.DotField(tmp, optSt, "value", elemCT))
+			fc.locals[c.Name] = boundLocal
 
-            // Condition is just the boolean tag
-            cond = b.DotField(tmp, "has_value")
-        }
-    }
-    if cond == nil {
-        cond = cir.BoolLit(true)
-    }
-    thenBlk := cir.B(func(b *cir.Builder) { l.lowerBlock(b, st.Then, fc) })
-    if st.Else == nil {
-        b.If(cond, thenBlk)
-    } else {
-        elseBlk := cir.B(func(b *cir.Builder) { l.lowerStmt(b, st.Else, fc) })
-        b.IfElse(cond, thenBlk, elseBlk)
-    }
+			cond = b.DotField(tmp, optSt, "has_value", cir.Bool)
+		}
+	}
+	if cond == nil {
+		cond = cir.BoolLit(true)
+	}
+	thenBlk := cir.B(func(b *cir.Builder) { l.lowerBlock(b, st.Then, fc) })
+	if st.Else == nil {
+		b.If(cond, thenBlk)
+	} else {
+		elseBlk := cir.B(func(b *cir.Builder) { l.lowerStmt(b, st.Else, fc) })
+		b.IfElse(cond, thenBlk, elseBlk)
+	}
 }
 
 func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
-	// Range check first
+	// Range literal: lo..<hi or lo...hi.
 	if be, ok := st.Iter.(*BinaryExpr); ok &&
 		(be.Op == BinRangeHalfOpen || be.Op == BinRangeClosed) {
 		lo := l.lowerExpr(b, be.Left, fc)
@@ -877,10 +876,8 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 		} else {
 			cond = b.Lte(iRef, hi)
 		}
-
 		post := &cir.AssignExpr{
 			LHS: iRef,
-			// FIX: explicitly cast the increment literal to Int32
 			RHS: b.Add(iRef, b.Cast(cir.Int32, cir.IntLit(1))),
 		}
 		b.For(nil, cond, post, cir.B(func(b *cir.Builder) {
@@ -905,14 +902,11 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			elemCIR = l.vtypeToCIRFallback(it.Elem)
 		}
 		iRef := b.Local(l.tempName(), cir.UInt32)
-		
-		// FIX: Cast initialization and conditions to match the 32-bit loop counter
 		b.Assign(iRef, b.Cast(cir.UInt32, cir.UIntLit(0)))
 		post := &cir.AssignExpr{
 			LHS: iRef,
 			RHS: b.Add(iRef, b.Cast(cir.UInt32, cir.UIntLit(1))),
 		}
-		
 		limit := b.Cast(cir.UInt32, cir.UIntLit(uint64(it.Size)))
 		b.For(nil, b.Lt(iRef, limit), post, cir.B(func(b *cir.Builder) {
 			elemRef := b.Local(st.Var, elemCIR)
@@ -927,13 +921,10 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 			elemCIR = l.vtypeToCIRFallback(it.Elem)
 		}
 		iRef := b.Local(l.tempName(), cir.UInt32)
-		
-		// FIX: Cast initialization and conditions to match the 32-bit loop counter
 		b.Assign(iRef, b.Cast(cir.UInt32, cir.UIntLit(0)))
-		arrLen := b.GetField(iter, "len")
-		
+		arrLen := b.GetField(iter, l.gt.GArray, "len", cir.UInt32)
 		b.While(b.Lt(iRef, arrLen), cir.B(func(b *cir.Builder) {
-			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, "data"))
+			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, l.gt.GArray, "data", cir.VoidPtr))
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
 			b.Assign(elemRef, b.Index(dataPtr, iRef, elemCIR))
@@ -1174,7 +1165,6 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 			}
 			return []Expr{expr}
 		}
-
 		operands := collect(e)
 
 		finalCT := l.vtypeToCIR(e.GetVType())
@@ -1197,23 +1187,23 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 				optVT, isOpt := vt.(*VOptional)
 
 				if isOpt && !l.isPointerVType(optVT.Elem) {
-					// Value-type optional
-					tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(vt))
+					// Value-type optional — use the opt_T struct type for correct field offsets.
+					optCIR := l.vtypeToCIRFallback(vt)
+					optSt, _ := optCIR.(*cir.StructType)
+					tmp := b.Local(l.tempName(), optCIR)
 					b.Assign(tmp, val)
 
-					hasValueField := b.DotField(tmp, "has_value")
+					hasValueField := b.DotField(tmp, optSt, "has_value", cir.Bool)
 					cond := b.Eq(b.Cast(cir.Int32, hasValueField), cir.IntLit(1))
-
 					thenBlk := cir.B(func(b *cir.Builder) {
-						unwrapped := b.DotField(tmp, "value")
+						unwrapped := b.DotField(tmp, optSt, "value", finalCT)
 						b.Assign(result, b.Cast(finalCT, unwrapped))
 					})
 					b.IfElse(cond, thenBlk, build(idx+1))
 				} else {
-					// Pointer-type optional or non-optional fallback
+					// Pointer-type optional or plain fallback.
 					tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(vt))
 					b.Assign(tmp, val)
-
 					cond := b.Neq(tmp, cir.NullPtr())
 					thenBlk := cir.B(func(b *cir.Builder) {
 						b.Assign(result, b.Cast(finalCT, tmp))
@@ -1222,7 +1212,6 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 				}
 			})
 		}
-
 		b.Inline(build(0))
 		return result
 	}
@@ -1427,6 +1416,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		elemCIR = l.vtypeToCIRFallback(rt.Elem)
 	}
 	elemSize := b.SizeOf(elemCIR)
+	gaST := l.gt.GArray // *cir.StructType — required for correct field offsets
 
 	switch method {
 	case "push":
@@ -1443,10 +1433,10 @@ func (l *Lowerer) lowerDynArrayMethod(
 		return nil
 	case "pop":
 		tmp := b.Local(l.tempName(), elemCIR)
-		lenRef := b.GetField(recv, "len")
+		lenRef := b.GetField(recv, gaST, "len", cir.UInt32)
 		b.If(b.Gt(lenRef, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
-				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
+				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
 				idx := b.Sub(lenRef, cir.UIntLit(1))
 				b.Assign(tmp, b.Index(dataPtr, idx, elemCIR))
 				b.Stmt(b.Call("g_array_remove_index", recv, idx))
@@ -1455,10 +1445,10 @@ func (l *Lowerer) lowerDynArrayMethod(
 		return tmp
 	case "shift":
 		tmp := b.Local(l.tempName(), elemCIR)
-		lenRef := b.GetField(recv, "len")
+		lenRef := b.GetField(recv, gaST, "len", cir.UInt32)
 		b.If(b.Gt(lenRef, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
-				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
+				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
 				b.Assign(tmp, b.Index(dataPtr, cir.UIntLit(0), elemCIR))
 				b.Stmt(b.Call("g_array_remove_index", recv, cir.UIntLit(0)))
 			}),
@@ -1469,16 +1459,16 @@ func (l *Lowerer) lowerDynArrayMethod(
 		return nil
 	case "fill":
 		val := l.lowerExpr(b, args[0].Value, fc)
-		byteSize := b.Mul(b.Cast(cir.UIntSize, b.GetField(recv, "len")), b.SizeOf(elemCIR))
-		b.Stmt(b.Call("memset", b.GetField(recv, "data"), val, byteSize))
+		byteSize := b.Mul(b.Cast(cir.UIntSize, b.GetField(recv, gaST, "len", cir.UInt32)), b.SizeOf(elemCIR))
+		b.Stmt(b.Call("memset", b.GetField(recv, gaST, "data", cir.VoidPtr), val, byteSize))
 		return nil
 	case "reverse":
 		lo := b.Local(l.tempName(), cir.UInt32)
 		hi := b.Local(l.tempName(), cir.UInt32)
 		tmp2 := b.Local(l.tempName(), elemCIR)
 		b.Assign(lo, cir.UIntLit(0))
-		b.Assign(hi, b.Sub(b.GetField(recv, "len"), cir.UIntLit(1)))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
+		b.Assign(hi, b.Sub(b.GetField(recv, gaST, "len", cir.UInt32), cir.UIntLit(1)))
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
 		b.While(b.Lt(lo, hi),
 			cir.B(func(b *cir.Builder) {
 				b.Assign(tmp2, b.Index(dataPtr, lo, elemCIR))
@@ -1499,8 +1489,8 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.Assign(result, cir.IntLit(-1))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
@@ -1518,8 +1508,8 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.Assign(found, cir.BoolLit(false))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
@@ -1537,8 +1527,8 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.Assign(resultPtr, cir.NullPtr())
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				elem := b.AddrOf(b.Index(dataPtr, i, elemCIR))
 				b.If(b.CallPtr(cmpFn, b.Deref(elem)),
@@ -1556,11 +1546,11 @@ func (l *Lowerer) lowerDynArrayMethod(
 		out := b.Local(l.tempName(), l.gt.GArrayPtr)
 		b.Assign(out, b.Call("g_array_sized_new",
 			cir.BoolLit(false), cir.BoolLit(false),
-			elemSize, b.GetField(recv, "len")))
+			elemSize, b.GetField(recv, gaST, "len", cir.UInt32)))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				mapped := b.Local(l.tempName(), elemCIR)
 				b.Assign(mapped, b.CallPtr(mapFn, b.Index(dataPtr, i, elemCIR)))
@@ -1576,8 +1566,8 @@ func (l *Lowerer) lowerDynArrayMethod(
 			cir.BoolLit(false), cir.BoolLit(false), elemSize))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				elem := b.Index(dataPtr, i, elemCIR)
 				b.If(b.CallPtr(filterFn, elem),
@@ -1599,8 +1589,8 @@ func (l *Lowerer) lowerDynArrayMethod(
 			cir.BoolLit(false), cir.BoolLit(false), elemSize))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, b.Cast(cir.UInt32, start))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.LogAnd(b.Lt(i, b.Cast(cir.UInt32, end)), b.Lt(i, b.GetField(recv, "len"))),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.LogAnd(b.Lt(i, b.Cast(cir.UInt32, end)), b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32))),
 			cir.B(func(b *cir.Builder) {
 				tmp := b.Local(l.tempName(), elemCIR)
 				b.Assign(tmp, b.Index(dataPtr, i, elemCIR))
@@ -1612,20 +1602,27 @@ func (l *Lowerer) lowerDynArrayMethod(
 	case "concat":
 		other := l.lowerExpr(b, args[0].Value, fc)
 		out := b.Local(l.tempName(), l.gt.GArrayPtr)
-		totalLen := b.Add(b.GetField(recv, "len"), b.GetField(other, "len"))
+		totalLen := b.Add(
+			b.GetField(recv, gaST, "len", cir.UInt32),
+			b.GetField(other, gaST, "len", cir.UInt32),
+		)
 		b.Assign(out, b.Call("g_array_sized_new",
 			cir.BoolLit(false), cir.BoolLit(false), elemSize, totalLen))
 		b.Stmt(b.Call("g_array_append_vals",
-			out, b.GetField(recv, "data"), b.GetField(recv, "len")))
+			out,
+			b.GetField(recv, gaST, "data", cir.VoidPtr),
+			b.GetField(recv, gaST, "len", cir.UInt32)))
 		b.Stmt(b.Call("g_array_append_vals",
-			out, b.GetField(other, "data"), b.GetField(other, "len")))
+			out,
+			b.GetField(other, gaST, "data", cir.VoidPtr),
+			b.GetField(other, gaST, "len", cir.UInt32)))
 		return out
 	case "forEach":
 		forEachFn := l.lowerExpr(b, args[0].Value, fc)
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
-		b.While(b.Lt(i, b.GetField(recv, "len")),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.Stmt(b.CallPtr(forEachFn, b.Index(dataPtr, i, elemCIR)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
@@ -1706,22 +1703,30 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 
 	recv := l.lowerExpr(b, e.Recv, fc)
 
+	// Resolve result type for the field being accessed.
+	fieldVT := e.GetVType()
+	fieldCT := l.vtypeToCIR(fieldVT)
+	if fieldCT == nil {
+		fieldCT = l.vtypeToCIRFallback(fieldVT)
+	}
+
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		if e.Field == "length" {
-			return b.GetField(recv, "len")
+			return b.GetField(recv, l.gt.GArray, "len", cir.UInt32)
 		}
 	case *VString:
 		if e.Field == "length" && rt.Mutable {
-			return b.GetField(recv, "len")
+			return b.GetField(recv, l.gt.GString, "len", cir.UInt64)
 		}
 	case *VClass:
-		return b.GetField(recv, e.Field)
+		return b.GetField(recv, l.classTypes[rt.Name], e.Field, fieldCT)
 	case *VStruct:
-		return b.DotField(recv, e.Field)
+		return b.DotField(recv, l.structTypes[rt.Name], e.Field, fieldCT)
 	}
 
-	return b.GetField(recv, e.Field)
+	// Safe fallback: nil struct type → MIR uses offset 0.
+	return b.GetField(recv, nil, e.Field, fieldCT)
 }
 
 func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.Expr {
@@ -1735,7 +1740,7 @@ func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.
 		if elemCIR == nil {
 			elemCIR = l.vtypeToCIRFallback(rt.Elem)
 		}
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, "data"))
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, l.gt.GArray, "data", cir.VoidPtr))
 		return b.Index(dataPtr, idx, elemCIR)
 	case *VFixedArray:
 		elemCIR := l.vtypeToCIR(rt.Elem)
