@@ -510,7 +510,7 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 				}
 				return sym.Type
 			}
-			// NEW: Handle Enum(rawValue: X) initialization
+			// Handle Enum(rawValue: X) initialization
 			if sym.Kind == SymEnum {
 				if len(e.Args) == 1 && e.Args[0].Label == "rawValue" {
 					r.resolveExpr(e.Args[0].Value, scope)
@@ -525,8 +525,35 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 	}
 	if id, ok := e.Func.(*IdentExpr); ok {
 		if sym, ok2 := scope.Lookup(id.Name); ok2 {
-			if fn, ok3 := sym.Decl.(*FuncDecl); ok3 && fn.RetType != nil {
-				return r.resolveTypeExpr(fn.RetType, scope)
+			if fn, ok3 := sym.Decl.(*FuncDecl); ok3 {
+				// Propagate param types down to DotEnumExpr args (e.g. coinValue(c: .quarter))
+				posIdx := 0
+				for _, a := range e.Args {
+					if dot, ok4 := a.Value.(*DotEnumExpr); ok4 {
+						if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
+							var matched *Param
+							if a.Label != "" {
+								for _, p := range fn.Params {
+									if p.Name == a.Label {
+										matched = p
+										break
+									}
+								}
+							} else if posIdx < len(fn.Params) {
+								matched = fn.Params[posIdx]
+							}
+							if matched != nil {
+								dot.SetVType(r.resolveTypeExpr(matched.Type, scope))
+							}
+						}
+					}
+					if a.Label == "" {
+						posIdx++
+					}
+				}
+				if fn.RetType != nil {
+					return r.resolveTypeExpr(fn.RetType, scope)
+				}
 			}
 		}
 	}
