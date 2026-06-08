@@ -1166,6 +1166,71 @@ func (l *Lowerer) enumCaseExpr(b *cir.Builder, subjType VType, caseName string) 
 }
 
 func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) cir.Expr {
+	// Intercept ?? before eager evaluation to preserve short-circuiting
+	// and fix left-associative AST parsing.
+	if e.Op == BinNilCoalesce {
+		var collect func(expr Expr) []Expr
+		collect = func(expr Expr) []Expr {
+			if bin, ok := expr.(*BinaryExpr); ok && bin.Op == BinNilCoalesce {
+				return append(collect(bin.Left), bin.Right)
+			}
+			return []Expr{expr}
+		}
+		
+		// Flattens (((a ?? b) ?? c) ?? 0) -> [a, b, c, 0]
+		operands := collect(e)
+
+		finalCT := l.vtypeToCIR(e.GetVType())
+		if finalCT == nil {
+			finalCT = l.vtypeToCIRFallback(e.GetVType())
+		}
+		result := b.Local(l.tempName(), finalCT)
+
+		var build func(idx int) *cir.Block
+		build = func(idx int) *cir.Block {
+			if idx == len(operands)-1 {
+				return cir.B(func(b *cir.Builder) {
+					val := l.lowerExpr(b, operands[idx], fc)
+					b.Assign(result, b.Cast(finalCT, val))
+				})
+			}
+			return cir.B(func(b *cir.Builder) {
+				val := l.lowerExpr(b, operands[idx], fc)
+				vt := operands[idx].GetVType()
+				optVT, isOpt := vt.(*VOptional)
+
+				if isOpt && !l.isPointerVType(optVT.Elem) {
+					// Value-type optional
+					tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(vt))
+					b.Assign(tmp, val)
+
+					// Cast the bool field to int32 to bypass backend equality-sizing bugs
+					cond := b.Eq(b.Cast(cir.Int32, b.DotField(tmp, "has_value")), cir.IntLit(1))
+					thenBlk := cir.B(func(b *cir.Builder) {
+						unwrapped := b.DotField(tmp, "value")
+						b.Assign(result, b.Cast(finalCT, unwrapped))
+					})
+					b.IfElse(cond, thenBlk, build(idx+1))
+				} else {
+					// Pointer-type optional or non-optional fallback
+					tmp := b.Local(l.tempName(), l.vtypeToCIRFallback(vt))
+					b.Assign(tmp, val)
+
+					cond := b.Neq(tmp, cir.NullPtr())
+					thenBlk := cir.B(func(b *cir.Builder) {
+						b.Assign(result, b.Cast(finalCT, tmp))
+					})
+					b.IfElse(cond, thenBlk, build(idx+1))
+				}
+			})
+		}
+		
+		// Build the nested right-associative blocks
+		b.Inline(build(0))
+		return result
+	}
+
+	// Eager evaluation for standard binary operators
 	left := l.lowerExpr(b, e.Left, fc)
 	right := l.lowerExpr(b, e.Right, fc)
 	switch e.Op {
@@ -1205,47 +1270,6 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 		return b.LogAnd(left, right)
 	case BinOr:
 		return b.LogOr(left, right)
-	case BinNilCoalesce:
-		leftVT := e.Left.GetVType()
-		optVT, isOpt := leftVT.(*VOptional)
-
-		var resultType cir.Type
-		if isOpt {
-			resultType = l.vtypeToCIR(optVT.Elem)
-			if resultType == nil {
-				resultType = l.vtypeToCIRFallback(optVT.Elem)
-			}
-		} else {
-			resultType = l.vtypeToCIRFallback(leftVT)
-		}
-
-		result := b.Local(l.tempName(), resultType)
-
-		if isOpt && !l.isPointerVType(optVT.Elem) {
-			// Value-type optional: Explicitly compare has_value == true for the backend encoder
-			optCT := l.vtypeToCIRFallback(leftVT)
-			tmp := b.Local(l.tempName(), optCT)
-			b.Assign(tmp, left) // Copy struct
-
-			b.IfElse(b.Eq(b.DotField(tmp, "has_value"), cir.BoolLit(true)),
-				cir.B(func(b *cir.Builder) { b.Assign(result, b.DotField(tmp, "value")) }),
-				cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
-			)
-		} else {
-			// Pointer-type optional or non-optional fallback: tmp != NULL
-			leftCT := l.vtypeToCIR(leftVT)
-			if leftCT == nil {
-				leftCT = l.vtypeToCIRFallback(leftVT)
-			}
-			tmp := b.Local(l.tempName(), leftCT)
-			b.Assign(tmp, left)
-
-			b.IfElse(b.Neq(tmp, cir.NullPtr()),
-				cir.B(func(b *cir.Builder) { b.Assign(result, tmp) }),
-				cir.B(func(b *cir.Builder) { b.Assign(result, right) }),
-			)
-		}
-		return result
 	case BinOverflowAdd:
 		return b.Add(b.Cast(cir.UInt32, left), b.Cast(cir.UInt32, right))
 	case BinOverflowSub:
