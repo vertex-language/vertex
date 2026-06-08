@@ -1068,8 +1068,6 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 	case *BoolLitExpr:
 		return cir.BoolLit(e.Value)
 	case *CharLitExpr:
-		// A char literal is a single code point; emit it as an integer constant
-		// so it is compatible with C's char arithmetic and comparisons.
 		return cir.IntLit(int64(e.Value))
 	case *StringLitExpr:
 		return l.mod.StringLit(l.tempName(), e.Value)
@@ -1080,7 +1078,6 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		return fc.varRef(b, e.Name)
 
 	case *DotEnumExpr:
-		// NEW: Pass the builder down to lowerDotEnum
 		return l.lowerDotEnum(b, e)
 
 	case *BinaryExpr:
@@ -1124,7 +1121,9 @@ func (l *Lowerer) lowerExpr(b *cir.Builder, expr Expr, fc *funcCtx) cir.Expr {
 		}
 		return inner
 
-	case *ReinterpretExpr:
+	case *CastExpr:
+		// Handles all 'expr as typeExpr' forms: pointer↔pointer reinterpret,
+		// integer widening/truncation, float↔int conversion, pointer↔integer.
 		inner := l.lowerExpr(b, e.Value, fc)
 		targetVT := l.resolveTypeExprVType(e.TargetType)
 		ct := l.vtypeToCIR(targetVT)

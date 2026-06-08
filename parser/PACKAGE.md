@@ -29,7 +29,7 @@ const (
 	VertexLexerASM                  = 24
 	VertexLexerWEAK                 = 25
 	VertexLexerCONST_KW             = 26
-	VertexLexerREINTERPRET          = 27
+	VertexLexerAS                   = 27
 	VertexLexerASYNC                = 28
 	VertexLexerTHREAD               = 29
 	VertexLexerPROCESS              = 30
@@ -135,7 +135,7 @@ const (
 	VertexParserASM                  = 24
 	VertexParserWEAK                 = 25
 	VertexParserCONST_KW             = 26
-	VertexParserREINTERPRET          = 27
+	VertexParserAS                   = 27
 	VertexParserASYNC                = 28
 	VertexParserTHREAD               = 29
 	VertexParserPROCESS              = 30
@@ -1087,6 +1087,8 @@ func NewExprContext(parser antlr.Parser, parent antlr.ParserRuleContext, invokin
 
 func (s *ExprContext) AMP() antlr.TerminalNode
 
+func (s *ExprContext) AS() antlr.TerminalNode
+
 func (s *ExprContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 
 func (s *ExprContext) AllCOMMA() []antlr.TerminalNode
@@ -1184,8 +1186,6 @@ func (s *ExprContext) QUESTION() antlr.TerminalNode
 func (s *ExprContext) RBRACE() antlr.TerminalNode
 
 func (s *ExprContext) RBRACKET() antlr.TerminalNode
-
-func (s *ExprContext) REINTERPRET() antlr.TerminalNode
 
 func (s *ExprContext) RESULT() antlr.TerminalNode
 
@@ -1820,9 +1820,6 @@ type IExprContext interface {
 	RESULT() antlr.TerminalNode
 	OK() antlr.TerminalNode
 	ERR_KW() antlr.TerminalNode
-	REINTERPRET() antlr.TerminalNode
-	LT() antlr.TerminalNode
-	GT() antlr.TerminalNode
 	AsmExpr() IAsmExprContext
 	LSHIFT() antlr.TerminalNode
 	RSHIFT() antlr.TerminalNode
@@ -1840,6 +1837,8 @@ type IExprContext interface {
 	NIL_COALESCE() antlr.TerminalNode
 	EQ() antlr.TerminalNode
 	NEQ() antlr.TerminalNode
+	LT() antlr.TerminalNode
+	GT() antlr.TerminalNode
 	LEQ() antlr.TerminalNode
 	GEQ() antlr.TerminalNode
 	IDENTITY_EQ() antlr.TerminalNode
@@ -1848,6 +1847,7 @@ type IExprContext interface {
 	LOGICAL_OR() antlr.TerminalNode
 	QUESTION() antlr.TerminalNode
 	COLON() antlr.TerminalNode
+	AS() antlr.TerminalNode
 
 	// IsExprContext differentiates from other interfaces.
 	IsExprContext()

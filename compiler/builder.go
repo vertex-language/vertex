@@ -591,21 +591,20 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &NilLitExpr{exprBase: exprBase{Pos: pos}}
 	}
 
-	// ── reinterpret<T>(expr) ─────────────────────────────────────────────────
-	if ctx.REINTERPRET() != nil {
+	// ── Cast: expr as typeExpr (§17.5) ────────────────────────────────────────
+	// Checked before isPrefix: the left operand may legitimately start with a
+	// prefix token (e.g. '&opt as *const char'), which would otherwise cause
+	// the isPrefix guard below to misroute the node.
+	if ctx.AS() != nil && nExprs == 1 {
 		typeExprs := ctx.AllTypeExpr()
 		var targetType TypeExpr
 		if len(typeExprs) > 0 {
 			targetType = b.buildTypeExpr(typeExprs[0])
 		}
-		var val Expr
-		if len(exprs) > 0 {
-			val = b.buildExpr(exprs[0])
-		}
-		return &ReinterpretExpr{
+		return &CastExpr{
 			exprBase:   exprBase{Pos: pos},
 			TargetType: targetType,
-			Value:      val,
+			Value:      b.buildExpr(exprs[0]),
 		}
 	}
 

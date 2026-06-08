@@ -225,6 +225,49 @@ let b: int8   = int8(i)        // narrowing — wraps on overflow
 * Narrowing integer conversions wrap on overflow, identical to `&+`, `&-`, `&*`.
 * Widening conversions (e.g. `int` → `double`) are always value-preserving.
 
+
+## 6.1 Casting — `as`
+
+The `as` operator performs explicit type conversion. It is used for numeric widening, pointer reinterpretation, and float-to-integer truncation.
+
+**Vertex**
+```vertex
+
+// ── pointer → pointer (no-op at runtime) ─────────────────────────────────────
+var opt: int32 = 1
+libc.setsockopt(sfd, 1, 2, &opt as *const char, 4)
+
+var buf: [256]uint8
+libc.recv(fd, &buf as *char, 256, 0)
+
+// ── integer widening ──────────────────────────────────────────────────────────
+let small: int32 = 42
+let wide = small as int64          // sign-extended
+let big  = small as uint64         // zero-extended (backend validates sign safety)
+
+// ── float → int (truncate toward zero) ───────────────────────────────────────
+let f: float64 = 3.99
+let i = f as int32                 // → 3
+
+// ── int → float ───────────────────────────────────────────────────────────────
+let count: int32 = 7
+let ratio = count as float64 / total as float64
+
+// ── pointer → integer (reinterpret) ──────────────────────────────────────────
+let ptr: *uint8 = buf.data()
+let addr = ptr as uint64           // raw address value
+
+// ── integer → pointer (reinterpret) ──────────────────────────────────────────
+let mmio: uint64 = 0xFFFF_0000
+let reg = mmio as *uint32          // MMIO register access
+
+// ── chaining (left-associative) ───────────────────────────────────────────────
+let x = value as int32 as int64   // (value as int32) as int64
+
+// ── address-of then cast — & binds tighter ───────────────────────────────────
+libc.memset(&header as *char, 0, size)   // (&header) as *char
+```
+
 ---
 
 ## 7. Arithmetic Operators

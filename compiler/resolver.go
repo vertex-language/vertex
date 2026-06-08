@@ -364,7 +364,7 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		l := r.resolveExpr(e.Left, scope)
 		rt := r.resolveExpr(e.Right, scope)
 
-		// NEW: Context inference for DotEnumExpr in comparisons
+		// Context inference for DotEnumExpr in comparisons.
 		if dot, ok := e.Left.(*DotEnumExpr); ok {
 			if _, isUnknown := dot.GetVType().(*VUnknown); isUnknown {
 				dot.SetVType(rt)
@@ -381,7 +381,7 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 			BinAnd, BinOr, BinIdentityEq, BinIdentityNeq:
 			t = &VBool{}
 		case BinRangeHalfOpen, BinRangeClosed:
-			t = &VRange{Elem: l} // not VDynArray — a range is not a GLib array
+			t = &VRange{Elem: l}
 		case BinNilCoalesce:
 			if opt, ok := l.(*VOptional); ok {
 				t = opt.Elem
@@ -457,7 +457,7 @@ func (r *Resolver) resolveExpr(expr Expr, scope *Scope) VType {
 		r.resolveExpr(e.Value, scope)
 		t = r.resolveTypeExpr(e.TargetType, scope)
 
-	case *ReinterpretExpr:
+	case *CastExpr:
 		r.resolveExpr(e.Value, scope)
 		t = r.resolveTypeExpr(e.TargetType, scope)
 

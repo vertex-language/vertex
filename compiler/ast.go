@@ -463,8 +463,11 @@ type FloatLitExpr struct {
 	Is32Bit bool
 }
 
-// ReinterpretExpr is reinterpret<T>(expr) — zero-cost raw pointer reinterpretation.
-type ReinterpretExpr struct {
+// CastExpr is 'expr as typeExpr' — the unified cast and reinterpretation
+// operator (§17.5). The backend determines the operation from operand types:
+// pointer↔pointer is a no-op reinterpret; numeric combinations are widening,
+// truncation, or float↔int conversion as appropriate.
+type CastExpr struct {
 	exprBase
 	TargetType TypeExpr
 	Value      Expr

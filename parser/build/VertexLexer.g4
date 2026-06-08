@@ -24,9 +24,12 @@
 //   • inout, out, clobber are reserved for asm() constraint syntax (§47).
 //     They would be very unusual variable names in systems code, and the
 //     asm() form is confined to intrinsics packages anyway.
-//   • reinterpret is a keyword so that 'reinterpret<T>(expr)' is unambiguous
-//     at the parser level — the LT/GT tokens cannot be mistaken for
-//     comparison operators when immediately preceded by this token.
+//   • as is promoted to a keyword so 'expr as typeExpr' is unambiguous in
+//     binary position. It is the unified cast and reinterpretation operator
+//     (§17.5), replacing the former reinterpret<T>(expr) prefix form. The
+//     backend determines the operation from the operand types at compile time:
+//     pointer↔pointer is a no-op reinterpretation; numeric combinations are
+//     widening, truncation, or float↔int conversion as appropriate.
 //   • char values use single-quote literals ('A', '\n') — a distinct token
 //     from double-quoted STRING_LIT. The backend validates that exactly one
 //     Unicode code unit is represented. string continues to use "…".
@@ -65,13 +68,20 @@ ASM     : 'asm' ;
 WEAK     : 'weak' ;
 CONST_KW : 'const' ;          // only valid in *const T — context enforced by backend
 
-// ── Cast keywords ─────────────────────────────────────────────────────────────
-// reinterpret<T>(expr) — raw pointer reinterpretation. Promoted to a keyword
-// so the parser can unambiguously treat the immediately following '<' as the
-// opening of a type-argument list rather than a less-than comparison.
-// Backend validates: T must be a pointer type; expr must be a pointer or
-// addressable value. Zero runtime cost — type annotation only.
-REINTERPRET : 'reinterpret' ;
+// ── Cast keyword (§17.5) ──────────────────────────────────────────────────────
+// 'expr as typeExpr' is the unified cast and reinterpretation operator.
+// Promoted to a keyword so the parser recognises it unambiguously in
+// binary position — the token immediately distinguishes a cast from a
+// comparison or any other binary operator, and typeExpr never contains AS,
+// so no lookahead conflict arises on the right-hand side.
+//
+// Backend semantics by operand-type pair:
+//   &opt as *const char   — pointer-to-pointer, no-op at runtime
+//   42   as int64         — integer widening, sign-extended
+//   3.14 as int32         — float-to-int, truncated toward zero
+//   42   as float32       — integer-to-float conversion
+//   ptr  as int64         — pointer-to-integer reinterpret
+AS : 'as' ;
 
 // ── Concurrency qualifiers (§36, §39–§41) ─────────────────────────────────────
 ASYNC   : 'async' ;

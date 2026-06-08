@@ -6,7 +6,9 @@
 //
 //   postfix   .method()  .field  [i]  ()            ← listed first in expr
 //   prefix    - ! ~   &  (address-of)
-//   binary    << >>
+//   binary    as T                                   (§17.5 cast / reinterpret,
+//                                                    highest-precedence binary op)
+//             << >>
 //             * / % &*
 //             + - &+ &-
 //             & ^ |                                  (bitwise AND, XOR, OR)
@@ -28,8 +30,10 @@
 //   • typeAliasDecl is accepted inside blocks; backend restricts to package scope.
 //   • Assignments and compound assignments share exprOrAssignStmt; the backend
 //     validates that the left-hand expression is an addressable lvalue.
-//   • reinterpret<T>(expr) accepts any expr as its argument; backend validates
-//     that T is a pointer type and expr is a pointer or addressable value.
+//   • expr AS typeExpr accepts any expr on the left and any typeExpr on the
+//     right; the backend validates that the combination represents a legal
+//     conversion or reinterpretation (e.g. pointer↔pointer, int widening,
+//     float truncation, pointer↔integer reinterpret).
 //   • Expected(channel, string) accepts any IDENTIFIER as the channel name;
 //     backend validates it is a known channel (stdout).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -373,10 +377,15 @@ assignOp
 // An empty '{}' on an identifier is parsed as a zero-field struct literal.
 // Backend rejects it if the struct type has required fields.
 //
-// ── reinterpret<T>(expr) ambiguity note ──────────────────────────────────────
-// Because REINTERPRET is a dedicated keyword, the parser knows that any LT
-// immediately following it opens a type-argument list, not a comparison.
-// No semantic predicate or lookahead conflict arises.
+// ── 'as' cast / reinterpret note (§17.5) ─────────────────────────────────────
+// 'expr AS typeExpr' is the highest-precedence binary operator. It is
+// left-associative, so 'x as int32 as int64' parses as '(x as int32) as int64'.
+// typeExpr never contains the AS token, so no lookahead conflict arises on
+// the right-hand side. Because ANTLR4 gives non-left-recursive (prefix)
+// alternatives higher effective binding than left-recursive (binary) ones in
+// a left-recursive rule, '&opt as *const char' naturally parses as
+// '(&opt) as *const char' — address-of is applied first, then the pointer is
+// cast. Parentheses are always accepted for explicitness.
 //
 // ── Bitwise binary vs. address-of prefix ambiguity note ──────────────────────
 // AMP serves two roles: binary bitwise AND ('expr AMP expr') and unary
@@ -401,6 +410,10 @@ expr
     | expr DOT IDENTIFIER                           // field / property: a.field
     | expr LBRACKET expr RBRACKET                   // subscript:    a[i], map["key"]
     | expr LPAREN argList? RPAREN                   // call:         f(args)
+
+    // ── Cast / reinterpret (§17.5) — highest-precedence binary operator ───────
+    // Left-associative. Backend determines the operation from operand types.
+    | expr AS typeExpr
 
     // ── Binary operators (high → low per §17) ────────────────────────────────
     | expr (LSHIFT | RSHIFT) expr                            // §9  shift
@@ -437,7 +450,6 @@ expr
     | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET                 // §24 array literal [a, b, …]
     | anonFuncExpr                                                   // §35 anonymous function
     | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN                  // §38.3 Result(Ok,v)/Result(Err,e)
-    | REINTERPRET LT typeExpr GT LPAREN expr RPAREN                  // raw pointer reinterpretation
     | asmExpr                                                        // §47 inline assembly
     ;
 
