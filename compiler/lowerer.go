@@ -625,72 +625,78 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
-    vtype := d.Value.GetVType()
-    if d.TypeHint != nil {
-        vtype = l.resolveTypeExprVType(d.TypeHint)
-    }
-    if vtype == nil {
-        vtype = &VUnknown{}
-    }
+	vtype := d.Value.GetVType()
+	if d.TypeHint != nil {
+		vtype = l.resolveTypeExprVType(d.TypeHint)
+	}
+	if vtype == nil {
+		vtype = &VUnknown{}
+	}
 
-    if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
-        if da, isDyn := vtype.(*VDynArray); isDyn {
-            vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
-        }
-    }
+	if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+		if da, isDyn := vtype.(*VDynArray); isDyn {
+			vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
+		}
+	}
 
-    autoDeref := false
-    if d.TypeHint == nil {
-        if ptr, isPtr := vtype.(*VPointer); isPtr {
-            vtype = ptr.Elem
-            autoDeref = true
-        }
-    }
+	autoDeref := false
+	if d.TypeHint == nil {
+		if ptr, isPtr := vtype.(*VPointer); isPtr {
+			vtype = ptr.Elem
+			autoDeref = true
+		}
+	}
 
-    for i, name := range d.Binding.Names {
-        _ = i
-        ref := l.declareLocal(b, name, vtype, d.IsLet)
-        fc.locals[name] = ref
+	for i, name := range d.Binding.Names {
+		_ = i
+		ref := l.declareLocal(b, name, vtype, d.IsLet)
+		fc.locals[name] = ref
 
-        if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
-            if fa, isFixed := vtype.(*VFixedArray); isFixed {
-                elemCIR := l.vtypeToCIR(fa.Elem)
-                if elemCIR == nil {
-                    elemCIR = l.vtypeToCIRFallback(fa.Elem)
-                }
-                for j, elem := range arrLit.Elems {
-                    val := l.lowerExpr(b, elem, fc)
-                    if elemCIR != nil {
-                        val = b.Cast(elemCIR, val)
-                    }
-                    b.Assign(b.Index(ref, cir.IntLit(int64(j)), elemCIR), val)
-                }
-                continue
-            }
-        }
+		if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+			if fa, isFixed := vtype.(*VFixedArray); isFixed {
+				elemCIR := l.vtypeToCIR(fa.Elem)
+				if elemCIR == nil {
+					elemCIR = l.vtypeToCIRFallback(fa.Elem)
+				}
+				for j, elem := range arrLit.Elems {
+					val := l.lowerExpr(b, elem, fc)
+					if elemCIR != nil {
+						val = b.Cast(elemCIR, val)
+					}
+					b.Assign(b.Index(ref, cir.IntLit(int64(j)), elemCIR), val)
+				}
+				continue
+			}
+		}
 
-        initExpr := l.lowerExpr(b, d.Value, fc)
-        if autoDeref && initExpr != nil {
-            elemCIR := l.vtypeToCIR(vtype)
-            if elemCIR == nil {
-                elemCIR = l.vtypeToCIRFallback(vtype)
-            }
-            initExpr = cir.Deref(initExpr, elemCIR)
-        }
-        
-        if initExpr != nil {
-            // NEW: Implicitly wrap optionals and nil literals
-            initExpr = l.wrapOptional(vtype, d.Value.GetVType(), initExpr)
-            
-            // Only Cast if it's NOT an optional struct (CompoundLits shouldn't be explicitly cast)
-            if _, isOpt := vtype.(*VOptional); !isOpt {
-                if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
-                    initExpr = b.Cast(targetCT, initExpr)
-                }
-            }
-            b.Assign(ref, initExpr)
-        }
-    }
+		initExpr := l.lowerExpr(b, d.Value, fc)
+		if autoDeref && initExpr != nil {
+			elemCIR := l.vtypeToCIR(vtype)
+			if elemCIR == nil {
+				elemCIR = l.vtypeToCIRFallback(vtype)
+			}
+			initExpr = cir.Deref(initExpr, elemCIR)
+		}
+
+		if initExpr != nil {
+			initExpr = l.wrapOptional(vtype, d.Value.GetVType(), initExpr)
+
+			// Do NOT cast struct types. A struct compound literal must reach the
+			// MIR lowerer as a bare *c.CompoundLiteralExpr so the AssignStmt
+			// handler can detect it, spill the struct to a stack slot, and record
+			// addressTaken. Wrapping it in a CastExpr defeats that detection,
+			// causing DotFieldExpr reads to fall through to the broken shift-based
+			// fallback instead of the direct memory-load fast path.
+			if _, isOpt := vtype.(*VOptional); !isOpt {
+				if _, isStruct := vtype.(*VStruct); !isStruct {
+					if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
+						initExpr = b.Cast(targetCT, initExpr)
+					}
+				}
+			}
+			b.Assign(ref, initExpr)
+		}
+	}
 }
 
 func (l *Lowerer) declareLocal(b *cir.Builder, name string, vt VType, isLet bool) cir.Expr {
