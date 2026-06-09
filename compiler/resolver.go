@@ -106,6 +106,14 @@ func (r *Resolver) resolveDecls(file *File) {
 func (r *Resolver) resolveFunc(fn *FuncDecl) {
 	fnScope := NewScope(r.pkg)
 
+	// NEW: Register generic type parameters in the function's scope
+	for _, tparam := range fn.TypeParams {
+		fnScope.Define(&Symbol{
+			Name: tparam, Kind: SymTypeAlias,
+			Type: &VGenericParam{Name: tparam},
+		})
+	}
+
 	if fn.Receiver != nil {
 		recvType := r.resolveTypeExpr(fn.Receiver.Type, fnScope)
 		if pt, ok := recvType.(*VPointer); ok {
@@ -132,8 +140,18 @@ func (r *Resolver) resolveFunc(fn *FuncDecl) {
 }
 
 func (r *Resolver) resolveStruct(d *StructDecl) {
+	structScope := NewScope(r.pkg) // NEW: Structs need their own scope now
+	
+	// NEW: Register generic type parameters in the struct's scope
+	for _, tparam := range d.TypeParams {
+		structScope.Define(&Symbol{
+			Name: tparam, Kind: SymTypeAlias,
+			Type: &VGenericParam{Name: tparam},
+		})
+	}
+	
 	for _, f := range d.Fields {
-		r.resolveTypeExpr(f.Type, r.pkg)
+		r.resolveTypeExpr(f.Type, structScope) // UPDATED: Pass structScope
 	}
 }
 

@@ -88,9 +88,10 @@ const (
 )
 
 type StructDecl struct {
-	Pos    Pos
-	Name   string
-	Fields []*FieldDecl
+	Pos        Pos
+	Name       string
+	TypeParams []string // NEW: generic param names, e.g., ["T"]
+	Fields     []*FieldDecl
 }
 
 type FieldDecl struct {
@@ -173,9 +174,10 @@ type TypeExpr interface {
 }
 
 type NamedTypeExpr struct {
-	Pos  Pos
-	Pkg  string // qualifier, e.g. "core" in "core.Context"; "" if none
-	Name string // e.g. "int32", "Animal"
+	Pos      Pos
+	Pkg      string
+	Name     string
+	TypeArgs []TypeExpr // NEW: e.g., <int32>
 }
 
 type PointerTypeExpr struct {
@@ -505,6 +507,7 @@ type DotEnumExpr struct {
 type StructLitExpr struct {
 	exprBase
 	TypeName string
+	TypeArgs []TypeExpr // NEW: e.g., Box<int32>
 	Fields   []*StructLitField
 }
 
@@ -604,8 +607,9 @@ type TernaryExpr struct {
 
 type CallExpr struct {
 	exprBase
-	Func Expr
-	Args []*Arg
+	Func     Expr
+	TypeArgs []TypeExpr // NEW: e.g., identity<int32>
+	Args     []*Arg
 }
 
 type MethodCallExpr struct {

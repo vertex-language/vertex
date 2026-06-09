@@ -398,3 +398,14 @@ func IsBuiltinType(name string) bool {
 	_, ok := BuiltinTypes[name]
 	return ok
 }
+
+// VGenericParam represents an unresolved generic type parameter (e.g., 'T').
+type VGenericParam struct { Name string }
+
+func (*VGenericParam) vtypeNode()        {}
+func (t *VGenericParam) String() string    { return t.Name }
+func (*VGenericParam) CIRType() cir.Type   { return nil }
+func (t *VGenericParam) Equal(o VType) bool {
+	u, ok := o.(*VGenericParam)
+	return ok && t.Name == u.Name
+}

@@ -166,6 +166,14 @@ func (b *ASTBuilder) buildParamList(ctx parser.IParamListContext) []*Param {
 
 func (b *ASTBuilder) buildStructDecl(ctx parser.IStructDeclContext) *StructDecl {
 	s := &StructDecl{Pos: b.ctxPos(ctx), Name: ctx.IDENTIFIER().GetText()}
+	
+	// NEW: Capture generic parameters (e.g., <T, U>)
+	if ctx.GenericParams() != nil {
+		for _, id := range ctx.GenericParams().AllIDENTIFIER() {
+			s.TypeParams = append(s.TypeParams, id.GetText())
+		}
+	}
+	
 	for _, f := range ctx.AllStructFieldDecl() {
 		s.Fields = append(s.Fields, &FieldDecl{
 			Pos:  b.ctxPos(f),
@@ -289,7 +297,6 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 
 	switch {
 	case ctx.STAR() != nil:
-		// *T, *const T, *T?, *const T?
 		var elem TypeExpr
 		if len(subExprs) > 0 {
 			elem = b.buildTypeExpr(subExprs[0])
@@ -301,7 +308,6 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			Optional: ctx.QUESTION() != nil,
 		}
 	case ctx.LBRACKET() != nil && ctx.RBRACKET() != nil:
-		// [T]
 		var elem TypeExpr
 		if len(subExprs) > 0 {
 			elem = b.buildTypeExpr(subExprs[0])
@@ -325,10 +331,7 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 		}
 		return te
 		
-	// ── Test & Error Types (MUST precede generic tuple LPAREN) ───────────────
-	
 	case ctx.RESULT() != nil:
-		// Result(T, E)
 		rt := &ResultTypeExpr{Pos: pos}
 		if len(subExprs) >= 2 {
 			rt.Ok = b.buildTypeExpr(subExprs[0])
@@ -336,7 +339,6 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 		}
 		return rt
 	case ctx.EXPECTED() != nil:
-		// Expected(typeExpr, "value")
 		var returnType TypeExpr
 		if len(subExprs) > 0 {
 			returnType = b.buildTypeExpr(subExprs[0])
@@ -351,11 +353,8 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			Channel:    "stdout",
 			Value:      val,
 		}
-
-	// ── Tuples & Named Types ──────────────────────────────────────────────────
 	
 	case ctx.LPAREN() != nil && ctx.RPAREN() != nil:
-		// () or (T, T) tuple
 		tt := &TupleTypeExpr{Pos: pos}
 		if ctx.TupleTypeElems() != nil {
 			for _, te := range ctx.TupleTypeElems().AllTupleTypeElem() {
@@ -369,7 +368,6 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 		}
 		return tt
 	case ctx.BaseType() != nil:
-		// Named type, possibly optional
 		bt := ctx.BaseType()
 		var parts []string
 		for _, id := range bt.AllIDENTIFIER() {
@@ -383,6 +381,14 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			name = parts[0]
 		}
 		named := &NamedTypeExpr{Pos: pos, Pkg: pkg, Name: name}
+		
+		// NEW: Extract Type Arguments if present (<T, U>)
+		if ctx.LT() != nil && ctx.GT() != nil {
+			for _, te := range subExprs {
+				named.TypeArgs = append(named.TypeArgs, b.buildTypeExpr(te))
+			}
+		}
+		
 		if ctx.QUESTION() != nil {
 			return &OptionalTypeExpr{Pos: pos, Elem: named}
 		}
@@ -576,7 +582,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 	nExprs := len(exprs)
 	startTok := ctx.GetStart().GetTokenType()
 
-	// ── Leaf / unique primary forms ──────────────────────────────────────────
 	if ctx.AnonFuncExpr() != nil {
 		return b.buildAnonFunc(ctx.AnonFuncExpr())
 	}
@@ -591,10 +596,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &NilLitExpr{exprBase: exprBase{Pos: pos}}
 	}
 
-	// ── Cast: expr as typeExpr (§17.5) ────────────────────────────────────────
-	// Checked before isPrefix: the left operand may legitimately start with a
-	// prefix token (e.g. '&opt as *const char'), which would otherwise cause
-	// the isPrefix guard below to misroute the node.
 	if ctx.AS() != nil && nExprs == 1 {
 		typeExprs := ctx.AllTypeExpr()
 		var targetType TypeExpr
@@ -608,13 +609,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── [T](args) / [T]() array constructor ──────────────────────────────────
-	// ANTLR parses [char](1024) as the call alternative (expr LPAREN argList RPAREN)
-	// where [char] is the function expr. startTok is LBRACKET (inherited from
-	// the inner expr) so isPrefix fires and the postfix call block is never
-	// reached. ctx.LBRACKET() is nil on the call alternative because LBRACKET
-	// is a terminal of the nested expr, not this rule — that is the reliable
-	// discriminant.
 	if startTok == parser.VertexLexerLBRACKET &&
 		ctx.LPAREN() != nil && ctx.RPAREN() != nil &&
 		ctx.LBRACKET() == nil && nExprs == 1 {
@@ -630,7 +624,36 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── Postfix: leading child is an expr (start token is NOT an operator) ───
+	// ── Generic Call / Struct Literal / Qualified Struct Literal ─────────────
+	if ctx.QualifiedIdent() != nil {
+		qName := ctx.QualifiedIdent().GetText()
+		var typeArgs []TypeExpr
+		
+		if ctx.LT() != nil && ctx.GT() != nil {
+			for _, te := range ctx.AllTypeExpr() {
+				typeArgs = append(typeArgs, b.buildTypeExpr(te))
+			}
+		}
+		
+		if ctx.LPAREN() != nil {
+			// Generic call: identity<int32>(args)
+			return &CallExpr{
+				exprBase: exprBase{Pos: pos},
+				Func:     &IdentExpr{exprBase: exprBase{Pos: pos}, Name: qName},
+				TypeArgs: typeArgs,
+				Args:     b.buildArgList(ctx.ArgList()),
+			}
+		} else if ctx.LBRACE() != nil {
+			// Struct literal (generic or plain): Box<int32>{f: v} or pkg.Box{f: v}
+			return &StructLitExpr{
+				exprBase: exprBase{Pos: pos},
+				TypeName: qName,
+				TypeArgs: typeArgs,
+				Fields:   b.buildStructLitFields(ctx.StructLiteralFields()),
+			}
+		}
+	}
+
 	isPrefix := startTok == parser.VertexLexerMINUS ||
 		startTok == parser.VertexLexerBANG ||
 		startTok == parser.VertexLexerTILDE ||
@@ -640,7 +663,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		startTok == parser.VertexLexerDOT
 
 	if !isPrefix && nExprs >= 1 {
-		// Method call: expr.method(args)
 		if ctx.DOT() != nil && ctx.IDENTIFIER() != nil && ctx.LPAREN() != nil {
 			return &MethodCallExpr{
 				exprBase: exprBase{Pos: pos},
@@ -649,7 +671,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 				Args:     b.buildArgList(ctx.ArgList()),
 			}
 		}
-		// Field access: expr.field
 		if ctx.DOT() != nil && ctx.IDENTIFIER() != nil {
 			return &FieldExpr{
 				exprBase: exprBase{Pos: pos},
@@ -657,7 +678,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 				Field:    ctx.IDENTIFIER().GetText(),
 			}
 		}
-		// Subscript: expr[expr]
 		if ctx.LBRACKET() != nil && ctx.RBRACKET() != nil && nExprs == 2 {
 			return &IndexExpr{
 				exprBase: exprBase{Pos: pos},
@@ -665,7 +685,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 				Index:    b.buildExpr(exprs[1]),
 			}
 		}
-		// Function call: expr(args)
 		if ctx.LPAREN() != nil && ctx.RPAREN() != nil && nExprs == 1 {
 			inner := b.buildExpr(exprs[0])
 			if arrLit, ok := inner.(*ArrayLitExpr); ok && len(arrLit.Elems) == 1 {
@@ -685,7 +704,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── Binary operators (exactly two child exprs) ────────────────────────────
 	if nExprs == 2 {
 		if op, ok := b.detectBinOp(ctx); ok {
 			return &BinaryExpr{
@@ -697,7 +715,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── Ternary (three child exprs) ───────────────────────────────────────────
 	if nExprs == 3 && ctx.QUESTION() != nil && ctx.COLON() != nil {
 		return &TernaryExpr{
 			exprBase: exprBase{Pos: pos},
@@ -707,7 +724,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── Prefix unary ──────────────────────────────────────────────────────────
 	if nExprs == 1 && (startTok == parser.VertexLexerMINUS ||
 		startTok == parser.VertexLexerBANG ||
 		startTok == parser.VertexLexerTILDE) {
@@ -723,7 +739,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &UnaryExpr{exprBase: exprBase{Pos: pos}, Op: UnAddrOf, Operand: b.buildExpr(exprs[0])}
 	}
 
-	// ── Parenthesised / tuple ─────────────────────────────────────────────────
 	if startTok == parser.VertexLexerLPAREN && ctx.LPAREN() != nil && ctx.RPAREN() != nil {
 		if nExprs == 0 {
 			return &TupleLitExpr{exprBase: exprBase{Pos: pos}}
@@ -738,7 +753,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &TupleLitExpr{exprBase: exprBase{Pos: pos}, Elems: elems}
 	}
 
-	// ── Array literal [a, b, …] ───────────────────────────────────────────────
 	if startTok == parser.VertexLexerLBRACKET && ctx.LBRACKET() != nil {
 		var elems []Expr
 		for _, e := range exprs {
@@ -747,7 +761,6 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		return &ArrayLitExpr{exprBase: exprBase{Pos: pos}, Elems: elems}
 	}
 
-	// ── Map literal {"k": v} ──────────────────────────────────────────────────
 	if startTok == parser.VertexLexerLBRACE && ctx.LBRACE() != nil {
 		return &MapLitExpr{
 			exprBase: exprBase{Pos: pos},
@@ -755,21 +768,13 @@ func (b *ASTBuilder) buildExpr(ctx parser.IExprContext) Expr {
 		}
 	}
 
-	// ── Enum shorthand .CaseName ──────────────────────────────────────────────
 	if startTok == parser.VertexLexerDOT && ctx.IDENTIFIER() != nil && nExprs == 0 {
 		return &DotEnumExpr{exprBase: exprBase{Pos: pos}, Case: ctx.IDENTIFIER().GetText()}
 	}
 
-	// ── Identifier, possibly followed by struct literal ───────────────────────
+	// Simple non-struct identifier
 	if ctx.IDENTIFIER() != nil && nExprs == 0 {
 		name := ctx.IDENTIFIER().GetText()
-		if ctx.LBRACE() != nil {
-			return &StructLitExpr{
-				exprBase: exprBase{Pos: pos},
-				TypeName: name,
-				Fields:   b.buildStructLitFields(ctx.StructLiteralFields()),
-			}
-		}
 		return &IdentExpr{exprBase: exprBase{Pos: pos}, Name: name}
 	}
 
