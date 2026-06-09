@@ -270,15 +270,39 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 func (l *Lowerer) lowerFunctions(file *File) {
 	// Pre-pass: record every Vertex-defined function name so that call sites
 	// can resolve to the prefixed C name even for forward references.
+	hasInit := make(map[string]bool)
+	hasDeinit := make(map[string]bool)
+
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*FuncDecl); ok {
 			l.userFuncs[fn.Name] = true
+			
+			// Track explicitly defined lifecycle methods
+			if fn.Receiver != nil {
+				recvTypeName := extractTypeName(fn.Receiver.Type)
+				if fn.Name == "init" {
+					hasInit[recvTypeName] = true
+				} else if fn.Name == "deinit" {
+					hasDeinit[recvTypeName] = true
+				}
+			}
 		}
 	}
 
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
-		case *EnumDecl: // NEW: Generate rawValue C helpers for every enum
+		case *ClassDecl:
+			// Do not auto-gen for native C interop classes
+			if l.nativeClasses[d.Name] {
+				continue
+			}
+			if !hasInit[d.Name] {
+				l.lowerDefaultClassInit(d)
+			}
+			if !hasDeinit[d.Name] {
+				l.lowerDefaultClassDeinit(d)
+			}
+		case *EnumDecl: // Generate rawValue C helpers for every enum
 			l.lowerEnumHelpers(d)
 		case *FuncDecl:
 			if l.testEntryFunc != "" &&
@@ -291,9 +315,80 @@ func (l *Lowerer) lowerFunctions(file *File) {
 			l.lowerGlobalVar(d)
 		}
 	}
+	
 	if l.testEntryFunc != "" {
 		l.injectTestMain()
 	}
+}
+
+// lowerDefaultClassInit automatically synthesizes a constructor that assigns all fields in order.
+func (l *Lowerer) lowerDefaultClassInit(d *ClassDecl) {
+	cName := l.cMethodName(d.Name, "init")
+	st := l.classTypes[d.Name]
+	ptrType := cir.Ptr(st)
+
+	opts := []cir.FuncOpt{cir.Returns(cir.Void), cir.Param("this", ptrType)}
+
+	var fields []*ClassMember
+	for _, m := range d.Members {
+		if m.IsField {
+			fields = append(fields, m)
+			ft := l.resolvedFieldCIRType(m.Type)
+			if ft == nil {
+				ft = cir.VoidPtr
+			}
+			opts = append(opts, cir.Param(m.Name, ft))
+		}
+	}
+
+	def := l.mod.Func(cName, opts...)
+	def.Body(func(b *cir.Builder) {
+		this := b.Param("this")
+		for _, f := range fields {
+			ft := l.resolvedFieldCIRType(f.Type)
+			if ft == nil {
+				ft = cir.VoidPtr
+			}
+			val := b.Param(f.Name)
+			b.Assign(b.GetField(this, st, f.Name, ft), val)
+		}
+		b.Return()
+	})
+}
+
+// lowerDefaultClassDeinit automatically synthesizes a destructor that cleans up known heap fields.
+func (l *Lowerer) lowerDefaultClassDeinit(d *ClassDecl) {
+	cName := l.cMethodName(d.Name, "deinit")
+	st := l.classTypes[d.Name]
+	ptrType := cir.Ptr(st)
+
+	opts := []cir.FuncOpt{cir.Returns(cir.Void), cir.Param("this", ptrType)}
+	def := l.mod.Func(cName, opts...)
+	
+	def.Body(func(b *cir.Builder) {
+		this := b.Param("this")
+		
+		// Automatically clean up memory-managed fields (Strings, Dynamic Arrays)
+		for _, m := range d.Members {
+			if !m.IsField {
+				continue
+			}
+			vt := l.resolveTypeExprVType(m.Type)
+			
+			if str, ok := vt.(*VString); ok && str.Mutable {
+				fieldVal := b.GetField(this, st, m.Name, l.gt.GStringPtr)
+				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
+					b.Stmt(b.Call("g_string_free", fieldVal, cir.BoolLit(true)))
+				}))
+			} else if _, ok := vt.(*VDynArray); ok {
+				fieldVal := b.GetField(this, st, m.Name, l.gt.GArrayPtr)
+				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
+					b.Stmt(b.Call("g_array_free", fieldVal, cir.BoolLit(true)))
+				}))
+			}
+		}
+		b.Return()
+	})
 }
 
 // NEW: Generates the getter and constructor C helpers for an enum's raw values.
