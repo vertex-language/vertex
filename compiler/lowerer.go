@@ -6,33 +6,26 @@ import (
 	cir "github.com/vertex-language/ir/c"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Lowerer — converts a resolved AST into ir/c builder calls.
-//
-// Passes within the Lowerer:
-//   1. registerTypes   — emit struct/class/enum typedef definitions.
-//   2. lowerFunctions  — emit function definitions (including receivers).
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Lowerer struct — add pointerReceiverMethods ──────────────────────────────
 
-// Lowerer holds all mutable state for a single module lowering.
 type Lowerer struct {
 	diags   *Diagnostics
 	mod     *cir.Module
 	gt      *glibTypes
-	pkg     string // package name for C name mangling
+	pkg     string
 
-	structTypes   map[string]*cir.StructType
-	classTypes    map[string]*cir.StructType
-	enumTypes     map[string]*VEnum // FIX: Restored to *VEnum
-	nativeClasses map[string]bool
-	userFuncs     map[string]bool // every Vertex-defined function name in this file
+	structTypes            map[string]*cir.StructType
+	classTypes             map[string]*cir.StructType
+	enumTypes              map[string]*VEnum
+	nativeClasses          map[string]bool
+	userFuncs              map[string]bool
+	pointerReceiverMethods map[string]bool // "TypeName__methodName" → true when receiver is *T
 
 	testEntryFunc  string
 	testEntryVType VType
 
 	tempSeq int
 
-	// Cache for generated opt_T structs
 	optionalTypes map[string]cir.Type
 }
 
@@ -40,15 +33,16 @@ func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 	gt := newGlibTypes()
 	setupGLib(mod, gt)
 	return &Lowerer{
-		diags:         diags,
-		mod:           mod,
-		gt:            gt,
-		structTypes:   make(map[string]*cir.StructType),
-		classTypes:    make(map[string]*cir.StructType),
-		enumTypes:     make(map[string]*VEnum), // FIX: Restored to *VEnum
-		nativeClasses: make(map[string]bool),
-		userFuncs:     make(map[string]bool),
-		optionalTypes: make(map[string]cir.Type),
+		diags:                  diags,
+		mod:                    mod,
+		gt:                     gt,
+		structTypes:            make(map[string]*cir.StructType),
+		classTypes:             make(map[string]*cir.StructType),
+		enumTypes:              make(map[string]*VEnum),
+		nativeClasses:          make(map[string]bool),
+		userFuncs:              make(map[string]bool),
+		pointerReceiverMethods: make(map[string]bool),
+		optionalTypes:          make(map[string]cir.Type),
 	}
 }
 
@@ -268,22 +262,24 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 // ─── Pass 2: function lowering ────────────────────────────────────────────────
 
 func (l *Lowerer) lowerFunctions(file *File) {
-	// Pre-pass: record every Vertex-defined function name so that call sites
-	// can resolve to the prefixed C name even for forward references.
 	hasInit := make(map[string]bool)
 	hasDeinit := make(map[string]bool)
 
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*FuncDecl); ok {
 			l.userFuncs[fn.Name] = true
-			
-			// Track explicitly defined lifecycle methods
+
 			if fn.Receiver != nil {
 				recvTypeName := extractTypeName(fn.Receiver.Type)
 				if fn.Name == "init" {
 					hasInit[recvTypeName] = true
 				} else if fn.Name == "deinit" {
 					hasDeinit[recvTypeName] = true
+				}
+				// Track which methods have pointer receivers so call sites
+				// can pass &recv instead of recv.
+				if fn.Receiver.IsPtr {
+					l.pointerReceiverMethods[recvTypeName+"__"+fn.Name] = true
 				}
 			}
 		}
@@ -292,7 +288,6 @@ func (l *Lowerer) lowerFunctions(file *File) {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ClassDecl:
-			// Do not auto-gen for native C interop classes
 			if l.nativeClasses[d.Name] {
 				continue
 			}
@@ -302,7 +297,7 @@ func (l *Lowerer) lowerFunctions(file *File) {
 			if !hasDeinit[d.Name] {
 				l.lowerDefaultClassDeinit(d)
 			}
-		case *EnumDecl: // Generate rawValue C helpers for every enum
+		case *EnumDecl:
 			l.lowerEnumHelpers(d)
 		case *FuncDecl:
 			if l.testEntryFunc != "" &&
@@ -315,7 +310,7 @@ func (l *Lowerer) lowerFunctions(file *File) {
 			l.lowerGlobalVar(d)
 		}
 	}
-	
+
 	if l.testEntryFunc != "" {
 		l.injectTestMain()
 	}
@@ -543,7 +538,8 @@ func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
 	}
 }
 
-// lowerFuncDecl emits one ir/c FuncDef for a Vertex function or method.
+// ─── lowerFuncDecl — mark pointer receiver in funcCtx ────────────────────────
+
 func (l *Lowerer) lowerFuncDecl(fn *FuncDecl) {
 	if fn.Qualifier == FuncQualTest {
 		l.lowerTestFuncDecl(fn)
@@ -598,6 +594,11 @@ func (l *Lowerer) lowerFuncDecl(fn *FuncDecl) {
 	fc := newFuncCtx()
 	if fn.Receiver != nil {
 		fc.params[fn.Receiver.Name] = true
+		// When the receiver is *T the CIR param is a pointer; record it so
+		// field-access and assignment paths can dereference it correctly.
+		if fn.Receiver.IsPtr {
+			fc.ptrParams[fn.Receiver.Name] = true
+		}
 	}
 	for _, p := range fn.Params {
 		fc.params[p.Name] = true
@@ -628,17 +629,20 @@ func (l *Lowerer) receiverCIRType(recv *Receiver) cir.Type {
 
 // ─── Block and statement lowering ─────────────────────────────────────────────
 
-// funcCtx carries per-function state during lowering.
+// ─── funcCtx — add ptrParams ──────────────────────────────────────────────────
+
 type funcCtx struct {
-	params     map[string]bool
-	locals     map[string]cir.Expr
-	defers     []func(*cir.Builder)
+	params    map[string]bool
+	ptrParams map[string]bool // receiver params declared as *T (IsPtr=true)
+	locals    map[string]cir.Expr
+	defers    []func(*cir.Builder)
 }
 
 func newFuncCtx() *funcCtx {
 	return &funcCtx{
-		params: make(map[string]bool),
-		locals: make(map[string]cir.Expr),
+		params:    make(map[string]bool),
+		ptrParams: make(map[string]bool),
+		locals:    make(map[string]cir.Expr),
 	}
 }
 
@@ -894,31 +898,45 @@ func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 // When the LHS is a value-type struct field chain, StructStore is emitted
 // so the MIR never sees a StructLoadExpr on the write side of an AssignStmt.
 func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
-	// ── Struct and Class field write: LHS is a field chain ─────────────
+	// ── Struct and Class field write: LHS is a field chain ─────────────────────
 	if fe, ok := st.LHS.(*FieldExpr); ok {
 		if baseAST, steps, chainOK := l.collectStructChain(fe); chainOK {
 			baseExpr := l.lowerExpr(b, baseAST, fc)
 			rhs := l.lowerExpr(b, st.RHS, fc)
 
-			// NEW: If the root is a class, it's a pointer. Dereference it so StructStore operates correctly!
+			// Class receivers are always pointers — dereference before StructStore.
 			if vc, isClass := baseAST.GetVType().(*VClass); isClass {
 				baseExpr = cir.Deref(baseExpr, l.classTypes[vc.Name])
+			}
+			// Pointer receiver struct params (func (c: *Counter) …) are also
+			// lowered as pointers in CIR even though VType shows the bare struct.
+			if id, ok2 := baseAST.(*IdentExpr); ok2 && fc.ptrParams[id.Name] {
+				if vs, ok3 := baseAST.GetVType().(*VStruct); ok3 {
+					if structST, ok4 := l.structTypes[vs.Name]; ok4 {
+						baseExpr = cir.Deref(baseExpr, structST)
+					}
+				}
 			}
 
 			switch st.Op {
 			case OpAssign:
 				b.StructStore(baseExpr, rhs, steps...)
 			default:
-				// Compound assignment: read current value, compute, write back.
 				cur := b.StructLoad(baseExpr, steps...)
 				var newVal cir.Expr
 				switch st.Op {
-				case OpAddAssign: newVal = b.Add(cur, rhs)
-				case OpSubAssign: newVal = b.Sub(cur, rhs)
-				case OpMulAssign: newVal = b.Mul(cur, rhs)
-				case OpDivAssign: newVal = b.Div(cur, rhs)
-				case OpModAssign: newVal = b.Mod(cur, rhs)
-				default:          newVal = rhs
+				case OpAddAssign:
+					newVal = b.Add(cur, rhs)
+				case OpSubAssign:
+					newVal = b.Sub(cur, rhs)
+				case OpMulAssign:
+					newVal = b.Mul(cur, rhs)
+				case OpDivAssign:
+					newVal = b.Div(cur, rhs)
+				case OpModAssign:
+					newVal = b.Mod(cur, rhs)
+				default:
+					newVal = rhs
 				}
 				b.StructStore(baseExpr, newVal, steps...)
 			}
@@ -1846,7 +1864,13 @@ func (l *Lowerer) lowerStructMethod(
 	b *cir.Builder, recv cir.Expr, structName, method string, args []*Arg, fc *funcCtx,
 ) cir.Expr {
 	var callArgs []cir.Expr
-	callArgs = append(callArgs, recv)
+	// Pointer receiver methods expect *T — take the address of the local.
+	// Value receiver methods expect T  — pass the value directly.
+	if l.pointerReceiverMethods[structName+"__"+method] {
+		callArgs = append(callArgs, b.AddrOf(recv))
+	} else {
+		callArgs = append(callArgs, recv)
+	}
 	for _, a := range args {
 		callArgs = append(callArgs, l.lowerExpr(b, a.Value, fc))
 	}
@@ -1951,7 +1975,7 @@ func (l *Lowerer) lookupStructCIRType(vt VType) (*cir.StructType, bool) {
 func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.Expr {
 	recvType := e.Recv.GetVType()
 
-	// ── Enum access (rawValue, case names) — unchanged ────────────────────────
+	// ── Enum access ────────────────────────────────────────────────────────────
 	if ve, ok := recvType.(*VEnum); ok {
 		if e.Field == "rawValue" {
 			recv := l.lowerExpr(b, e.Recv, fc)
@@ -1960,17 +1984,28 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		return l.enumCaseExpr(b, ve, e.Field)
 	}
 
-	// ── Struct and Class chain: collect full path and emit StructLoad ─────────
+	// ── Struct / Class chain ───────────────────────────────────────────────────
 	if baseAST, steps, ok := l.collectStructChain(e); ok {
 		baseExpr := l.lowerExpr(b, baseAST, fc)
-        // NEW: Dereference class pointers
+
+		// Class receivers are pointers — dereference before StructLoad.
 		if vc, isClass := baseAST.GetVType().(*VClass); isClass {
 			baseExpr = cir.Deref(baseExpr, l.classTypes[vc.Name])
 		}
+		// Pointer receiver struct params share the same issue: VType is the
+		// bare struct but the CIR value is a pointer.
+		if id, ok2 := baseAST.(*IdentExpr); ok2 && fc.ptrParams[id.Name] {
+			if vs, ok3 := baseAST.GetVType().(*VStruct); ok3 {
+				if structST, ok4 := l.structTypes[vs.Name]; ok4 {
+					baseExpr = cir.Deref(baseExpr, structST)
+				}
+			}
+		}
+
 		return b.StructLoad(baseExpr, steps...)
 	}
 
-	// ── All other cases: lower receiver, then dispatch on type ────────────────
+	// ── All other cases ────────────────────────────────────────────────────────
 	recv := l.lowerExpr(b, e.Recv, fc)
 
 	fieldVT := e.GetVType()
@@ -1990,7 +2025,6 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		}
 	case *VClass:
 		if st, ok := l.classTypes[rt.Name]; ok {
-            // NEW: Fallback safely uses StructLoad with Deref
 			return b.StructLoad(cir.Deref(recv, st), cir.Step(st, e.Field, fieldCT))
 		}
 	}
