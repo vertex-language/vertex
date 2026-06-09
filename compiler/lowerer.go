@@ -2229,39 +2229,6 @@ func (l *Lowerer) lowerDynArrayCtor(b *cir.Builder, e *ArrayCtorExpr, t *VDynArr
 	return b.Call("v_array_new", elemSize)
 }
 
-// ─── Type utilities ───────────────────────────────────────────────────────────
-
-// vtypeToCIR returns the CIR type for vt, or nil if the lowerer must handle it.
-func (l *Lowerer) vtypeToCIR(vt VType) cir.Type {
-	if vt == nil {
-		return nil
-	}
-	switch t := vt.(type) {
-	case *VStruct:
-		if st, ok := l.structTypes[t.Name]; ok {
-			return st
-		}
-		return nil
-	case *VClass:
-		if st, ok := l.classTypes[t.Name]; ok {
-			return cir.Ptr(st)
-		}
-		return nil
-	case *VEnum:
-		return cir.Int32
-	case *VDynArray:
-		return l.gt.GArrayPtr
-	case *VString:
-		if t.Mutable {
-			return l.gt.GStringPtr
-		}
-		return cir.ConstPtr(cir.Char)
-	case *VTypeAlias:
-		return l.vtypeToCIR(t.Underlying)
-	}
-	return vt.CIRType()
-}
-
 // Update resolveTypeExprVType to handle Enums
 func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 	if te == nil {
