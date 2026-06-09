@@ -11,12 +11,12 @@ import (
 type Lowerer struct {
 	diags   *Diagnostics
 	mod     *cir.Module
-	gt      *glibTypes
+	at      *vtxArrayTypes // replaces gt *glibTypes
 	pkg     string
 
 	structTypes            map[string]*cir.StructType
 	classTypes             map[string]*cir.StructType
-	classDecls             map[string]*ClassDecl        // NEW
+	classDecls             map[string]*ClassDecl
 	enumTypes              map[string]*VEnum
 	nativeClasses          map[string]bool
 	userFuncs              map[string]bool
@@ -31,12 +31,13 @@ type Lowerer struct {
 }
 
 func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
-	gt := newGlibTypes()
-	setupGLib(mod, gt)
+	at := newVtxArrayTypes()
+	setupVtxArrays(mod, at)
+	setupVtxMaps(mod)
 	return &Lowerer{
 		diags:                  diags,
 		mod:                    mod,
-		gt:                     gt,
+		at:                     at,
 		structTypes:            make(map[string]*cir.StructType),
 		classTypes:             make(map[string]*cir.StructType),
 		classDecls:             make(map[string]*ClassDecl),
@@ -237,7 +238,6 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 				return ct
 			}
 		}
-		// May be a struct or class.
 		if st, ok := l.structTypes[t.Name]; ok {
 			return st
 		}
@@ -257,7 +257,7 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 	case *OptionalTypeExpr:
 		return cir.Ptr(l.resolvedFieldCIRType(t.Elem))
 	case *ArrayTypeExpr:
-		return l.gt.GArrayPtr
+		return l.at.VtxArrayPtr
 	}
 	return cir.VoidPtr
 }
@@ -360,26 +360,23 @@ func (l *Lowerer) lowerDefaultClassDeinit(d *ClassDecl) {
 
 	opts := []cir.FuncOpt{cir.Returns(cir.Void), cir.Param("this", ptrType)}
 	def := l.mod.Func(cName, opts...)
-	
+
 	def.Body(func(b *cir.Builder) {
 		this := b.Param("this")
 		for _, m := range d.Members {
-			if !m.IsField { continue }
+			if !m.IsField {
+				continue
+			}
 			vt := l.resolveTypeExprVType(m.Type)
-			
-			if str, ok := vt.(*VString); ok && str.Mutable {
-                // FIXED: Use StructLoad instead of GetField
-				fieldVal := b.StructLoad(cir.Deref(this, st), cir.Step(st, m.Name, l.gt.GStringPtr))
+
+			if _, ok := vt.(*VDynArray); ok {
+				arrPtrType := l.at.VtxArrayPtr
+				fieldVal := b.StructLoad(cir.Deref(this, st), cir.Step(st, m.Name, arrPtrType))
 				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
-					b.Stmt(b.Call("g_string_free", fieldVal, cir.BoolLit(true)))
-				}))
-			} else if _, ok := vt.(*VDynArray); ok {
-                // FIXED: Use StructLoad instead of GetField
-				fieldVal := b.StructLoad(cir.Deref(this, st), cir.Step(st, m.Name, l.gt.GArrayPtr))
-				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
-					b.Stmt(b.Call("g_array_free", fieldVal, cir.BoolLit(true)))
+					b.Stmt(b.Call("v_array_free", fieldVal))
 				}))
 			}
+			// strings are now const char* — not owned, no cleanup needed
 		}
 		b.Return()
 	})
@@ -815,6 +812,70 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 	}
 }
 
+func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
+	switch t := vt.(type) {
+	case *VDynArray:
+		return l.at.VtxArrayPtr
+	case *VString:
+		return cir.ConstPtr(cir.Char)
+	case *VStruct:
+		if st, ok := l.structTypes[t.Name]; ok {
+			return st
+		}
+	case *VMap:
+		return cir.VoidPtr
+	case *VClass:
+		if st, ok := l.classTypes[t.Name]; ok {
+			return cir.Ptr(st)
+		}
+	case *VEnum:
+		return cir.Int32
+	case *VOptional:
+		if l.isPointerVType(t.Elem) {
+			inner := l.vtypeToCIR(t.Elem)
+			if inner == nil {
+				inner = l.vtypeToCIRFallback(t.Elem)
+			}
+			return inner
+		}
+		typeName := vtypeName(t.Elem)
+		if cached, ok := l.optionalTypes[typeName]; ok {
+			return cached
+		}
+		elemCT := l.vtypeToCIR(t.Elem)
+		if elemCT == nil {
+			elemCT = l.vtypeToCIRFallback(t.Elem)
+		}
+		structName := l.cTypeName("opt_" + typeName)
+		st := cir.Struct(structName,
+			cir.Field("has_value", cir.Bool),
+			cir.Field("value", elemCT),
+		)
+		l.mod.RegisterType(st)
+		l.optionalTypes[typeName] = st
+		return st
+	case *VResult:
+		return cir.VoidPtr
+	case *VInt:
+		ct := t.CIRType()
+		if ct == nil {
+			panic(fmt.Sprintf("vtypeToCIRFallback: VInt{%d,%v} has no CIR type", t.Bits, t.Signed))
+		}
+		return ct
+	case *VFloat:
+		ct := t.CIRType()
+		if ct == nil {
+			panic(fmt.Sprintf("vtypeToCIRFallback: VFloat{%d} has no CIR type", t.Bits))
+		}
+		return ct
+	case *VBool:
+		return cir.Bool
+	case *VChar:
+		return cir.Char
+	}
+	return cir.VoidPtr
+}
+
 func (l *Lowerer) declareLocal(b *cir.Builder, name string, vt VType, isLet bool) cir.Expr {
 	ct := l.vtypeToCIR(vt)
 	if ct == nil {
@@ -824,77 +885,31 @@ func (l *Lowerer) declareLocal(b *cir.Builder, name string, vt VType, isLet bool
 	return ref
 }
 
-func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
-    switch t := vt.(type) {
-    case *VDynArray:
-        return l.gt.GArrayPtr
-    case *VString:
-        if t.Mutable {
-            return l.gt.GStringPtr
-        }
-        return cir.ConstPtr(cir.Char)
-    case *VStruct:
-        if st, ok := l.structTypes[t.Name]; ok {
-            return st
-        }
-    case *VMap:
-        return cir.VoidPtr
-    case *VClass:
-        if st, ok := l.classTypes[t.Name]; ok {
-            return cir.Ptr(st)
-        }
-    case *VEnum:
-        return cir.Int32
-    case *VOptional:
-        if l.isPointerVType(t.Elem) {
-            inner := l.vtypeToCIR(t.Elem)
-            if inner == nil {
-                inner = l.vtypeToCIRFallback(t.Elem)
-            }
-            return inner
-        }
-        typeName := vtypeName(t.Elem)
-        if cached, ok := l.optionalTypes[typeName]; ok {
-            return cached
-        }
-        elemCT := l.vtypeToCIR(t.Elem)
-        if elemCT == nil {
-            elemCT = l.vtypeToCIRFallback(t.Elem)
-        }
-        structName := l.cTypeName("opt_" + typeName)
-        st := cir.Struct(structName,
-            cir.Field("has_value", cir.Bool),
-            cir.Field("value", elemCT),
-        )
-        l.mod.RegisterType(st)
-        l.optionalTypes[typeName] = st
-        return st
-    case *VResult:
-        return cir.VoidPtr
-
-    // ── Scalar types must never reach the fallback ─────────────────────────────
-    // vtypeToCIR handles all of these via vt.CIRType().  If they arrive here
-    // it means vtypeToCIR returned nil for a scalar, which is a frontend bug.
-    // Return the correct type anyway so the MIR gets a usable value, but
-    // panic in debug mode so the bug is caught during development.
-    case *VInt:
-        ct := t.CIRType()
-        if ct == nil {
-            panic(fmt.Sprintf("vtypeToCIRFallback: VInt{%d,%v} has no CIR type", t.Bits, t.Signed))
-        }
-        return ct
-    case *VFloat:
-        ct := t.CIRType()
-        if ct == nil {
-            panic(fmt.Sprintf("vtypeToCIRFallback: VFloat{%d} has no CIR type", t.Bits))
-        }
-        return ct
-    case *VBool:
-        return cir.Bool
-    case *VChar:
-        return cir.Char
-    }
-    return cir.VoidPtr
+func (l *Lowerer) vtypeToCIR(vt VType) cir.Type {
+	if vt == nil {
+		return nil
+	}
+	switch t := vt.(type) {
+	case *VStruct:
+		if st, ok := l.structTypes[t.Name]; ok {
+			return st
+		}
+		return nil
+	case *VClass:
+		if st, ok := l.classTypes[t.Name]; ok {
+			return cir.Ptr(st)
+		}
+		return nil
+	case *VEnum:
+		return cir.Int32
+	case *VDynArray:
+		return l.at.VtxArrayPtr
+	case *VString:
+		return cir.ConstPtr(cir.Char) // all strings are now const char*
+	case *VTypeAlias:
+		return l.vtypeToCIR(t.Underlying)
+	}
+	return vt.CIRType()
 }
 
 // lowerAssign lowers an assignment statement.
@@ -1104,11 +1119,12 @@ func (l *Lowerer) lowerForIn(b *cir.Builder, st *ForInStmt, fc *funcCtx) {
 		if elemCIR == nil {
 			elemCIR = l.vtypeToCIRFallback(it.Elem)
 		}
+		as := l.at.VtxArray
 		iRef := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(iRef, b.Cast(cir.UInt32, cir.UIntLit(0)))
-		arrLen := b.GetField(iter, l.gt.GArray, "len", cir.UInt32)
+		arrLen := b.GetField(iter, as, "len", cir.UInt32)
 		b.While(b.Lt(iRef, arrLen), cir.B(func(b *cir.Builder) {
-			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, l.gt.GArray, "data", cir.VoidPtr))
+			dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(iter, as, "data", cir.VoidPtr))
 			elemRef := b.Local(st.Var, elemCIR)
 			fc.locals[st.Var] = elemRef
 			b.Assign(elemRef, b.Index(dataPtr, iRef, elemCIR))
@@ -1599,82 +1615,91 @@ func (l *Lowerer) lowerDynArrayMethod(
 	if elemCIR == nil {
 		elemCIR = l.vtypeToCIRFallback(rt.Elem)
 	}
-	elemSize := b.SizeOf(elemCIR)
-	gaST := l.gt.GArray // *cir.StructType — required for correct field offsets
+	elemSize := b.Cast(cir.UInt32, b.SizeOf(elemCIR))
+	as := l.at.VtxArray
 
 	switch method {
 	case "push":
 		val := l.lowerExpr(b, args[0].Value, fc)
 		tmp := b.Local(l.tempName(), elemCIR)
 		b.Assign(tmp, val)
-		b.Stmt(b.Call("g_array_append_vals", recv, b.AddrOf(tmp), cir.UIntLit(1)))
+		b.Stmt(b.Call("v_array_push", recv, b.AddrOf(tmp)))
 		return nil
+
 	case "unshift":
 		val := l.lowerExpr(b, args[0].Value, fc)
 		tmp := b.Local(l.tempName(), elemCIR)
 		b.Assign(tmp, val)
-		b.Stmt(b.Call("g_array_prepend_vals", recv, b.AddrOf(tmp), cir.UIntLit(1)))
+		b.Stmt(b.Call("v_array_unshift", recv, b.AddrOf(tmp)))
 		return nil
+
 	case "pop":
 		tmp := b.Local(l.tempName(), elemCIR)
-		lenRef := b.GetField(recv, gaST, "len", cir.UInt32)
-		b.If(b.Gt(lenRef, cir.UIntLit(0)),
+		lenVal := b.GetField(recv, as, "len", cir.UInt32)
+		b.If(b.Gt(lenVal, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
-				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-				idx := b.Sub(lenRef, cir.UIntLit(1))
-				b.Assign(tmp, b.Index(dataPtr, idx, elemCIR))
-				b.Stmt(b.Call("g_array_remove_index", recv, idx))
+				newLen := b.Sub(lenVal, cir.UIntLit(1))
+				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+				b.Assign(tmp, b.Index(dataPtr, newLen, elemCIR))
+				// Last element — just decrement len, no shifting needed.
+				b.StructStore(cir.Deref(recv, as), newLen, cir.Step(as, "len", cir.UInt32))
 			}),
 		)
 		return tmp
+
 	case "shift":
 		tmp := b.Local(l.tempName(), elemCIR)
-		lenRef := b.GetField(recv, gaST, "len", cir.UInt32)
-		b.If(b.Gt(lenRef, cir.UIntLit(0)),
+		lenVal := b.GetField(recv, as, "len", cir.UInt32)
+		b.If(b.Gt(lenVal, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
-				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
 				b.Assign(tmp, b.Index(dataPtr, cir.UIntLit(0), elemCIR))
-				b.Stmt(b.Call("g_array_remove_index", recv, cir.UIntLit(0)))
+				b.Stmt(b.Call("v_array_remove_index", recv, cir.UIntLit(0)))
 			}),
 		)
 		return tmp
+
 	case "delete":
-		b.Stmt(b.Call("g_array_free", recv, cir.BoolLit(true)))
+		b.Stmt(b.Call("v_array_free", recv))
 		return nil
+
 	case "fill":
 		val := l.lowerExpr(b, args[0].Value, fc)
-		byteSize := b.Mul(b.Cast(cir.UIntSize, b.GetField(recv, gaST, "len", cir.UInt32)), b.SizeOf(elemCIR))
-		b.Stmt(b.Call("memset", b.GetField(recv, gaST, "data", cir.VoidPtr), val, byteSize))
+		byteSize := b.Mul(b.Cast(cir.UIntSize, b.GetField(recv, as, "len", cir.UInt32)), b.SizeOf(elemCIR))
+		b.Stmt(b.Call("memset", b.GetField(recv, as, "data", cir.VoidPtr), val, byteSize))
 		return nil
+
 	case "reverse":
 		lo := b.Local(l.tempName(), cir.UInt32)
 		hi := b.Local(l.tempName(), cir.UInt32)
-		tmp2 := b.Local(l.tempName(), elemCIR)
+		tmp := b.Local(l.tempName(), elemCIR)
 		b.Assign(lo, cir.UIntLit(0))
-		b.Assign(hi, b.Sub(b.GetField(recv, gaST, "len", cir.UInt32), cir.UIntLit(1)))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
+		b.Assign(hi, b.Sub(b.GetField(recv, as, "len", cir.UInt32), cir.UIntLit(1)))
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
 		b.While(b.Lt(lo, hi),
 			cir.B(func(b *cir.Builder) {
-				b.Assign(tmp2, b.Index(dataPtr, lo, elemCIR))
+				b.Assign(tmp, b.Index(dataPtr, lo, elemCIR))
 				b.Assign(b.Index(dataPtr, lo, elemCIR), b.Index(dataPtr, hi, elemCIR))
-				b.Assign(b.Index(dataPtr, hi, elemCIR), tmp2)
+				b.Assign(b.Index(dataPtr, hi, elemCIR), tmp)
 				b.Assign(lo, b.Add(lo, cir.UIntLit(1)))
 				b.Assign(hi, b.Sub(hi, cir.UIntLit(1)))
 			}),
 		)
 		return nil
+
 	case "sort":
 		cmpFn := l.lowerExpr(b, args[0].Value, fc)
-		b.Stmt(b.Call("g_array_sort", recv, cmpFn))
+		b.Stmt(b.Call("v_array_sort", recv, cmpFn))
 		return nil
+
 	case "indexOf":
 		val := l.lowerExpr(b, args[0].Value, fc)
 		result := b.Local(l.tempName(), cir.Int32)
 		b.Assign(result, cir.IntLit(-1))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
@@ -1686,14 +1711,15 @@ func (l *Lowerer) lowerDynArrayMethod(
 			}),
 		)
 		return result
+
 	case "includes":
 		val := l.lowerExpr(b, args[0].Value, fc)
 		found := b.Local(l.tempName(), cir.Bool)
 		b.Assign(found, cir.BoolLit(false))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.If(b.Eq(b.Index(dataPtr, i, elemCIR), val),
 					cir.B(func(b *cir.Builder) {
@@ -1705,14 +1731,15 @@ func (l *Lowerer) lowerDynArrayMethod(
 			}),
 		)
 		return found
+
 	case "find":
 		cmpFn := l.lowerExpr(b, args[0].Value, fc)
 		resultPtr := b.Local(l.tempName(), cir.Ptr(elemCIR))
 		b.Assign(resultPtr, cir.NullPtr())
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				elem := b.AddrOf(b.Index(dataPtr, i, elemCIR))
 				b.If(b.CallPtr(cmpFn, b.Deref(elem)),
@@ -1725,88 +1752,101 @@ func (l *Lowerer) lowerDynArrayMethod(
 			}),
 		)
 		return resultPtr
+
 	case "map":
 		mapFn := l.lowerExpr(b, args[0].Value, fc)
-		out := b.Local(l.tempName(), l.gt.GArrayPtr)
-		b.Assign(out, b.Call("g_array_sized_new",
-			cir.BoolLit(false), cir.BoolLit(false),
-			elemSize, b.GetField(recv, gaST, "len", cir.UInt32)))
+		out := b.Local(l.tempName(), l.at.VtxArrayPtr)
+		b.Assign(out, b.Call("v_array_new_cap", elemSize, b.GetField(recv, as, "len", cir.UInt32)))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				mapped := b.Local(l.tempName(), elemCIR)
 				b.Assign(mapped, b.CallPtr(mapFn, b.Index(dataPtr, i, elemCIR)))
-				b.Stmt(b.Call("g_array_append_vals", out, b.AddrOf(mapped), cir.UIntLit(1)))
+				b.Stmt(b.Call("v_array_push", out, b.AddrOf(mapped)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
 		)
 		return out
+
 	case "filter":
 		filterFn := l.lowerExpr(b, args[0].Value, fc)
-		out := b.Local(l.tempName(), l.gt.GArrayPtr)
-		b.Assign(out, b.Call("g_array_new",
-			cir.BoolLit(false), cir.BoolLit(false), elemSize))
+		out := b.Local(l.tempName(), l.at.VtxArrayPtr)
+		b.Assign(out, b.Call("v_array_new", elemSize))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				elem := b.Index(dataPtr, i, elemCIR)
 				b.If(b.CallPtr(filterFn, elem),
 					cir.B(func(b *cir.Builder) {
 						tmp := b.Local(l.tempName(), elemCIR)
 						b.Assign(tmp, elem)
-						b.Stmt(b.Call("g_array_append_vals", out, b.AddrOf(tmp), cir.UIntLit(1)))
+						b.Stmt(b.Call("v_array_push", out, b.AddrOf(tmp)))
 					}),
 				)
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
 		)
 		return out
+
 	case "slice":
 		start := l.lowerExpr(b, args[0].Value, fc)
 		end := l.lowerExpr(b, args[1].Value, fc)
-		out := b.Local(l.tempName(), l.gt.GArrayPtr)
-		b.Assign(out, b.Call("g_array_new",
-			cir.BoolLit(false), cir.BoolLit(false), elemSize))
+		out := b.Local(l.tempName(), l.at.VtxArrayPtr)
+		b.Assign(out, b.Call("v_array_new", elemSize))
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, b.Cast(cir.UInt32, start))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.LogAnd(b.Lt(i, b.Cast(cir.UInt32, end)), b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32))),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(
+			b.LogAnd(b.Lt(i, b.Cast(cir.UInt32, end)), b.Lt(i, b.GetField(recv, as, "len", cir.UInt32))),
 			cir.B(func(b *cir.Builder) {
 				tmp := b.Local(l.tempName(), elemCIR)
 				b.Assign(tmp, b.Index(dataPtr, i, elemCIR))
-				b.Stmt(b.Call("g_array_append_vals", out, b.AddrOf(tmp), cir.UIntLit(1)))
+				b.Stmt(b.Call("v_array_push", out, b.AddrOf(tmp)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
 			}),
 		)
 		return out
+
 	case "concat":
 		other := l.lowerExpr(b, args[0].Value, fc)
-		out := b.Local(l.tempName(), l.gt.GArrayPtr)
-		totalLen := b.Add(
-			b.GetField(recv, gaST, "len", cir.UInt32),
-			b.GetField(other, gaST, "len", cir.UInt32),
+		out := b.Local(l.tempName(), l.at.VtxArrayPtr)
+		totalLen := b.Add(b.GetField(recv, as, "len", cir.UInt32), b.GetField(other, as, "len", cir.UInt32))
+		b.Assign(out, b.Call("v_array_new_cap", elemSize, totalLen))
+		// Copy recv elements.
+		iRef := b.Local(l.tempName(), cir.UInt32)
+		b.Assign(iRef, cir.UIntLit(0))
+		recvData := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(iRef, b.GetField(recv, as, "len", cir.UInt32)),
+			cir.B(func(b *cir.Builder) {
+				tmp := b.Local(l.tempName(), elemCIR)
+				b.Assign(tmp, b.Index(recvData, iRef, elemCIR))
+				b.Stmt(b.Call("v_array_push", out, b.AddrOf(tmp)))
+				b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
+			}),
 		)
-		b.Assign(out, b.Call("g_array_sized_new",
-			cir.BoolLit(false), cir.BoolLit(false), elemSize, totalLen))
-		b.Stmt(b.Call("g_array_append_vals",
-			out,
-			b.GetField(recv, gaST, "data", cir.VoidPtr),
-			b.GetField(recv, gaST, "len", cir.UInt32)))
-		b.Stmt(b.Call("g_array_append_vals",
-			out,
-			b.GetField(other, gaST, "data", cir.VoidPtr),
-			b.GetField(other, gaST, "len", cir.UInt32)))
+		// Copy other elements.
+		b.Assign(iRef, cir.UIntLit(0))
+		otherData := b.Cast(cir.Ptr(elemCIR), b.GetField(other, as, "data", cir.VoidPtr))
+		b.While(b.Lt(iRef, b.GetField(other, as, "len", cir.UInt32)),
+			cir.B(func(b *cir.Builder) {
+				tmp := b.Local(l.tempName(), elemCIR)
+				b.Assign(tmp, b.Index(otherData, iRef, elemCIR))
+				b.Stmt(b.Call("v_array_push", out, b.AddrOf(tmp)))
+				b.Assign(iRef, b.Add(iRef, cir.UIntLit(1)))
+			}),
+		)
 		return out
+
 	case "forEach":
 		forEachFn := l.lowerExpr(b, args[0].Value, fc)
 		i := b.Local(l.tempName(), cir.UInt32)
 		b.Assign(i, cir.UIntLit(0))
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, gaST, "data", cir.VoidPtr))
-		b.While(b.Lt(i, b.GetField(recv, gaST, "len", cir.UInt32)),
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
+		b.While(b.Lt(i, b.GetField(recv, as, "len", cir.UInt32)),
 			cir.B(func(b *cir.Builder) {
 				b.Stmt(b.CallPtr(forEachFn, b.Index(dataPtr, i, elemCIR)))
 				b.Assign(i, b.Add(i, cir.UIntLit(1)))
@@ -1814,6 +1854,7 @@ func (l *Lowerer) lowerDynArrayMethod(
 		)
 		return nil
 	}
+
 	l.diags.Warnf(Pos{}, "array method %q not supported", method)
 	return cir.NullPtr()
 }
@@ -1826,13 +1867,8 @@ func (l *Lowerer) lowerStringMethod(
 	b *cir.Builder, recv cir.Expr, rt *VString,
 	method string, args []*Arg, fc *funcCtx,
 ) cir.Expr {
-	switch method {
-	case "delete":
-		if rt.Mutable {
-			b.Stmt(b.Call("g_string_free", recv, cir.BoolLit(true)))
-		}
-		return nil
-	}
+	// Strings are now const char* — no heap management at the language level.
+	l.diags.Warnf(Pos{}, "string method %q not supported on immutable strings", method)
 	return cir.NullPtr()
 }
 
@@ -2020,11 +2056,11 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		if e.Field == "length" {
-			return b.GetField(recv, l.gt.GArray, "len", cir.UInt32)
+			return b.GetField(recv, l.at.VtxArray, "len", cir.UInt32)
 		}
 	case *VString:
-		if e.Field == "length" && rt.Mutable {
-			return b.GetField(recv, l.gt.GString, "len", cir.UInt64)
+		if e.Field == "length" {
+			return b.Call("strlen", recv)
 		}
 	case *VClass:
 		if st, ok := l.classTypes[rt.Name]; ok {
@@ -2046,7 +2082,7 @@ func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.
 		if elemCIR == nil {
 			elemCIR = l.vtypeToCIRFallback(rt.Elem)
 		}
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, l.gt.GArray, "data", cir.VoidPtr))
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, l.at.VtxArray, "data", cir.VoidPtr))
 		return b.Index(dataPtr, idx, elemCIR)
 	case *VFixedArray:
 		elemCIR := l.vtypeToCIR(rt.Elem)
@@ -2141,20 +2177,10 @@ func (l *Lowerer) lowerArrayLit(b *cir.Builder, e *ArrayLitExpr, fc *funcCtx) ci
 }
 
 func (l *Lowerer) lowerMapLit(b *cir.Builder, e *MapLitExpr, fc *funcCtx) cir.Expr {
-	// Emit equivalent of g_hash_table_new(NULL, NULL)
-	hashTable := b.Local(l.tempName(), cir.VoidPtr)
-	b.Assign(hashTable, b.Call("g_hash_table_new", cir.NullPtr(), cir.NullPtr()))
-	
-	for _, f := range e.Fields {
-		k := l.lowerExpr(b, f.Key, fc)
-		v := l.lowerExpr(b, f.Value, fc)
-		
-		// Note: GLib requires pointers. If you are inserting raw ints, 
-		// you might need to use GINT_TO_POINTER macros or allocate memory here depending 
-		// on how deep you want your GLib integration to go for scalars.
-		b.Stmt(b.Call("g_hash_table_insert", hashTable, k, v))
-	}
-	return hashTable
+	l.diags.Warnf(e.Pos, "map literals are a stub; full map support is TBD")
+	result := b.Local(l.tempName(), cir.VoidPtr)
+	b.Assign(result, b.Call("v_map_new", cir.UIntLit(8), cir.UIntLit(8)))
+	return result
 }
 
 func (l *Lowerer) lowerArrayCtor(b *cir.Builder, e *ArrayCtorExpr, fc *funcCtx) cir.Expr {
@@ -2197,18 +2223,13 @@ func (l *Lowerer) lowerDynArrayCtor(b *cir.Builder, e *ArrayCtorExpr, t *VDynArr
 	}
 	elemSize := b.Cast(cir.UInt32, b.SizeOf(elemCIR))
 
-	// Check for capacity argument.
 	for _, a := range e.Args {
 		if a.Label == "capacity" {
 			cap := l.lowerExpr(b, a.Value, fc)
-			return b.Call("g_array_sized_new",
-				cir.BoolLit(false), cir.BoolLit(false),
-				elemSize, b.Cast(cir.UInt32, cap),
-			)
+			return b.Call("v_array_new_cap", elemSize, b.Cast(cir.UInt32, cap))
 		}
 	}
-	return b.Call("g_array_new",
-		cir.BoolLit(false), cir.BoolLit(false), elemSize)
+	return b.Call("v_array_new", elemSize)
 }
 
 // ─── Type utilities ───────────────────────────────────────────────────────────
