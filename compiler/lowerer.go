@@ -334,9 +334,7 @@ func (l *Lowerer) lowerDefaultClassInit(d *ClassDecl) {
 		if m.IsField {
 			fields = append(fields, m)
 			ft := l.resolvedFieldCIRType(m.Type)
-			if ft == nil {
-				ft = cir.VoidPtr
-			}
+			if ft == nil { ft = cir.VoidPtr }
 			opts = append(opts, cir.Param(m.Name, ft))
 		}
 	}
@@ -346,11 +344,11 @@ func (l *Lowerer) lowerDefaultClassInit(d *ClassDecl) {
 		this := b.Param("this")
 		for _, f := range fields {
 			ft := l.resolvedFieldCIRType(f.Type)
-			if ft == nil {
-				ft = cir.VoidPtr
-			}
+			if ft == nil { ft = cir.VoidPtr }
 			val := b.Param(f.Name)
-			b.Assign(b.GetField(this, st, f.Name, ft), val)
+            
+			// FIXED: Use StructStore instead of Assign(GetField)
+			b.StructStore(cir.Deref(this, st), val, cir.Step(st, f.Name, ft))
 		}
 		b.Return()
 	})
@@ -367,21 +365,19 @@ func (l *Lowerer) lowerDefaultClassDeinit(d *ClassDecl) {
 	
 	def.Body(func(b *cir.Builder) {
 		this := b.Param("this")
-		
-		// Automatically clean up memory-managed fields (Strings, Dynamic Arrays)
 		for _, m := range d.Members {
-			if !m.IsField {
-				continue
-			}
+			if !m.IsField { continue }
 			vt := l.resolveTypeExprVType(m.Type)
 			
 			if str, ok := vt.(*VString); ok && str.Mutable {
-				fieldVal := b.GetField(this, st, m.Name, l.gt.GStringPtr)
+                // FIXED: Use StructLoad instead of GetField
+				fieldVal := b.StructLoad(cir.Deref(this, st), cir.Step(st, m.Name, l.gt.GStringPtr))
 				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
 					b.Stmt(b.Call("g_string_free", fieldVal, cir.BoolLit(true)))
 				}))
 			} else if _, ok := vt.(*VDynArray); ok {
-				fieldVal := b.GetField(this, st, m.Name, l.gt.GArrayPtr)
+                // FIXED: Use StructLoad instead of GetField
+				fieldVal := b.StructLoad(cir.Deref(this, st), cir.Step(st, m.Name, l.gt.GArrayPtr))
 				b.If(b.Neq(fieldVal, cir.NullPtr()), cir.B(func(b *cir.Builder) {
 					b.Stmt(b.Call("g_array_free", fieldVal, cir.BoolLit(true)))
 				}))
@@ -898,38 +894,35 @@ func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 // When the LHS is a value-type struct field chain, StructStore is emitted
 // so the MIR never sees a StructLoadExpr on the write side of an AssignStmt.
 func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
-	// ── Struct field write: LHS is a value-type struct field chain ─────────────
+	// ── Struct and Class field write: LHS is a field chain ─────────────
 	if fe, ok := st.LHS.(*FieldExpr); ok {
-		if _, isStruct := fe.Recv.GetVType().(*VStruct); isStruct {
-			if baseAST, steps, chainOK := l.collectStructChain(fe); chainOK {
-				baseExpr := l.lowerExpr(b, baseAST, fc)
-				rhs := l.lowerExpr(b, st.RHS, fc)
+		if baseAST, steps, chainOK := l.collectStructChain(fe); chainOK {
+			baseExpr := l.lowerExpr(b, baseAST, fc)
+			rhs := l.lowerExpr(b, st.RHS, fc)
 
-				switch st.Op {
-				case OpAssign:
-					b.StructStore(baseExpr, rhs, steps...)
-				default:
-					// Compound assignment: read current value, compute, write back.
-					cur := b.StructLoad(baseExpr, steps...)
-					var newVal cir.Expr
-					switch st.Op {
-					case OpAddAssign:
-						newVal = b.Add(cur, rhs)
-					case OpSubAssign:
-						newVal = b.Sub(cur, rhs)
-					case OpMulAssign:
-						newVal = b.Mul(cur, rhs)
-					case OpDivAssign:
-						newVal = b.Div(cur, rhs)
-					case OpModAssign:
-						newVal = b.Mod(cur, rhs)
-					default:
-						newVal = rhs
-					}
-					b.StructStore(baseExpr, newVal, steps...)
-				}
-				return
+			// NEW: If the root is a class, it's a pointer. Dereference it so StructStore operates correctly!
+			if vc, isClass := baseAST.GetVType().(*VClass); isClass {
+				baseExpr = cir.Deref(baseExpr, l.classTypes[vc.Name])
 			}
+
+			switch st.Op {
+			case OpAssign:
+				b.StructStore(baseExpr, rhs, steps...)
+			default:
+				// Compound assignment: read current value, compute, write back.
+				cur := b.StructLoad(baseExpr, steps...)
+				var newVal cir.Expr
+				switch st.Op {
+				case OpAddAssign: newVal = b.Add(cur, rhs)
+				case OpSubAssign: newVal = b.Sub(cur, rhs)
+				case OpMulAssign: newVal = b.Mul(cur, rhs)
+				case OpDivAssign: newVal = b.Div(cur, rhs)
+				case OpModAssign: newVal = b.Mod(cur, rhs)
+				default:          newVal = rhs
+				}
+				b.StructStore(baseExpr, newVal, steps...)
+			}
+			return
 		}
 	}
 
@@ -1943,6 +1936,12 @@ func (l *Lowerer) lookupStructCIRType(vt VType) (*cir.StructType, bool) {
 			return st, true
 		}
 	}
+	// ADDED: Treat classes like structs so they can use StructLoad/StructStore
+	if vc, ok := vt.(*VClass); ok {
+		if st, ok2 := l.classTypes[vc.Name]; ok2 {
+			return st, true
+		}
+	}
 	return nil, false
 }
 
@@ -1961,12 +1960,14 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		return l.enumCaseExpr(b, ve, e.Field)
 	}
 
-	// ── Value-type struct chain: collect full path and emit StructLoad ─────────
-	if _, isStruct := recvType.(*VStruct); isStruct {
-		if baseAST, steps, ok := l.collectStructChain(e); ok {
-			baseExpr := l.lowerExpr(b, baseAST, fc)
-			return b.StructLoad(baseExpr, steps...)
+	// ── Struct and Class chain: collect full path and emit StructLoad ─────────
+	if baseAST, steps, ok := l.collectStructChain(e); ok {
+		baseExpr := l.lowerExpr(b, baseAST, fc)
+        // NEW: Dereference class pointers
+		if vc, isClass := baseAST.GetVType().(*VClass); isClass {
+			baseExpr = cir.Deref(baseExpr, l.classTypes[vc.Name])
 		}
+		return b.StructLoad(baseExpr, steps...)
 	}
 
 	// ── All other cases: lower receiver, then dispatch on type ────────────────
@@ -1989,12 +1990,11 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		}
 	case *VClass:
 		if st, ok := l.classTypes[rt.Name]; ok {
-			return b.GetField(recv, st, e.Field, fieldCT)
+            // NEW: Fallback safely uses StructLoad with Deref
+			return b.StructLoad(cir.Deref(recv, st), cir.Step(st, e.Field, fieldCT))
 		}
 	}
 
-	// Safe fallback — nil StructType → MIR uses offset 0.
-	// ValidateStructAccess will flag this.
 	return b.GetField(recv, nil, e.Field, fieldCT)
 }
 
