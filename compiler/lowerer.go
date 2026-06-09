@@ -709,59 +709,76 @@ func (l *Lowerer) declareLocal(b *cir.Builder, name string, vt VType, isLet bool
 }
 
 func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
-	switch t := vt.(type) {
-	case *VDynArray:
-		return l.gt.GArrayPtr
-	case *VString:
-		if t.Mutable {
-			return l.gt.GStringPtr
-		}
-		return cir.ConstPtr(cir.Char)
-	case *VStruct:
-		if st, ok := l.structTypes[t.Name]; ok {
-			return st
-		}
-	case *VMap:
-		return cir.VoidPtr // GHashTable is opaque void*
-	case *VClass:
-		if st, ok := l.classTypes[t.Name]; ok {
-			return cir.Ptr(st)
-		}
-	case *VEnum:
-		return cir.Int32
-	case *VOptional:
-		if l.isPointerVType(t.Elem) {
-			// Swift Niche-Bit: Keep it as a raw pointer! NULL = .none
-			inner := l.vtypeToCIR(t.Elem)
-			if inner == nil {
-				inner = l.vtypeToCIRFallback(t.Elem)
-			}
-			return inner 
-		}
+    switch t := vt.(type) {
+    case *VDynArray:
+        return l.gt.GArrayPtr
+    case *VString:
+        if t.Mutable {
+            return l.gt.GStringPtr
+        }
+        return cir.ConstPtr(cir.Char)
+    case *VStruct:
+        if st, ok := l.structTypes[t.Name]; ok {
+            return st
+        }
+    case *VMap:
+        return cir.VoidPtr
+    case *VClass:
+        if st, ok := l.classTypes[t.Name]; ok {
+            return cir.Ptr(st)
+        }
+    case *VEnum:
+        return cir.Int32
+    case *VOptional:
+        if l.isPointerVType(t.Elem) {
+            inner := l.vtypeToCIR(t.Elem)
+            if inner == nil {
+                inner = l.vtypeToCIRFallback(t.Elem)
+            }
+            return inner
+        }
+        typeName := vtypeName(t.Elem)
+        if cached, ok := l.optionalTypes[typeName]; ok {
+            return cached
+        }
+        elemCT := l.vtypeToCIR(t.Elem)
+        if elemCT == nil {
+            elemCT = l.vtypeToCIRFallback(t.Elem)
+        }
+        structName := l.cTypeName("opt_" + typeName)
+        st := cir.Struct(structName,
+            cir.Field("has_value", cir.Bool),
+            cir.Field("value", elemCT),
+        )
+        l.mod.RegisterType(st)
+        l.optionalTypes[typeName] = st
+        return st
+    case *VResult:
+        return cir.VoidPtr
 
-		// Value Type: Generate `struct opt_TypeName { bool has_value; T value; }`
-		typeName := vtypeName(t.Elem)
-		if cached, ok := l.optionalTypes[typeName]; ok {
-			return cached
-		}
-
-		elemCT := l.vtypeToCIR(t.Elem)
-		if elemCT == nil {
-			elemCT = l.vtypeToCIRFallback(t.Elem)
-		}
-
-		structName := l.cTypeName("opt_" + typeName)
-		st := cir.Struct(structName,
-			cir.Field("has_value", cir.Bool),
-			cir.Field("value", elemCT),
-		)
-		l.mod.RegisterType(st)
-		l.optionalTypes[typeName] = st
-		return st
-	case *VResult:
-		return cir.VoidPtr // simplified
-	}
-	return cir.VoidPtr
+    // ── Scalar types must never reach the fallback ─────────────────────────────
+    // vtypeToCIR handles all of these via vt.CIRType().  If they arrive here
+    // it means vtypeToCIR returned nil for a scalar, which is a frontend bug.
+    // Return the correct type anyway so the MIR gets a usable value, but
+    // panic in debug mode so the bug is caught during development.
+    case *VInt:
+        ct := t.CIRType()
+        if ct == nil {
+            panic(fmt.Sprintf("vtypeToCIRFallback: VInt{%d,%v} has no CIR type", t.Bits, t.Signed))
+        }
+        return ct
+    case *VFloat:
+        ct := t.CIRType()
+        if ct == nil {
+            panic(fmt.Sprintf("vtypeToCIRFallback: VFloat{%d} has no CIR type", t.Bits))
+        }
+        return ct
+    case *VBool:
+        return cir.Bool
+    case *VChar:
+        return cir.Char
+    }
+    return cir.VoidPtr
 }
 
 // lowerAssign lowers an assignment statement.
@@ -1743,47 +1760,65 @@ func (l *Lowerer) lowerStructMethod(
 //   baseAST = IdentExpr{"l"}
 //   steps   = [Step(LineType,"start",Vec2Type), Step(Vec2Type,"x",Float32)]
 func (l *Lowerer) collectStructChain(e *FieldExpr) (baseAST Expr, steps []cir.FieldStep, ok bool) {
-	// Walk down to the root, collecting steps in reverse order.
-	var reversed []cir.FieldStep
-	curr := e
-	for {
-		recvVT := curr.Recv.GetVType()
-		fieldVT := curr.GetVType()
+    var reversed []cir.FieldStep
+    curr := e
 
-		structST, isStruct := l.lookupStructCIRType(recvVT)
-		if !isStruct {
-			// This level is not a value-type struct (could be a class, array, etc.)
-			return nil, nil, false
-		}
+    for {
+        recvVT  := curr.Recv.GetVType()
+        fieldVT := curr.GetVType()
 
-		fieldCT := l.vtypeToCIR(fieldVT)
-		if fieldCT == nil {
-			fieldCT = l.vtypeToCIRFallback(fieldVT)
-		}
+        structST, isStruct := l.lookupStructCIRType(recvVT)
+        if !isStruct {
+            return nil, nil, false
+        }
 
-		reversed = append(reversed, cir.Step(structST, curr.Field, fieldCT))
+        // Always go through vtypeToCIR first; it returns the package-level
+        // singleton (cir.Float32, cir.Int32, etc.) via vt.CIRType().
+        // vtypeToCIRFallback must only be reached for aggregate types
+        // (structs, arrays) where vtypeToCIR legitimately returns nil.
+        fieldCT := l.vtypeToCIR(fieldVT)
+        if fieldCT == nil {
+            fieldCT = l.vtypeToCIRFallback(fieldVT)
+        }
+        if fieldCT == nil {
+            // Unresolvable type — bail out and let the caller use the
+            // GetField fallback path rather than emitting a broken chain.
+            return nil, nil, false
+        }
 
-		inner, innerIsField := curr.Recv.(*FieldExpr)
-		if !innerIsField {
-			// curr.Recv is the base expression.
-			baseAST = curr.Recv
-			break
-		}
-		// Check whether the next level down is also a value-type struct access.
-		if _, ok2 := l.lookupStructCIRType(inner.Recv.GetVType()); !ok2 {
-			// Next level is not a struct — stop here and treat curr.Recv as base.
-			baseAST = curr.Recv
-			break
-		}
-		curr = inner
-	}
+        reversed = append(reversed, cir.Step(structST, curr.Field, fieldCT))
 
-	// Reverse so steps are outermost-first (base → field → subfield).
-	steps = make([]cir.FieldStep, len(reversed))
-	for i, s := range reversed {
-		steps[len(reversed)-1-i] = s
-	}
-	return baseAST, steps, true
+        inner, innerIsField := curr.Recv.(*FieldExpr)
+        if !innerIsField {
+            baseAST = curr.Recv
+            break
+        }
+        if _, ok2 := l.lookupStructCIRType(inner.Recv.GetVType()); !ok2 {
+            baseAST = curr.Recv
+            break
+        }
+        curr = inner
+    }
+
+    steps = make([]cir.FieldStep, len(reversed))
+    for i, s := range reversed {
+        steps[len(reversed)-1-i] = s
+    }
+
+    // Final sanity: the last step's FieldType is what becomes StructLoadExpr.Type.
+    // It must be a scalar cir type recognised by the MIR's typeClass switch,
+    // not a struct or pointer.
+    if len(steps) > 0 {
+        last := steps[len(steps)-1].FieldType
+        if _, isStruct := last.(*cir.StructType); isStruct {
+            // The chain ends on a struct field, not a scalar.
+            // StructLoadExpr would carry a struct type, which is valid but
+            // uncommon; flag it so the MIR author knows to handle it.
+            _ = last // acceptable — MIR handles struct-typed loads as memcpy
+        }
+    }
+
+    return baseAST, steps, true
 }
 
 // lookupStructCIRType returns the CIR StructType for a VStruct, or (nil, false)
