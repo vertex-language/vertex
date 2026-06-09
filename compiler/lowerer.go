@@ -764,62 +764,96 @@ func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 	return cir.VoidPtr
 }
 
+// lowerAssign lowers an assignment statement.
+// When the LHS is a value-type struct field chain, StructStore is emitted
+// so the MIR never sees a StructLoadExpr on the write side of an AssignStmt.
 func (l *Lowerer) lowerAssign(b *cir.Builder, st *AssignStmt, fc *funcCtx) {
-    lhs := l.lowerExpr(b, st.LHS, fc)
-    rhs := l.lowerExpr(b, st.RHS, fc)
-    if lhs == nil || rhs == nil {
-        return
-    }
+	// ── Struct field write: LHS is a value-type struct field chain ─────────────
+	if fe, ok := st.LHS.(*FieldExpr); ok {
+		if _, isStruct := fe.Recv.GetVType().(*VStruct); isStruct {
+			if baseAST, steps, chainOK := l.collectStructChain(fe); chainOK {
+				baseExpr := l.lowerExpr(b, baseAST, fc)
+				rhs := l.lowerExpr(b, st.RHS, fc)
 
-    if ptr, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
-        elemCIR := l.vtypeToCIR(ptr.Elem)
-        if elemCIR == nil {
-            elemCIR = cir.Int32
-        }
-        storeLHS := cir.Deref(lhs, elemCIR)
-        if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
-            if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
-                rhs = cir.Deref(rhs, elemCIR)
-            }
-        }
-        
-        // NEW: Implicitly wrap optionals and nil literals
-        rhs = l.wrapOptional(ptr.Elem, st.RHS.GetVType(), rhs)
+				switch st.Op {
+				case OpAssign:
+					b.StructStore(baseExpr, rhs, steps...)
+				default:
+					// Compound assignment: read current value, compute, write back.
+					cur := b.StructLoad(baseExpr, steps...)
+					var newVal cir.Expr
+					switch st.Op {
+					case OpAddAssign:
+						newVal = b.Add(cur, rhs)
+					case OpSubAssign:
+						newVal = b.Sub(cur, rhs)
+					case OpMulAssign:
+						newVal = b.Mul(cur, rhs)
+					case OpDivAssign:
+						newVal = b.Div(cur, rhs)
+					case OpModAssign:
+						newVal = b.Mod(cur, rhs)
+					default:
+						newVal = rhs
+					}
+					b.StructStore(baseExpr, newVal, steps...)
+				}
+				return
+			}
+		}
+	}
 
-        switch st.Op {
-        case OpAssign:
-            b.Assign(storeLHS, rhs)
-        case OpAddAssign:
-            b.Assign(storeLHS, b.Add(cir.Deref(lhs, elemCIR), rhs))
-        case OpSubAssign:
-            b.Assign(storeLHS, b.Sub(cir.Deref(lhs, elemCIR), rhs))
-        case OpMulAssign:
-            b.Assign(storeLHS, b.Mul(cir.Deref(lhs, elemCIR), rhs))
-        case OpDivAssign:
-            b.Assign(storeLHS, b.Div(cir.Deref(lhs, elemCIR), rhs))
-        case OpModAssign:
-            b.Assign(storeLHS, b.Mod(cir.Deref(lhs, elemCIR), rhs))
-        }
-        return
-    }
+	// ── Original pointer / scalar / class assignment logic ────────────────────
+	lhs := l.lowerExpr(b, st.LHS, fc)
+	rhs := l.lowerExpr(b, st.RHS, fc)
+	if lhs == nil || rhs == nil {
+		return
+	}
 
-    // NEW: Implicitly wrap optionals and nil literals
-    rhs = l.wrapOptional(st.LHS.GetVType(), st.RHS.GetVType(), rhs)
+	if ptr, isPtr := st.LHS.GetVType().(*VPointer); isPtr {
+		elemCIR := l.vtypeToCIR(ptr.Elem)
+		if elemCIR == nil {
+			elemCIR = cir.Int32
+		}
+		storeLHS := cir.Deref(lhs, elemCIR)
+		if _, rhsIsPtr := st.RHS.GetVType().(*VPointer); rhsIsPtr {
+			if id, ok := st.RHS.(*IdentExpr); ok && fc.params[id.Name] {
+				rhs = cir.Deref(rhs, elemCIR)
+			}
+		}
+		rhs = l.wrapOptional(ptr.Elem, st.RHS.GetVType(), rhs)
+		switch st.Op {
+		case OpAssign:
+			b.Assign(storeLHS, rhs)
+		case OpAddAssign:
+			b.Assign(storeLHS, b.Add(cir.Deref(lhs, elemCIR), rhs))
+		case OpSubAssign:
+			b.Assign(storeLHS, b.Sub(cir.Deref(lhs, elemCIR), rhs))
+		case OpMulAssign:
+			b.Assign(storeLHS, b.Mul(cir.Deref(lhs, elemCIR), rhs))
+		case OpDivAssign:
+			b.Assign(storeLHS, b.Div(cir.Deref(lhs, elemCIR), rhs))
+		case OpModAssign:
+			b.Assign(storeLHS, b.Mod(cir.Deref(lhs, elemCIR), rhs))
+		}
+		return
+	}
 
-    switch st.Op {
-    case OpAssign:
-        b.Assign(lhs, rhs)
-    case OpAddAssign:
-        b.Assign(lhs, b.Add(lhs, rhs))
-    case OpSubAssign:
-        b.Assign(lhs, b.Sub(lhs, rhs))
-    case OpMulAssign:
-        b.Assign(lhs, b.Mul(lhs, rhs))
-    case OpDivAssign:
-        b.Assign(lhs, b.Div(lhs, rhs))
-    case OpModAssign:
-        b.Assign(lhs, b.Mod(lhs, rhs))
-    }
+	rhs = l.wrapOptional(st.LHS.GetVType(), st.RHS.GetVType(), rhs)
+	switch st.Op {
+	case OpAssign:
+		b.Assign(lhs, rhs)
+	case OpAddAssign:
+		b.Assign(lhs, b.Add(lhs, rhs))
+	case OpSubAssign:
+		b.Assign(lhs, b.Sub(lhs, rhs))
+	case OpMulAssign:
+		b.Assign(lhs, b.Mul(lhs, rhs))
+	case OpDivAssign:
+		b.Assign(lhs, b.Div(lhs, rhs))
+	case OpModAssign:
+		b.Assign(lhs, b.Mod(lhs, rhs))
+	}
 }
 
 func (l *Lowerer) lowerIfStmt(b *cir.Builder, st *IfStmt, fc *funcCtx) {
@@ -1696,9 +1730,81 @@ func (l *Lowerer) lowerStructMethod(
 	return b.Call(l.cMethodName(structName, method), callArgs...)
 }
 
+// ─── Struct chain helpers ─────────────────────────────────────────────────────
+
+// collectStructChain walks a FieldExpr tree upward and, when every level
+// accesses a registered value-type struct (not a class pointer), returns:
+//   - baseAST: the root AST expression (the local variable or param)
+//   - steps:   ordered slice of FieldStep, outermost last
+//   - ok:      false if any level is not a value-type struct (caller should fallback)
+//
+// Example for e = FieldExpr{Recv: FieldExpr{Recv: IdentExpr{"l"}, Field:"start"}, Field:"x"}
+// where l:Line, start:Vec2, x:float32:
+//   baseAST = IdentExpr{"l"}
+//   steps   = [Step(LineType,"start",Vec2Type), Step(Vec2Type,"x",Float32)]
+func (l *Lowerer) collectStructChain(e *FieldExpr) (baseAST Expr, steps []cir.FieldStep, ok bool) {
+	// Walk down to the root, collecting steps in reverse order.
+	var reversed []cir.FieldStep
+	curr := e
+	for {
+		recvVT := curr.Recv.GetVType()
+		fieldVT := curr.GetVType()
+
+		structST, isStruct := l.lookupStructCIRType(recvVT)
+		if !isStruct {
+			// This level is not a value-type struct (could be a class, array, etc.)
+			return nil, nil, false
+		}
+
+		fieldCT := l.vtypeToCIR(fieldVT)
+		if fieldCT == nil {
+			fieldCT = l.vtypeToCIRFallback(fieldVT)
+		}
+
+		reversed = append(reversed, cir.Step(structST, curr.Field, fieldCT))
+
+		inner, innerIsField := curr.Recv.(*FieldExpr)
+		if !innerIsField {
+			// curr.Recv is the base expression.
+			baseAST = curr.Recv
+			break
+		}
+		// Check whether the next level down is also a value-type struct access.
+		if _, ok2 := l.lookupStructCIRType(inner.Recv.GetVType()); !ok2 {
+			// Next level is not a struct — stop here and treat curr.Recv as base.
+			baseAST = curr.Recv
+			break
+		}
+		curr = inner
+	}
+
+	// Reverse so steps are outermost-first (base → field → subfield).
+	steps = make([]cir.FieldStep, len(reversed))
+	for i, s := range reversed {
+		steps[len(reversed)-1-i] = s
+	}
+	return baseAST, steps, true
+}
+
+// lookupStructCIRType returns the CIR StructType for a VStruct, or (nil, false)
+// for anything else.  Classes are excluded because they use pointer access (->)
+// not value access (.).
+func (l *Lowerer) lookupStructCIRType(vt VType) (*cir.StructType, bool) {
+	if vs, ok := vt.(*VStruct); ok {
+		if st, ok2 := l.structTypes[vs.Name]; ok2 {
+			return st, true
+		}
+	}
+	return nil, false
+}
+
+// lowerFieldExpr lowers a field access expression.
+// Value-type struct chains (l.start.x) use StructLoad; everything else falls
+// back to the existing GetField / DotField paths.
 func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.Expr {
 	recvType := e.Recv.GetVType()
 
+	// ── Enum access (rawValue, case names) — unchanged ────────────────────────
 	if ve, ok := recvType.(*VEnum); ok {
 		if e.Field == "rawValue" {
 			recv := l.lowerExpr(b, e.Recv, fc)
@@ -1707,9 +1813,17 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		return l.enumCaseExpr(b, ve, e.Field)
 	}
 
+	// ── Value-type struct chain: collect full path and emit StructLoad ─────────
+	if _, isStruct := recvType.(*VStruct); isStruct {
+		if baseAST, steps, ok := l.collectStructChain(e); ok {
+			baseExpr := l.lowerExpr(b, baseAST, fc)
+			return b.StructLoad(baseExpr, steps...)
+		}
+	}
+
+	// ── All other cases: lower receiver, then dispatch on type ────────────────
 	recv := l.lowerExpr(b, e.Recv, fc)
 
-	// Resolve result type for the field being accessed.
 	fieldVT := e.GetVType()
 	fieldCT := l.vtypeToCIR(fieldVT)
 	if fieldCT == nil {
@@ -1726,12 +1840,13 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 			return b.GetField(recv, l.gt.GString, "len", cir.UInt64)
 		}
 	case *VClass:
-		return b.GetField(recv, l.classTypes[rt.Name], e.Field, fieldCT)
-	case *VStruct:
-		return b.DotField(recv, l.structTypes[rt.Name], e.Field, fieldCT)
+		if st, ok := l.classTypes[rt.Name]; ok {
+			return b.GetField(recv, st, e.Field, fieldCT)
+		}
 	}
 
-	// Safe fallback: nil struct type → MIR uses offset 0.
+	// Safe fallback — nil StructType → MIR uses offset 0.
+	// ValidateStructAccess will flag this.
 	return b.GetField(recv, nil, e.Field, fieldCT)
 }
 
