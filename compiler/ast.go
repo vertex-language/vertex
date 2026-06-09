@@ -224,6 +224,7 @@ type ChanTypeExpr struct {
 //
 //	func test_add() test -> Expected(stdout, "15")
 //
+//
 // Channel is the named output channel ("stdout", "exitCode").
 // Value is the expected output string that the test runner will compare against.
 type ExpectedTypeExpr struct {

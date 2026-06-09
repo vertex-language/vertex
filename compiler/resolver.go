@@ -636,6 +636,34 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 	case "new":
 		return recvType
 	}
+
+	// Look up user-defined receiver methods (struct, class, or enum).
+	if r.file != nil {
+		var typeName string
+		switch rt := recvType.(type) {
+		case *VStruct:
+			typeName = rt.Name
+		case *VClass:
+			typeName = rt.Name
+		case *VEnum:
+			typeName = rt.Name
+		}
+		if typeName != "" {
+			for _, decl := range r.file.Decls {
+				fn, ok := decl.(*FuncDecl)
+				if !ok || fn.Receiver == nil || fn.Name != e.Method {
+					continue
+				}
+				if extractTypeName(fn.Receiver.Type) == typeName {
+					if fn.RetType != nil {
+						return r.resolveTypeExpr(fn.RetType, scope)
+					}
+					return &VVoid{}
+				}
+			}
+		}
+	}
+
 	return &VUnknown{Name: e.Method}
 }
 
