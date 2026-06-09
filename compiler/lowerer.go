@@ -16,10 +16,11 @@ type Lowerer struct {
 
 	structTypes            map[string]*cir.StructType
 	classTypes             map[string]*cir.StructType
+	classDecls             map[string]*ClassDecl        // NEW
 	enumTypes              map[string]*VEnum
 	nativeClasses          map[string]bool
 	userFuncs              map[string]bool
-	pointerReceiverMethods map[string]bool // "TypeName__methodName" → true when receiver is *T
+	pointerReceiverMethods map[string]bool
 
 	testEntryFunc  string
 	testEntryVType VType
@@ -38,6 +39,7 @@ func NewLowerer(diags *Diagnostics, mod *cir.Module) *Lowerer {
 		gt:                     gt,
 		structTypes:            make(map[string]*cir.StructType),
 		classTypes:             make(map[string]*cir.StructType),
+		classDecls:             make(map[string]*ClassDecl),
 		enumTypes:              make(map[string]*VEnum),
 		nativeClasses:          make(map[string]bool),
 		userFuncs:              make(map[string]bool),
@@ -181,7 +183,8 @@ func (l *Lowerer) registerClass(d *ClassDecl) {
 	}
 	st := cir.Struct(l.cTypeName(d.Name), fields...)
 	l.mod.RegisterType(st)
-	l.classTypes[d.Name] = st // map key stays original name
+	l.classTypes[d.Name] = st
+	l.classDecls[d.Name] = d
 }
 
 // registerNativeMethod forwards a native-interface method signature as a C extern.
@@ -2056,6 +2059,44 @@ func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.
 }
 
 func (l *Lowerer) lowerStructLit(b *cir.Builder, e *StructLitExpr, fc *funcCtx) cir.Expr {
+	// ── Class literal: Counter{value: 10} → malloc + init(this, fields…) ─────
+	if st, ok := l.classTypes[e.TypeName]; ok {
+		ptrType := cir.Ptr(st)
+		tmp := b.Local(l.tempName(), ptrType)
+		b.Assign(tmp, b.Cast(ptrType, b.Call("malloc", b.SizeOf(st))))
+
+		// Lower all field values up-front, keyed by name.
+		fieldVals := make(map[string]cir.Expr, len(e.Fields))
+		for _, f := range e.Fields {
+			fieldVals[f.Name] = l.lowerExpr(b, f.Value, fc)
+		}
+
+		// Emit init args in declaration order so they match the
+		// auto-generated init(this, field0, field1, …) signature.
+		initArgs := []cir.Expr{tmp}
+		if cd, ok2 := l.classDecls[e.TypeName]; ok2 {
+			for _, m := range cd.Members {
+				if !m.IsField {
+					continue
+				}
+				if v, ok3 := fieldVals[m.Name]; ok3 {
+					initArgs = append(initArgs, v)
+				} else {
+					initArgs = append(initArgs, cir.NullPtr())
+				}
+			}
+		} else {
+			// classDecls unavailable (native class): use literal order as fallback.
+			for _, f := range e.Fields {
+				initArgs = append(initArgs, fieldVals[f.Name])
+			}
+		}
+
+		b.Stmt(b.Call(l.cMethodName(e.TypeName, "init"), initArgs...))
+		return tmp
+	}
+
+	// ── Struct literal (value type) ───────────────────────────────────────────
 	st, ok := l.structTypes[e.TypeName]
 	if !ok {
 		l.diags.Errorf(e.Pos, "struct %q not registered", e.TypeName)
