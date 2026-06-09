@@ -4,36 +4,53 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // OPERATOR PRECEDENCE  (high → low, per §17)
 //
-//   postfix   .method()  .field  [i]  ()            ← listed first in expr
+//   postfix   .method<T>()  .method()  .field  [i]  ()
 //   prefix    - ! ~   &  (address-of)
 //   binary    as T                                   (§17.5 cast / reinterpret,
 //                                                    highest-precedence binary op)
 //             << >>
 //             * / % &*
 //             + - &+ &-
-//             & ^ |                                  (bitwise AND, XOR, OR)
+//             & ^ |
 //             ... ..
 //             ??                                    (right-associative)
 //             == != < > <= >= === !==
 //             &&
 //             ||
 //             ? :                                    (right-associative)
-//   statement = += -= *= /= %=                       ← NOT part of expr
+//   statement = += -= *= /= %=
 //
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERIC SYNTAX  (§32)
+//
+//   Declaration:     func identity<T>(value: T) -> T
+//                    struct Box<T> { value: T }
+//   Call:            identity<int32>(value: 42)
+//   Method call:     obj.method<int32>(args)
+//   Struct literal:  Box<int32>{value: 99}
+//   Qualified:       yourpackage.Box<string>{value: "world"}
+//   Type position:   -> Box<int32>   var x: Box<string>
+//
+//   Generic calls and struct literals are anchored to qualifiedIdent (not
+//   arbitrary expr) in the seed alternatives — this eliminates the classic
+//   angle-bracket ambiguity with comparison operators.  a < b > (c) parses
+//   as comparisons; identity<int32>(v) parses as a generic call because
+//   'identity' is a qualifiedIdent seed, not a binary-expr continuation.
+//
+//   Generic method calls (expr DOT IDENTIFIER LT…GT LPAREN) are a left-
+//   recursive postfix alternative and must precede the plain method-call
+//   alternative so ANTLR4 tries the longer match first.
 // ─────────────────────────────────────────────────────────────────────────────
 // INTENTIONAL OVER-PERMISSIVENESS (backend narrows these)
 //
 //   • struct/class/enum declarations are allowed inside function bodies.
-//     The spec only prohibits nesting them inside each other, not in functions.
 //   • asm() is accepted anywhere; backend rejects it outside intrinsics packages.
 //   • Struct literals are accepted in if/for/switch conditions; backend rejects.
 //   • typeAliasDecl is accepted inside blocks; backend restricts to package scope.
 //   • Assignments and compound assignments share exprOrAssignStmt; the backend
 //     validates that the left-hand expression is an addressable lvalue.
 //   • expr AS typeExpr accepts any expr on the left and any typeExpr on the
-//     right; the backend validates that the combination represents a legal
-//     conversion or reinterpretation (e.g. pointer↔pointer, int widening,
-//     float truncation, pointer↔integer reinterpret).
+//     right; the backend validates the conversion/reinterpretation.
 //   • Expected(channel, string) accepts any IDENTIFIER as the channel name;
 //     backend validates it is a known channel (stdout).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,37 +61,26 @@ options { tokenVocab = VertexLexer; }
 
 // ════════════════════════════════════════════════════════════════════════════
 // §45–46, §33  FILE STRUCTURE
-//
-// Source file layout (enforced by backend where ordering matters):
-//   package declaration  →  build tag(s)  →  imports  →  declarations
-//
-// packageDecl is marked optional here so the parser produces a useful error
-// message when it is missing, rather than a generic syntax failure.
 // ════════════════════════════════════════════════════════════════════════════
 
 file
     : packageDecl? buildDecl* importDecl* topLevelDecl* EOF
     ;
 
-// §46  Exactly one per file; must be a valid identifier.
 packageDecl
     : PACKAGE IDENTIFIER
     ;
 
-// §45  One 'build <tag>' per line; multiple tags in a file are all required.
-// TEST is listed explicitly because 'test' is a keyword token and would not
-// match IDENTIFIER. All other build tags (release, debug, …) remain plain
-// identifiers and continue to match the IDENTIFIER alternative.
 buildDecl
-    : BUILD IDENTIFIER   // e.g. build release, build debug
-    | BUILD TEST         // 'build test' — test is a keyword, not IDENTIFIER
+    : BUILD IDENTIFIER
+    | BUILD TEST
     ;
 
-// §33  Single or grouped imports. Grouped form is newline-separated (no commas).
 importDecl
     : IMPORT STRING_LIT
     | IMPORT LPAREN STRING_LIT+ RPAREN
     ;
+
 
 // ════════════════════════════════════════════════════════════════════════════
 // TOP-LEVEL DECLARATIONS
@@ -89,20 +95,13 @@ topLevelDecl
     | varDecl
     ;
 
-// §5  Type alias — backend restricts to package scope.
 typeAliasDecl
     : TYPE IDENTIFIER ASSIGN typeExpr
     ;
 
+
 // ════════════════════════════════════════════════════════════════════════════
 // §21, §28, §32, §36, §39–41  FUNCTION DECLARATIONS
-//
-// Named functions are top-level only. Anonymous functions are expressions
-// (anonFuncExpr inside expr). Associated functions (§28) are top-level
-// functions distinguished by a receiver argument.
-//
-// Shape:
-//   func  [receiver]  name  [<T, U>]  ( params )  [qualifier]  [-> type]  { body }
 // ════════════════════════════════════════════════════════════════════════════
 
 funcDecl
@@ -112,20 +111,15 @@ funcDecl
       block
     ;
 
-// §28  Value receiver (p: T) copies; pointer receiver (p: *T) aliases caller.
-// Backend auto-inserts & at call sites for pointer receivers.
-// Receiver type must be a plain or pointer-to-named-type (backend validates).
 receiver
     : LPAREN IDENTIFIER COLON typeExpr RPAREN
     ;
 
-// §32  Unconstrained type parameters only in 2.1. 'where T:' is deferred.
+// §32  Unconstrained type parameters only in 2.1.
 genericParams
     : LT IDENTIFIER (COMMA IDENTIFIER)* GT
     ;
 
-// §36, §39–41  Qualifier sits between the closing ')' and the return arrow.
-// compiler_testing §4.1  TEST added — occupies the same syntactic position.
 funcQualifier
     : ASYNC
     | THREAD
@@ -134,10 +128,6 @@ funcQualifier
     | TEST
     ;
 
-// §21  Parameter list. A variadic parameter, if present, must be last.
-// Both named functions and anonymous functions share this rule.
-// classMember native method signatures also reuse it, gaining variadic
-// support for free (backend validates C ABI compatibility).
 paramList
     : param (COMMA param)* (COMMA variadicParam)? COMMA?
     | variadicParam COMMA?
@@ -147,39 +137,28 @@ param
     : IDENTIFIER COLON typeExpr
     ;
 
-// §21.1  Variadic parameter — Go-style '...' prefix on the element type.
-// Must be the final parameter. Inside the function body the parameter
-// is iterable (for-in). Backend maps it to a C variadic on native
-// class methods and to a slice-backed sequence on regular functions.
 variadicParam
     : IDENTIFIER COLON ELLIPSIS typeExpr
     ;
 
+
 // ════════════════════════════════════════════════════════════════════════════
 // §27  STRUCT DECLARATIONS
 //
-// Struct bodies contain field declarations only. Methods are top-level
-// associated functions with a value or pointer receiver (§28). The 'methods
-// inside structs' feature is listed as removed in 2.1.
+// genericParams? added — supports struct Box<T> { value: T }
 // ════════════════════════════════════════════════════════════════════════════
 
 structDecl
-    : STRUCT IDENTIFIER LBRACE structFieldDecl* RBRACE
+    : STRUCT IDENTIFIER genericParams? LBRACE structFieldDecl* RBRACE
     ;
 
 structFieldDecl
     : IDENTIFIER COLON typeExpr
     ;
 
+
 // ════════════════════════════════════════════════════════════════════════════
 // §30, §44  CLASS DECLARATIONS
-//
-// Regular classes: field declarations only. init/deinit and all other methods
-// are top-level associated functions using receiver syntax.
-//
-// Native-interface classes (§44): additionally contain bodyless method
-// signatures. The ': qualifiedIdent' suffix names the native module/vtable.
-// Inheritance is removed in 2.1; the ':' suffix is for native binding only.
 // ════════════════════════════════════════════════════════════════════════════
 
 classDecl
@@ -187,18 +166,15 @@ classDecl
       LBRACE classMember* RBRACE
     ;
 
-// Fields and native method signatures are syntactically unambiguous:
-// fields start with IDENTIFIER COLON, native methods start with FUNC.
-// Native method signatures reuse paramList, so variadic params are
-// supported automatically (e.g. func printf(fmt: ...*const char)).
 classMember
-    : IDENTIFIER COLON typeExpr                                       // field
-    | FUNC IDENTIFIER LPAREN paramList? RPAREN (ARROW typeExpr)?      // native method (no body)
+    : IDENTIFIER COLON typeExpr
+    | FUNC IDENTIFIER LPAREN paramList? RPAREN (ARROW typeExpr)?
     ;
 
 qualifiedIdent
     : IDENTIFIER (DOT IDENTIFIER)*
     ;
+
 
 // ════════════════════════════════════════════════════════════════════════════
 // §29  ENUM DECLARATIONS
@@ -216,9 +192,6 @@ enumCaseItem
     : IDENTIFIER (ASSIGN enumRawValue)?
     ;
 
-// Raw values are integer or string literals (§29). Integer values may be
-// negative. Backend validates the raw value type matches the enum's declared
-// type and that int raw values are sequential / non-duplicate.
 enumRawValue
     : MINUS? (DEC_INT_LIT | HEX_INT_LIT | OCT_INT_LIT | BIN_INT_LIT)
     | STRING_LIT
@@ -234,115 +207,72 @@ block
     ;
 
 stmt
-    : varDecl               // §2  let / var binding (also weak let §30.1)
-    | ifStmt                // §18
-    | whileStmt             // §22
-    | forInStmt             // §23
-    | switchStmt            // §19
-    | returnStmt            // §21
-    | BREAK                 // §20 — backend: must be inside loop or switch
-    | CONTINUE              // §20 — backend: must be inside loop, not switch
-    | FALLTHROUGH           // §19 — backend: must be inside switch case
-    | deferStmt             // §31 — backend: must be inside function body
-    | structDecl            // spec only prohibits nesting inside struct/class
-    | classDecl             // spec only prohibits nesting inside class/struct
-    | enumDecl              // spec only prohibits nesting inside struct/class
-    | typeAliasDecl         // backend: rejects if not at package scope
-    | exprOrAssignStmt      // expression statement, assignment, or compound assignment
+    : varDecl
+    | ifStmt
+    | whileStmt
+    | forInStmt
+    | switchStmt
+    | returnStmt
+    | BREAK
+    | CONTINUE
+    | FALLTHROUGH
+    | deferStmt
+    | structDecl
+    | classDecl
+    | enumDecl
+    | typeAliasDecl
+    | exprOrAssignStmt
     ;
 
-// ── §2, §26, §30.1  Variable declaration ─────────────────────────────────────
-//
-//   let x = 10
-//   var y: int32 = 20
-//   let a: Animal? = nil
-//   let (lo, hi) = minMax(values: nums)    — tuple destructuring
-//   weak let b = a                         — non-owning ref (backend validates)
-//
-// Backend rules:
-//   • WEAK is only valid with LET, not VAR.
-//   • WEAK is only valid when the RHS is a .new() ref-counted instance.
-//   • Type annotation, if present, must be compatible with the inferred type.
 varDecl
     : WEAK? (LET | VAR) bindingPattern (COLON typeExpr)? ASSIGN expr
     ;
 
 bindingPattern
-    : IDENTIFIER                                         // simple: let x = …
-    | LPAREN IDENTIFIER (COMMA IDENTIFIER)+ RPAREN       // tuple: let (a, b) = …
+    : IDENTIFIER
+    | LPAREN IDENTIFIER (COMMA IDENTIFIER)+ RPAREN
     ;
 
-// ── §18  If / else if / else ──────────────────────────────────────────────────
 ifStmt
     : IF ifCondition block (ELSE (block | ifStmt))?
     ;
 
-// if-let safely unwraps T? or binds the Ok value of a Result(T,E).
-// Backend resolves which semantics apply based on the type of the RHS expr.
 ifCondition
-    : LET IDENTIFIER ASSIGN expr   // if-let optional/Result binding
-    | expr                          // boolean expression
+    : LET IDENTIFIER ASSIGN expr
+    | expr
     ;
 
-// ── §22  While ────────────────────────────────────────────────────────────────
 whileStmt
     : WHILE expr block
     ;
 
-// ── §23  For-in ───────────────────────────────────────────────────────────────
-// The loop variable is a single identifier. Tuple for-loop destructuring
-// ('for (a, b) in pairs') is listed as deferred in 2.1.
 forInStmt
     : FOR IDENTIFIER IN expr block
     ;
 
-// ── §19  Switch ───────────────────────────────────────────────────────────────
 switchStmt
     : SWITCH expr LBRACE switchCase* RBRACE
     ;
 
-// Backend enforces:
-//   • At least one stmt in each case body (empty body without fallthrough is an error).
-//   • Exactly one fallthrough per case at most, and only as the final statement.
-//   • Exhaustiveness for enum switches (default not required when all cases covered).
 switchCase
     : CASE switchPattern (COMMA switchPattern)* COLON stmt+
     | DEFAULT COLON stmt+
     ;
 
-// Pattern forms:
-//   expr             — literal or qualified enum value (case 0, case Direction.north)
-//   DOT IDENTIFIER   — enum shorthand (case .north)
-//   Ok(let id)       — Result Ok binding; id is bound as the success value
-//   Err(let id)      — Result Err binding; id is bound as the error value
 switchPattern
     : expr
     | DOT IDENTIFIER
     | (OK | ERR_KW) LPAREN LET IDENTIFIER RPAREN
     ;
 
-// ── §21  Return ───────────────────────────────────────────────────────────────
-// Void functions omit the expression. The parser is greedy: 'return' followed
-// by a parseable expression always consumes it. Use an explicit closing '}' or
-// the next keyword to terminate a void return.
 returnStmt
     : RETURN expr?
     ;
 
-// ── §31  Defer ────────────────────────────────────────────────────────────────
-// Grammar accepts any expression; backend requires it to be a direct call.
-// The anonymous-function IIFE form 'defer func() { … }()' is a call
-// expression and parses naturally without special-casing.
-// Multiple defers run LIFO. Backend rejects defer at file scope.
 deferStmt
     : DEFER expr
     ;
 
-// ── Expression and assignment statements ──────────────────────────────────────
-// Assignments are statements, not expressions — they have no value and cannot
-// be nested inside expressions (no 'a = (b = c)' style).
-// The LHS is parsed as a full expr for uniformity; backend validates it is
-// an addressable lvalue (variable, field access, or subscript).
 exprOrAssignStmt
     : expr (assignOp expr)?
     ;
@@ -356,107 +286,63 @@ assignOp
 // ════════════════════════════════════════════════════════════════════════════
 // EXPRESSIONS  §7–§17, §24–§26, §34–§35, §38
 //
-// ANTLR4 left-recursive rule rewriting encodes precedence via alternative
-// ordering: alternative 1 = highest precedence.
-//
-// Left-recursive alternatives (starting with 'expr') form postfix and binary
-// operators. Non-left-recursive alternatives are prefix operators or primary
-// expressions.
-//
-// ── Struct-literal vs. block ambiguity (§27) ─────────────────────────────────
-// 'TypeName { field: val, … }' looks like an identifier followed by a block.
-// The IDENTIFIER LBRACE alternative for struct literals is listed BEFORE the
-// bare IDENTIFIER alternative. ANTLR4's LL(*) lookahead resolves the choice
-// by examining the first token(s) inside '{':
-//
-//   IDENTIFIER COLON   → struct literal field  → parse as struct literal
-//   keyword / other    → statement             → parse as bare IDENTIFIER,
-//                                                let enclosing stmt rule
-//                                                consume the block
-//
-// An empty '{}' on an identifier is parsed as a zero-field struct literal.
-// Backend rejects it if the struct type has required fields.
-//
-// ── 'as' cast / reinterpret note (§17.5) ─────────────────────────────────────
-// 'expr AS typeExpr' is the highest-precedence binary operator. It is
-// left-associative, so 'x as int32 as int64' parses as '(x as int32) as int64'.
-// typeExpr never contains the AS token, so no lookahead conflict arises on
-// the right-hand side. Because ANTLR4 gives non-left-recursive (prefix)
-// alternatives higher effective binding than left-recursive (binary) ones in
-// a left-recursive rule, '&opt as *const char' naturally parses as
-// '(&opt) as *const char' — address-of is applied first, then the pointer is
-// cast. Parentheses are always accepted for explicitness.
-//
-// ── Bitwise binary vs. address-of prefix ambiguity note ──────────────────────
-// AMP serves two roles: binary bitwise AND ('expr AMP expr') and unary
-// address-of ('AMP expr'). ANTLR4's left-recursion rewriting resolves this
-// unambiguously: when an expr is already on the stack and AMP is the next
-// token, the binary alternative wins; when AMP appears with no left-hand
-// expr, the prefix alternative wins. No semantic predicate is required.
+// Generic call and struct-literal seeds use qualifiedIdent rather than expr
+// to eliminate angle-bracket ambiguity with comparison operators (see file
+// header note).  Generic method calls use a left-recursive postfix form and
+// are listed before the plain method-call alternative.
 // ════════════════════════════════════════════════════════════════════════════
 
 expr
     // ── Postfix (highest precedence) ─────────────────────────────────────────
-    // Method call is listed before field access. When the parser sees
-    // 'expr DOT IDENTIFIER', LL(*) lookahead checks for LPAREN:
-    //   LPAREN follows  → method call wins (longer alternative)
-    //   anything else   → field access
-    //
-    // This uniform rule covers all postfix method calls including the
-    // execution postfixes (.await, .spawn, .fork, .dispatch, .new, .delete,
-    // .try) and type-level intrinsics (.channel) — they are all just method
-    // calls whose names happen to be reserved by the backend.
-    : expr DOT IDENTIFIER LPAREN argList? RPAREN   // method call:  a.method(args)
-    | expr DOT IDENTIFIER                           // field / property: a.field
-    | expr LBRACKET expr RBRACKET                   // subscript:    a[i], map["key"]
-    | expr LPAREN argList? RPAREN                   // call:         f(args)
+    : expr DOT IDENTIFIER LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN  // generic method call: a.method<T>(args)
+    | expr DOT IDENTIFIER LPAREN argList? RPAREN                                   // method call:         a.method(args)
+    | expr DOT IDENTIFIER                                                           // field access:        a.field
+    | expr LBRACKET expr RBRACKET                                                   // subscript:           a[i]
+    | expr LPAREN argList? RPAREN                                                   // call:                f(args)
 
-    // ── Cast / reinterpret (§17.5) — highest-precedence binary operator ───────
-    // Left-associative. Backend determines the operation from operand types.
+    // ── Cast / reinterpret (§17.5) ────────────────────────────────────────────
     | expr AS typeExpr
 
-    // ── Binary operators (high → low per §17) ────────────────────────────────
-    | expr (LSHIFT | RSHIFT) expr                            // §9  shift
-    | expr (STAR | SLASH | PERCENT | OVERFLOW_MUL) expr      // §7, §10 multiplicative
-    | expr (PLUS | MINUS | OVERFLOW_ADD | OVERFLOW_SUB) expr // §7, §10 additive
-    | expr AMP   expr                                         // §9  bitwise AND
-    | expr CARET expr                                         // §9  bitwise XOR
-    | expr PIPE  expr                                         // §9  bitwise OR
-    | expr (ELLIPSIS | HALF_OPEN) expr                       // §13 range
-    | <assoc=right> expr NIL_COALESCE expr                   // §15 ?? right-assoc
+    // ── Binary operators (high → low) ─────────────────────────────────────────
+    | expr (LSHIFT | RSHIFT) expr
+    | expr (STAR | SLASH | PERCENT | OVERFLOW_MUL) expr
+    | expr (PLUS | MINUS | OVERFLOW_ADD | OVERFLOW_SUB) expr
+    | expr AMP   expr
+    | expr CARET expr
+    | expr PIPE  expr
+    | expr (ELLIPSIS | HALF_OPEN) expr
+    | <assoc=right> expr NIL_COALESCE expr
     | expr (EQ | NEQ | LT | GT | LEQ | GEQ
-           | IDENTITY_EQ | IDENTITY_NEQ) expr                // §11, §16 comparison/identity
-    | expr LOGICAL_AND expr                                  // §12 &&
-    | expr LOGICAL_OR  expr                                  // §12 ||
-    | <assoc=right> expr QUESTION expr COLON expr            // §14 ternary right-assoc
+           | IDENTITY_EQ | IDENTITY_NEQ) expr
+    | expr LOGICAL_AND expr
+    | expr LOGICAL_OR  expr
+    | <assoc=right> expr QUESTION expr COLON expr
 
     // ── Prefix / unary ────────────────────────────────────────────────────────
-    // These are non-left-recursive, so ANTLR4 effectively gives them higher
-    // precedence than any binary alternative above.
-    | (MINUS | BANG | TILDE) expr   // §7 unary -, §12 !, §9 ~
-    | AMP expr                       // §4 address-of &x; backend validates lvalue
+    | (MINUS | BANG | TILDE) expr
+    | AMP expr
 
     // ── Primary expressions ───────────────────────────────────────────────────
-    // Struct literal before bare IDENTIFIER (see ambiguity note above).
-    | IDENTIFIER LBRACE structLiteralFields? RBRACE                  // §27 struct literal
-    | LBRACE mapLiteralFields? RBRACE                                // §25 map literal {"k": v}
-    | MAP LBRACKET typeExpr RBRACKET typeExpr LPAREN argList? RPAREN // §25 empty map allocation
-    | literal                                                        // §1  all literal forms
-    | IDENTIFIER                                                     // variable, type name
-    | DOT IDENTIFIER                                                 // §29 enum shorthand .caseName
-    | LPAREN expr RPAREN                                             // grouping (not a tuple)
-    | LPAREN expr (COMMA expr)+ RPAREN                               // §37 tuple literal (a, b, …)
-    | LPAREN RPAREN                                                  // §37 empty tuple / void ()
-    | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET                 // §24 array literal [a, b, …]
-    | anonFuncExpr                                                   // §35 anonymous function
-    | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN                  // §38.3 Result(Ok,v)/Result(Err,e)
-    | asmExpr                                                        // §47 inline assembly
+    // Generic forms before plain forms — ANTLR4 tries these first.
+    // qualifiedIdent covers both simple names (Box) and qualified names
+    // (yourpackage.Box), keeping all three generic primary forms uniform.
+    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN       // generic call:         identity<int32>(args)
+    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LBRACE structLiteralFields? RBRACE  // generic struct lit:   Box<int32>{f: v}
+    | qualifiedIdent LBRACE structLiteralFields? RBRACE                            // struct literal:       Box{f: v} / pkg.Box{f: v}
+    | LBRACE mapLiteralFields? RBRACE                                              // map literal:          {"k": v}
+    | MAP LBRACKET typeExpr RBRACKET typeExpr LPAREN argList? RPAREN               // map alloc:            map[K]V()
+    | literal                                                                      // §1 literals
+    | IDENTIFIER                                                                   // variable / type name
+    | DOT IDENTIFIER                                                               // enum shorthand:       .caseName
+    | LPAREN expr RPAREN                                                           // grouping
+    | LPAREN expr (COMMA expr)+ RPAREN                                             // tuple literal:        (a, b, …)
+    | LPAREN RPAREN                                                                // empty tuple / void:   ()
+    | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET                               // array literal:        [a, b, …]
+    | anonFuncExpr                                                                 // anonymous function
+    | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN                               // Result(Ok,v) / Result(Err,e)
+    | asmExpr                                                                      // inline assembly
     ;
 
-// ── Argument list (§21) ───────────────────────────────────────────────────────
-// Supports both positional and labeled (keyword-argument) styles.
-// Labels are optional per argument; backend validates call-site conventions.
-// Trailing comma is accepted for multiline call formatting.
 argList
     : arg (COMMA arg)* COMMA?
     ;
@@ -465,10 +351,6 @@ arg
     : (IDENTIFIER COLON)? expr
     ;
 
-// ── Struct literal fields (§27) ───────────────────────────────────────────────
-// All field labels are required (positional initialization is not supported).
-// Trailing comma is accepted for multiline formatting.
-// Backend validates all fields of the type are provided.
 structLiteralFields
     : structLiteralField (COMMA structLiteralField)* COMMA?
     ;
@@ -477,8 +359,6 @@ structLiteralField
     : IDENTIFIER COLON expr
     ;
 
-// ── Map literal fields (§25) ──────────────────────────────────────────────────
-// Trailing comma is accepted for multiline formatting.
 mapLiteralFields
     : mapLiteralField (COMMA mapLiteralField)* COMMA?
     ;
@@ -487,23 +367,10 @@ mapLiteralField
     : expr COLON expr
     ;
 
-// ── §35, §35.1  Anonymous function expression ─────────────────────────────────
-// Identical to a named funcDecl minus the name and receiver.
-// The execution qualifier sits between ')' and '->' — same position as named
-// functions, introducing no new grammar rule (§35.1 states this explicitly).
-//
-// The IIFE pattern 'func(params) qualifier -> T { body }(args).postfix()' is
-// parsed naturally: anonFuncExpr is a primary expr, followed by a call postfix
-// '(args)', followed by further method-call postfixes.
 anonFuncExpr
     : FUNC LPAREN paramList? RPAREN funcQualifier? (ARROW typeExpr)? block
     ;
 
-// ── §47  Inline assembly ──────────────────────────────────────────────────────
-// Backend rejects asm() outside a 'build intrinsics' function body.
-// A void asm has no out/inout constraints. A returning asm maps out/inout
-// constraints to the return type in declaration order.
-// 'in' reuses the IN keyword (for-in loop keyword, same token).
 asmExpr
     : ASM LPAREN asmBody RPAREN
     ;
@@ -518,59 +385,49 @@ asmInstr
     : STRING_LIT
     ;
 
-// in("reg") param    — register loaded with param on entry, not an output
-// inout("reg") param — register seeded on entry; exit value contributes to return
-// out("reg")         — exit value contributes to return; undefined on entry
 asmConstraint
-    : IN     LPAREN STRING_LIT RPAREN IDENTIFIER   // in constraint
-    | INOUT  LPAREN STRING_LIT RPAREN IDENTIFIER   // inout constraint
-    | OUT_KW LPAREN STRING_LIT RPAREN              // out constraint (no param)
+    : IN     LPAREN STRING_LIT RPAREN IDENTIFIER
+    | INOUT  LPAREN STRING_LIT RPAREN IDENTIFIER
+    | OUT_KW LPAREN STRING_LIT RPAREN
     ;
 
 asmClobberDecl
     : CLOBBER LPAREN STRING_LIT (COMMA STRING_LIT)* RPAREN
     ;
 
+
 // ════════════════════════════════════════════════════════════════════════════
 // TYPE EXPRESSIONS  §3–§4, §24, §34, §37, §38.3, §42
 //
-// All scalar type names (int, int32, float32, float64, bool, char, string,
-// void, etc.) are plain identifiers matched by baseType. They are not keywords.
-//
-// Pointer vs. scalar optional (§4, §26):
-//   *T   starts with STAR   → pointer rule handles it  (including *T? nullable)
-//   T?   starts with IDENT  → baseType QUESTION?       (scalar optional)
-// These are syntactically disjoint, so no ambiguity arises.
-//
-// This rule is right-recursive (recurses on the right), which ANTLR4 handles
-// without rewriting.
+// Generic instantiation added: baseType LT typeExpr (COMMA typeExpr)* GT
+// Listed before plain baseType so ANTLR4 tries the longer match first.
+// Covers all type positions: return types, annotations, struct fields, etc.
+//   func foo() -> Box<int32>
+//   var x: Box<string> = ...
+//   struct Pair<A, B> { first: A   second: B }
 // ════════════════════════════════════════════════════════════════════════════
 
 typeExpr
-    : STAR CONST_KW? typeExpr QUESTION?                              // §4   *T, *const T, *T?, *const T?
+    : STAR CONST_KW? typeExpr QUESTION?                              // §4   *T, *const T, *T?
     | LBRACKET typeExpr RBRACKET                                     // §24  [T] array
-    | MAP LBRACKET typeExpr RBRACKET typeExpr                        // §25  map[K]V map
-    | CHAN typeExpr                                                   // §42  chan T channel
-    | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T…)->T function type
-    | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / () void
-    | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T, E)
-    | EXPECTED LPAREN typeExpr COMMA STRING_LIT RPAREN                // compiler_testing §4.2
+    | MAP LBRACKET typeExpr RBRACKET typeExpr                        // §25  map[K]V
+    | CHAN typeExpr                                                   // §42  chan T
+    | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T)->T
+    | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / ()
+    | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T,E)
+    | EXPECTED LPAREN typeExpr COMMA STRING_LIT RPAREN               // compiler_testing §4.2
+    | baseType LT typeExpr (COMMA typeExpr)* GT QUESTION?            // §32  generic: Box<T>, Box<T>?
     | baseType QUESTION?                                             // named type T, or optional T?
     ;
 
-// §34  Function type parameters are types only — no parameter names.
 funcTypeParams
     : typeExpr (COMMA typeExpr)* COMMA?
     ;
 
-// Named type, possibly qualified (e.g. 'rtp.Packet', 'canvas.Context').
 baseType
     : IDENTIFIER (DOT IDENTIFIER)*
     ;
 
-// §37  Tuple type elements. Labels are optional per element.
-// 'Mixed tuple element labels' is deferred in 2.1; backend validates
-// that all elements either all have labels or all are unlabeled.
 tupleTypeElems
     : tupleTypeElem (COMMA tupleTypeElem)* COMMA?
     ;
@@ -583,10 +440,7 @@ tupleTypeElem
 // ════════════════════════════════════════════════════════════════════════════
 // §1  LITERALS
 // ════════════════════════════════════════════════════════════════════════════
-// Negative numeric literals do not exist as tokens. Unary MINUS in the expr
-// rule produces negative values at compile time.
-// char values use CHAR_LIT ('A', '\n'); string values use STRING_LIT ("…").
-// The backend validates that a CHAR_LIT contains exactly one code unit.
+
 literal
     : DEC_INT_LIT
     | HEX_INT_LIT

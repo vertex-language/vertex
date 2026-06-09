@@ -1183,6 +1183,8 @@ func (s *ExprContext) PLUS() antlr.TerminalNode
 
 func (s *ExprContext) QUESTION() antlr.TerminalNode
 
+func (s *ExprContext) QualifiedIdent() IQualifiedIdentContext
+
 func (s *ExprContext) RBRACE() antlr.TerminalNode
 
 func (s *ExprContext) RBRACKET() antlr.TerminalNode
@@ -1799,23 +1801,26 @@ type IExprContext interface {
 	BANG() antlr.TerminalNode
 	TILDE() antlr.TerminalNode
 	AMP() antlr.TerminalNode
-	IDENTIFIER() antlr.TerminalNode
+	QualifiedIdent() IQualifiedIdentContext
+	LT() antlr.TerminalNode
+	AllTypeExpr() []ITypeExprContext
+	TypeExpr(i int) ITypeExprContext
+	GT() antlr.TerminalNode
+	LPAREN() antlr.TerminalNode
+	RPAREN() antlr.TerminalNode
+	AllCOMMA() []antlr.TerminalNode
+	COMMA(i int) antlr.TerminalNode
+	ArgList() IArgListContext
 	LBRACE() antlr.TerminalNode
 	RBRACE() antlr.TerminalNode
 	StructLiteralFields() IStructLiteralFieldsContext
 	MapLiteralFields() IMapLiteralFieldsContext
 	MAP() antlr.TerminalNode
 	LBRACKET() antlr.TerminalNode
-	AllTypeExpr() []ITypeExprContext
-	TypeExpr(i int) ITypeExprContext
 	RBRACKET() antlr.TerminalNode
-	LPAREN() antlr.TerminalNode
-	RPAREN() antlr.TerminalNode
-	ArgList() IArgListContext
 	Literal() ILiteralContext
+	IDENTIFIER() antlr.TerminalNode
 	DOT() antlr.TerminalNode
-	AllCOMMA() []antlr.TerminalNode
-	COMMA(i int) antlr.TerminalNode
 	AnonFuncExpr() IAnonFuncExprContext
 	RESULT() antlr.TerminalNode
 	OK() antlr.TerminalNode
@@ -1837,8 +1842,6 @@ type IExprContext interface {
 	NIL_COALESCE() antlr.TerminalNode
 	EQ() antlr.TerminalNode
 	NEQ() antlr.TerminalNode
-	LT() antlr.TerminalNode
-	GT() antlr.TerminalNode
 	LEQ() antlr.TerminalNode
 	GEQ() antlr.TerminalNode
 	IDENTITY_EQ() antlr.TerminalNode
@@ -2237,6 +2240,7 @@ type IStructDeclContext interface {
 	IDENTIFIER() antlr.TerminalNode
 	LBRACE() antlr.TerminalNode
 	RBRACE() antlr.TerminalNode
+	GenericParams() IGenericParamsContext
 	AllStructFieldDecl() []IStructFieldDeclContext
 	StructFieldDecl(i int) IStructFieldDeclContext
 
@@ -2448,10 +2452,13 @@ type ITypeExprContext interface {
 	ARROW() antlr.TerminalNode
 	TupleTypeElems() ITupleTypeElemsContext
 	RESULT() antlr.TerminalNode
-	COMMA() antlr.TerminalNode
+	AllCOMMA() []antlr.TerminalNode
+	COMMA(i int) antlr.TerminalNode
 	EXPECTED() antlr.TerminalNode
 	STRING_LIT() antlr.TerminalNode
 	BaseType() IBaseTypeContext
+	LT() antlr.TerminalNode
+	GT() antlr.TerminalNode
 
 	// IsTypeExprContext differentiates from other interfaces.
 	IsTypeExprContext()
@@ -2912,6 +2919,8 @@ func (s *StructDeclContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 
 func (s *StructDeclContext) AllStructFieldDecl() []IStructFieldDeclContext
 
+func (s *StructDeclContext) GenericParams() IGenericParamsContext
+
 func (s *StructDeclContext) GetParser() antlr.Parser
 
 func (s *StructDeclContext) GetRuleContext() antlr.RuleContext
@@ -3233,13 +3242,15 @@ func (s *TypeExprContext) ARROW() antlr.TerminalNode
 
 func (s *TypeExprContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 
+func (s *TypeExprContext) AllCOMMA() []antlr.TerminalNode
+
 func (s *TypeExprContext) AllTypeExpr() []ITypeExprContext
 
 func (s *TypeExprContext) BaseType() IBaseTypeContext
 
 func (s *TypeExprContext) CHAN() antlr.TerminalNode
 
-func (s *TypeExprContext) COMMA() antlr.TerminalNode
+func (s *TypeExprContext) COMMA(i int) antlr.TerminalNode
 
 func (s *TypeExprContext) CONST_KW() antlr.TerminalNode
 
@@ -3248,6 +3259,8 @@ func (s *TypeExprContext) EXPECTED() antlr.TerminalNode
 func (s *TypeExprContext) FUNC() antlr.TerminalNode
 
 func (s *TypeExprContext) FuncTypeParams() IFuncTypeParamsContext
+
+func (s *TypeExprContext) GT() antlr.TerminalNode
 
 func (s *TypeExprContext) GetParser() antlr.Parser
 
@@ -3258,6 +3271,8 @@ func (*TypeExprContext) IsTypeExprContext()
 func (s *TypeExprContext) LBRACKET() antlr.TerminalNode
 
 func (s *TypeExprContext) LPAREN() antlr.TerminalNode
+
+func (s *TypeExprContext) LT() antlr.TerminalNode
 
 func (s *TypeExprContext) MAP() antlr.TerminalNode
 
