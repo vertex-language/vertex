@@ -16,15 +16,30 @@ import (
 
 type Resolver struct {
 	diags *Diagnostics
-	pkg   *Scope // package-level scope (imports pre-populated by caller)
+	pkg   *Scope 
+	file  *File
+
+	// Generics tracking
+	genericFuncs   map[string]*FuncDecl
+	genericStructs map[string]*StructDecl
+	instFuncs      map[string]bool
+	instStructs    map[string]bool
 }
 
 func NewResolver(diags *Diagnostics, pkgScope *Scope) *Resolver {
-	return &Resolver{diags: diags, pkg: pkgScope}
+	return &Resolver{
+		diags:          diags,
+		pkg:            pkgScope,
+		genericFuncs:   make(map[string]*FuncDecl),
+		genericStructs: make(map[string]*StructDecl),
+		instFuncs:      make(map[string]bool),
+		instStructs:    make(map[string]bool),
+	}
 }
 
 // ResolveFile resolves all declarations in file and returns the annotated *File.
 func (r *Resolver) ResolveFile(file *File) *File {
+	r.file = file
 	r.collectDecls(file)
 	r.resolveDecls(file)
 	return file
@@ -36,16 +51,18 @@ func (r *Resolver) collectDecls(file *File) {
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *StructDecl:
+			if len(d.TypeParams) > 0 {
+				r.genericStructs[d.Name] = d
+				continue // Do NOT put templates in standard symbol table
+			}
 			r.pkg.Define(&Symbol{
-				Name: d.Name,
-				Kind: SymStruct,
+				Name: d.Name, Kind: SymStruct,
 				Type: &VStruct{Name: d.Name, Decl: d},
 				Decl: d,
 			})
 		case *ClassDecl:
 			r.pkg.Define(&Symbol{
-				Name: d.Name,
-				Kind: SymClass,
+				Name: d.Name, Kind: SymClass,
 				Type: &VClass{Name: d.Name, Decl: d},
 				Decl: d,
 			})
@@ -57,24 +74,21 @@ func (r *Resolver) collectDecls(file *File) {
 			enumType := &VEnum{Name: d.Name, RawType: rawType, Decl: d}
 			r.pkg.Define(&Symbol{Name: d.Name, Kind: SymEnum, Type: enumType, Decl: d})
 			for _, c := range d.Cases {
-				r.pkg.Define(&Symbol{
-					Name: d.Name + "." + c.Name,
-					Kind: SymEnumCase,
-					Type: enumType,
-					Decl: d,
-				})
+				r.pkg.Define(&Symbol{Name: d.Name + "." + c.Name, Kind: SymEnumCase, Type: enumType, Decl: d})
 				r.pkg.Define(&Symbol{Name: c.Name, Kind: SymEnumCase, Type: enumType, Decl: d})
 			}
 		case *TypeAliasDecl:
 			t := r.resolveTypeExpr(d.Type, r.pkg)
 			r.pkg.Define(&Symbol{
-				Name:    d.Name,
-				Kind:    SymTypeAlias,
-				Type:    &VTypeAlias{Name: d.Name, Underlying: t},
-				Decl:    d,
-				IsConst: true,
+				Name: d.Name, Kind: SymTypeAlias,
+				Type: &VTypeAlias{Name: d.Name, Underlying: t},
+				Decl: d, IsConst: true,
 			})
 		case *FuncDecl:
+			if len(d.TypeParams) > 0 {
+				r.genericFuncs[d.Name] = d
+				continue // Do NOT put templates in standard symbol table
+			}
 			if d.Receiver == nil {
 				r.pkg.Define(&Symbol{Name: d.Name, Kind: SymFunc, Decl: d})
 			}
@@ -89,30 +103,30 @@ func (r *Resolver) collectDecls(file *File) {
 // ─── Pass 2: resolve types and bodies ────────────────────────────────────────
 
 func (r *Resolver) resolveDecls(file *File) {
-	for _, decl := range file.Decls {
+	// Crucial: Iterating by index rather than range allows us to resolve 
+	// newly appended generic clones dynamically at the end of the file!
+	for i := 0; i < len(file.Decls); i++ {
+		decl := file.Decls[i]
 		switch d := decl.(type) {
 		case *FuncDecl:
-			r.resolveFunc(d)
+			if len(d.TypeParams) == 0 {
+				r.resolveFunc(d)
+			}
 		case *VarDecl:
 			r.resolveVarDeclGlobal(d)
 		case *StructDecl:
-			r.resolveStruct(d)
+			if len(d.TypeParams) == 0 {
+				r.resolveStruct(d)
+			}
 		case *ClassDecl:
 			r.resolveClass(d)
 		}
 	}
 }
 
+// Restore resolveFunc and resolveStruct to normal! Generic definitions never get here.
 func (r *Resolver) resolveFunc(fn *FuncDecl) {
 	fnScope := NewScope(r.pkg)
-
-	// NEW: Register generic type parameters in the function's scope
-	for _, tparam := range fn.TypeParams {
-		fnScope.Define(&Symbol{
-			Name: tparam, Kind: SymTypeAlias,
-			Type: &VGenericParam{Name: tparam},
-		})
-	}
 
 	if fn.Receiver != nil {
 		recvType := r.resolveTypeExpr(fn.Receiver.Type, fnScope)
@@ -140,18 +154,8 @@ func (r *Resolver) resolveFunc(fn *FuncDecl) {
 }
 
 func (r *Resolver) resolveStruct(d *StructDecl) {
-	structScope := NewScope(r.pkg) // NEW: Structs need their own scope now
-	
-	// NEW: Register generic type parameters in the struct's scope
-	for _, tparam := range d.TypeParams {
-		structScope.Define(&Symbol{
-			Name: tparam, Kind: SymTypeAlias,
-			Type: &VGenericParam{Name: tparam},
-		})
-	}
-	
 	for _, f := range d.Fields {
-		r.resolveTypeExpr(f.Type, structScope) // UPDATED: Pass structScope
+		r.resolveTypeExpr(f.Type, r.pkg)
 	}
 }
 
@@ -507,6 +511,25 @@ func (r *Resolver) resolveIdent(e *IdentExpr, scope *Scope) VType {
 
 func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 	if id, ok := e.Func.(*IdentExpr); ok {
+		
+		// NEW: Intercept Generic Function Calls!
+		if len(e.TypeArgs) > 0 {
+			if genFn, exists := r.genericFuncs[id.Name]; exists {
+				var resolvedArgs []VType
+				for _, ta := range e.TypeArgs {
+					resolvedArgs = append(resolvedArgs, r.resolveTypeExpr(ta, scope))
+				}
+				// Clone and append to AST
+				concreteName := r.instantiateFunc(genFn, resolvedArgs, e.TypeArgs)
+				
+				// Transform AST node into a normal, concrete CallExpr
+				id.Name = concreteName
+				e.TypeArgs = nil
+			} else {
+				r.diags.Errorf(e.Pos, "unknown generic function %q", id.Name)
+			}
+		}
+		
 		if bt, isBT := BuiltinTypes[id.Name]; isBT {
 			conv := &TypeConvExpr{
 				exprBase:   exprBase{Pos: id.Pos},
@@ -518,7 +541,6 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 			}
 			conv.SetVType(bt)
 			e.SetVType(bt)
-			_ = conv
 			return bt
 		}
 		if sym, ok2 := scope.Lookup(id.Name); ok2 {
@@ -528,7 +550,6 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 				}
 				return sym.Type
 			}
-			// Handle Enum(rawValue: X) initialization
 			if sym.Kind == SymEnum {
 				if len(e.Args) == 1 && e.Args[0].Label == "rawValue" {
 					r.resolveExpr(e.Args[0].Value, scope)
@@ -544,7 +565,6 @@ func (r *Resolver) resolveCallExpr(e *CallExpr, scope *Scope) VType {
 	if id, ok := e.Func.(*IdentExpr); ok {
 		if sym, ok2 := scope.Lookup(id.Name); ok2 {
 			if fn, ok3 := sym.Decl.(*FuncDecl); ok3 {
-				// Propagate param types down to DotEnumExpr args (e.g. coinValue(c: .quarter))
 				posIdx := 0
 				for _, a := range e.Args {
 					if dot, ok4 := a.Value.(*DotEnumExpr); ok4 {
@@ -675,6 +695,21 @@ func (r *Resolver) resolveIndexExpr(e *IndexExpr, scope *Scope) VType {
 }
 
 func (r *Resolver) resolveStructLit(e *StructLitExpr, scope *Scope) VType {
+	// NEW: Intercept Generic Struct Literals
+	if len(e.TypeArgs) > 0 {
+		if genSt, exists := r.genericStructs[e.TypeName]; exists {
+			var resolvedArgs []VType
+			for _, ta := range e.TypeArgs {
+				resolvedArgs = append(resolvedArgs, r.resolveTypeExpr(ta, scope))
+			}
+			concreteName := r.instantiateStruct(genSt, resolvedArgs, e.TypeArgs)
+			e.TypeName = concreteName
+			e.TypeArgs = nil
+		} else {
+			r.diags.Errorf(e.Pos, "unknown generic struct %q", e.TypeName)
+		}
+	}
+
 	sym, ok := scope.Lookup(e.TypeName)
 	for _, f := range e.Fields {
 		r.resolveExpr(f.Value, scope)
@@ -787,6 +822,26 @@ func (r *Resolver) resolveNamedType(t *NamedTypeExpr, scope *Scope) VType {
 	if t.Pkg != "" {
 		name = t.Pkg + "." + t.Name
 	}
+	
+	// NEW: Intercept Generic Struct instances!
+	if len(t.TypeArgs) > 0 {
+		if genSt, exists := r.genericStructs[name]; exists {
+			var resolvedArgs []VType
+			for _, ta := range t.TypeArgs {
+				resolvedArgs = append(resolvedArgs, r.resolveTypeExpr(ta, scope))
+			}
+			// Clone and append to AST
+			concreteName := r.instantiateStruct(genSt, resolvedArgs, t.TypeArgs)
+			
+			// Rewrite this node to point to the concrete struct
+			t.Name = concreteName
+			t.TypeArgs = nil
+			name = concreteName
+		} else {
+			r.diags.Errorf(t.Pos, "unknown generic struct %q", name)
+		}
+	}
+
 	if bt, ok := BuiltinTypes[name]; ok {
 		return bt
 	}
