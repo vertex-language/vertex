@@ -684,10 +684,28 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 	case *AssignStmt:
 		l.lowerAssign(b, st, fc)
 	case *ReturnStmt:
-		fc.emitDefers(b)
 		if st.Value != nil {
-			b.ReturnVal(l.lowerExpr(b, st.Value, fc))
+			// 1. Evaluate the return expression BEFORE defers
+			valExpr := l.lowerExpr(b, st.Value, fc)
+			
+			// Get the CIR type for the temporary variable
+			vt := st.Value.GetVType()
+			ct := l.vtypeToCIR(vt)
+			if ct == nil {
+				ct = l.vtypeToCIRFallback(vt)
+			}
+			
+			// 2. Store it in a safe temporary local
+			tmp := b.Local(l.tempName(), ct)
+			b.Assign(tmp, valExpr)
+			
+			// 3. NOW it is safe to emit the defers (freeing memory)
+			fc.emitDefers(b)
+			
+			// 4. Return the safely stored value
+			b.ReturnVal(tmp)
 		} else {
+			fc.emitDefers(b)
 			b.Return()
 		}
 	case *DeferStmt:
