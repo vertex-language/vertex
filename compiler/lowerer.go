@@ -2027,12 +2027,9 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 	if baseAST, steps, ok := l.collectStructChain(e); ok {
 		baseExpr := l.lowerExpr(b, baseAST, fc)
 
-		// Class receivers are pointers — dereference before StructLoad.
 		if vc, isClass := baseAST.GetVType().(*VClass); isClass {
 			baseExpr = cir.Deref(baseExpr, l.classTypes[vc.Name])
 		}
-		// Pointer receiver struct params share the same issue: VType is the
-		// bare struct but the CIR value is a pointer.
 		if id, ok2 := baseAST.(*IdentExpr); ok2 && fc.ptrParams[id.Name] {
 			if vs, ok3 := baseAST.GetVType().(*VStruct); ok3 {
 				if structST, ok4 := l.structTypes[vs.Name]; ok4 {
