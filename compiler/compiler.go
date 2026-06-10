@@ -21,6 +21,7 @@ type Config struct {
 	Target      cir.Target
 	PackagesDir string     // central packages root ($VERTEX_PATH / --packages-dir)
 	ObjectFunc  ObjectFunc // backend: *cir.Module → .o bytes; nil disables package compilation
+	Rebuild     bool       // forces cache wipe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ func New(cfg Config) *Compiler {
 	return &Compiler{
 		cfg:    cfg,
 		diags:  NewDiagnostics(),
-		loader: NewPackageLoader(cfg.PackagesDir, cfg.Target, cfg.ObjectFunc),
+		loader: NewPackageLoader(cfg.PackagesDir, cfg.Target, cfg.ObjectFunc, cfg.Rebuild),
 	}
 }
 

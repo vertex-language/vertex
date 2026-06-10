@@ -59,10 +59,15 @@ type PackageLoader struct {
 	cacheDir    string                      // packagesDir/.cache
 }
 
-func NewPackageLoader(packagesDir string, target cir.Target, objectFunc ObjectFunc) *PackageLoader {
+func NewPackageLoader(packagesDir string, target cir.Target, objectFunc ObjectFunc, rebuild bool) *PackageLoader {
 	cacheDir := ""
 	if packagesDir != "" {
 		cacheDir = filepath.Join(packagesDir, ".cache")
+		
+		// Wipe the cache directory if -rebuild is active
+		if rebuild {
+			_ = os.RemoveAll(cacheDir)
+		}
 	}
 	return &PackageLoader{
 		packagesDir: packagesDir,

@@ -75,6 +75,7 @@ func run(args []string, stderr io.Writer) int {
 		targetStr   string
 		printVer    bool
 		packagesDir string
+		rebuild     bool
 		libDirs     stringListFlag
 		libs        stringListFlag
 	)
@@ -90,6 +91,7 @@ func run(args []string, stderr io.Writer) int {
 	fs.BoolVar(&printVer, "v", false, "shorthand for -version")
 	fs.StringVar(&packagesDir, "packages-dir", defaultPackagesDir(),
 		"Vertex packages directory (overrides $VERTEX_PATH)")
+	fs.BoolVar(&rebuild, "rebuild", false, "force rebuild of cached packages")
 	fs.Var(&libDirs, "L", "add a library search `dir` (ELF targets only, repeatable)")
 	fs.Var(&libs, "l", "link against lib`name` e.g. -lc -lm (ELF targets only, repeatable)")
 
@@ -105,6 +107,7 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  vertex -emit-c -o arrays.c ./packages/arrays/ (emit C source for a package)\n")
 		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs                (run test functions in file)\n")
 		fmt.Fprintf(stderr, "  vertex -test -dir .                            (run all tests recursively)\n")
+		fmt.Fprintf(stderr, "  vertex -rebuild -o main main.vs               (force rebuild of cached packages)\n")
 	}
 
 	if err := fs.Parse(expandShortFlags(args)); err != nil {
@@ -169,6 +172,7 @@ func run(args []string, stderr io.Writer) int {
 		ObjectFunc: func(mod *cir.Module) ([]byte, error) {
 			return moduleToObject(mod, mTarget)
 		},
+		Rebuild: rebuild,
 	}
 
 	// ── Test mode ─────────────────────────────────────────────────────────────
