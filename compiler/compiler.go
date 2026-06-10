@@ -83,7 +83,7 @@ func (c *Compiler) CompileFile(path string) (*cir.Module, [][]byte, error) {
 func (c *Compiler) CompileDir(dir string) (*cir.Module, [][]byte, error) {
 	c.diags.Reset()
 
-	srcPaths, sources, err := collectSources(dir)
+	_, sources, err := collectSources(dir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,7 +93,6 @@ func (c *Compiler) CompileDir(dir string) (*cir.Module, [][]byte, error) {
 
 	pkgName := filepath.Base(dir)
 	combined := strings.Join(sources, "\n\n")
-	// Use a virtual filename rooted in the directory for error reporting.
 	virtualFile := filepath.Join(dir, pkgName+".vs")
 
 	file, err := c.parseSource(combined, virtualFile)
