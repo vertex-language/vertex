@@ -1651,6 +1651,8 @@ func (l *Lowerer) lowerMethodCall(b *cir.Builder, e *MethodCallExpr, fc *funcCtx
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		result = l.lowerDynArrayMethod(b, recv, rt, e.Method, e.Args, fc)
+	case *VFixedArray:
+		result = l.lowerFixedArrayMethod(b, recv, rt, e.Method, e.Args, fc)
 	case *VString:
 		result = l.lowerStringMethod(b, recv, rt, e.Method, e.Args, fc)
 	case *VClass:
@@ -2441,6 +2443,49 @@ func (l *Lowerer) ensurePrintf() {
 		cir.Param("fmt", cir.ConstPtr(cir.Char)),
 		cir.Variadic,
 	)
+}
+
+func (l *Lowerer) lowerFixedArrayMethod(
+	b *cir.Builder, recv cir.Expr, rt *VFixedArray,
+	method string, args []*Arg, fc *funcCtx,
+) cir.Expr {
+	elemCIR := l.vtypeToCIR(rt.Elem)
+	if elemCIR == nil {
+		elemCIR = l.vtypeToCIRFallback(rt.Elem)
+	}
+
+	switch method {
+	case "fill":
+		val := l.lowerExpr(b, args[0].Value, fc)
+		from := int64(0)
+		to := int64(rt.Size)
+		for _, a := range args[1:] {
+			switch a.Label {
+			case "from":
+				if il, ok := a.Value.(*IntLitExpr); ok {
+					from = il.Value
+				}
+			case "to":
+				if il, ok := a.Value.(*IntLitExpr); ok {
+					to = il.Value
+				}
+			}
+		}
+		i := b.Local(l.tempName(), cir.UInt32)
+		b.Assign(i, b.Cast(cir.UInt32, cir.UIntLit(uint64(from))))
+		limit := b.Cast(cir.UInt32, cir.UIntLit(uint64(to)))
+		post := &cir.AssignExpr{
+			LHS: i,
+			RHS: b.Add(i, b.Cast(cir.UInt32, cir.UIntLit(1))),
+		}
+		b.For(nil, b.Lt(i, limit), post, cir.B(func(b *cir.Builder) {
+			b.Assign(b.Index(recv, i, elemCIR), b.Cast(elemCIR, val))
+		}))
+		return nil
+	}
+
+	l.diags.Warnf(Pos{}, "fixed array method %q not supported", method)
+	return cir.NullPtr()
 }
 
 // printfFormatFor returns a printf format specifier appropriate for vt.
