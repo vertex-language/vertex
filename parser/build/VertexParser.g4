@@ -6,19 +6,37 @@
 //
 //   postfix   .method<T>()  .method()  .field  [i]  ()
 //   prefix    - ! ~   &  (address-of)
-//   binary    as T                                   (§17.5 cast / reinterpret,
-//                                                    highest-precedence binary op)
+//   binary    as T                                   (§6.1 cast / reinterpret)
 //             << >>
 //             * / % &*
 //             + - &+ &-
 //             & ^ |
-//             ... ..
-//             ??                                    (right-associative)
+//             ... ..<
+//             ??                                     (right-associative)
 //             == != < > <= >= === !==
 //             &&
 //             ||
 //             ? :                                    (right-associative)
 //   statement = += -= *= /= %=
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ARRAY TYPES  (§24)
+//
+//   [T]      — dynamic heap array. var required; push/pop valid.
+//   [T; N]   — fixed stack array. Size N is a compile-time expr and is part
+//              of the type — [uint8; 1024] and [uint8; 512] are distinct types.
+//              Zero-fill is implicit when no initializer is provided.
+//
+//   Declaration forms:
+//     var buf: [uint8; 1024]              — fixed, zero-fill, no = required
+//     var buf: [uint8; 1024] = [1, 2, …]  — fixed, explicit initializer
+//     var x:   [int32] = []              — dynamic, empty
+//     var x  = [1, 2, 3]                — dynamic (var + literal)
+//     let x  = [1, 2, 3]                — fixed immutable (let + literal)
+//
+//   varDecl alt 1 handles all [T; N] annotations (with or without =).
+//   varDecl alt 2 handles all other declarations.
+//   The SEMI token inside the brackets disambiguates the two alternatives.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // GENERIC SYNTAX  (§32)
@@ -31,15 +49,6 @@
 //   Qualified:       yourpackage.Box<string>{value: "world"}
 //   Type position:   -> Box<int32>   var x: Box<string>
 //
-//   Generic calls and struct literals are anchored to qualifiedIdent (not
-//   arbitrary expr) in the seed alternatives — this eliminates the classic
-//   angle-bracket ambiguity with comparison operators.  a < b > (c) parses
-//   as comparisons; identity<int32>(v) parses as a generic call because
-//   'identity' is a qualifiedIdent seed, not a binary-expr continuation.
-//
-//   Generic method calls (expr DOT IDENTIFIER LT…GT LPAREN) are a left-
-//   recursive postfix alternative and must precede the plain method-call
-//   alternative so ANTLR4 tries the longer match first.
 // ─────────────────────────────────────────────────────────────────────────────
 // INTENTIONAL OVER-PERMISSIVENESS (backend narrows these)
 //
@@ -51,8 +60,8 @@
 //     validates that the left-hand expression is an addressable lvalue.
 //   • expr AS typeExpr accepts any expr on the left and any typeExpr on the
 //     right; the backend validates the conversion/reinterpretation.
-//   • Expected(channel, string) accepts any IDENTIFIER as the channel name;
-//     backend validates it is a known channel (stdout).
+//   • Fixed array initializers [v1, v2, …] are array literal exprs; the backend
+//     validates element count matches N in [T; N].
 // ─────────────────────────────────────────────────────────────────────────────
 
 parser grammar VertexParser;
@@ -115,7 +124,6 @@ receiver
     : LPAREN IDENTIFIER COLON typeExpr RPAREN
     ;
 
-// §32  Unconstrained type parameters only in 2.1.
 genericParams
     : LT IDENTIFIER (COMMA IDENTIFIER)* GT
     ;
@@ -144,8 +152,6 @@ variadicParam
 
 // ════════════════════════════════════════════════════════════════════════════
 // §27  STRUCT DECLARATIONS
-//
-// genericParams? added — supports struct Box<T> { value: T }
 // ════════════════════════════════════════════════════════════════════════════
 
 structDecl
@@ -224,8 +230,20 @@ stmt
     | exprOrAssignStmt
     ;
 
+// ── §24  Variable declarations ────────────────────────────────────────────────
+//
+// Alt 1 — fixed array annotation: var buf: [T; N]  or  var buf: [T; N] = [...]
+//   The SEMI inside the brackets is the distinguishing token. The initializer
+//   is optional — omitting it implies zero-fill. When present, the backend
+//   validates that the literal contains exactly N elements.
+//
+// Alt 2 — standard form: var x = expr  or  var x: T = expr
+//   Covers dynamic arrays (var x: [T] = []), scalars, structs, and everything
+//   else. Always requires ASSIGN.
+//
 varDecl
-    : WEAK? (LET | VAR) bindingPattern (COLON typeExpr)? ASSIGN expr
+    : WEAK? (LET | VAR) bindingPattern COLON LBRACKET typeExpr SEMI expr RBRACKET (ASSIGN expr)?
+    | WEAK? (LET | VAR) bindingPattern (COLON typeExpr)? ASSIGN expr
     ;
 
 bindingPattern
@@ -285,22 +303,17 @@ assignOp
 
 // ════════════════════════════════════════════════════════════════════════════
 // EXPRESSIONS  §7–§17, §24–§26, §34–§35, §38
-//
-// Generic call and struct-literal seeds use qualifiedIdent rather than expr
-// to eliminate angle-bracket ambiguity with comparison operators (see file
-// header note).  Generic method calls use a left-recursive postfix form and
-// are listed before the plain method-call alternative.
 // ════════════════════════════════════════════════════════════════════════════
 
 expr
-    // ── Postfix (highest precedence) ─────────────────────────────────────────
-    : expr DOT IDENTIFIER LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN  // generic method call: a.method<T>(args)
-    | expr DOT IDENTIFIER LPAREN argList? RPAREN                                   // method call:         a.method(args)
-    | expr DOT IDENTIFIER                                                           // field access:        a.field
-    | expr LBRACKET expr RBRACKET                                                   // subscript:           a[i]
-    | expr LPAREN argList? RPAREN                                                   // call:                f(args)
+    // ── Postfix ───────────────────────────────────────────────────────────────
+    : expr DOT IDENTIFIER LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN
+    | expr DOT IDENTIFIER LPAREN argList? RPAREN
+    | expr DOT IDENTIFIER
+    | expr LBRACKET expr RBRACKET
+    | expr LPAREN argList? RPAREN
 
-    // ── Cast / reinterpret (§17.5) ────────────────────────────────────────────
+    // ── Cast / reinterpret (§6.1) ─────────────────────────────────────────────
     | expr AS typeExpr
 
     // ── Binary operators (high → low) ─────────────────────────────────────────
@@ -323,24 +336,21 @@ expr
     | AMP expr
 
     // ── Primary expressions ───────────────────────────────────────────────────
-    // Generic forms before plain forms — ANTLR4 tries these first.
-    // qualifiedIdent covers both simple names (Box) and qualified names
-    // (yourpackage.Box), keeping all three generic primary forms uniform.
-    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN       // generic call:         identity<int32>(args)
-    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LBRACE structLiteralFields? RBRACE  // generic struct lit:   Box<int32>{f: v}
-    | qualifiedIdent LBRACE structLiteralFields? RBRACE                            // struct literal:       Box{f: v} / pkg.Box{f: v}
-    | LBRACE mapLiteralFields? RBRACE                                              // map literal:          {"k": v}
-    | MAP LBRACKET typeExpr RBRACKET typeExpr LPAREN argList? RPAREN               // map alloc:            map[K]V()
-    | literal                                                                      // §1 literals
-    | IDENTIFIER                                                                   // variable / type name
-    | DOT IDENTIFIER                                                               // enum shorthand:       .caseName
-    | LPAREN expr RPAREN                                                           // grouping
-    | LPAREN expr (COMMA expr)+ RPAREN                                             // tuple literal:        (a, b, …)
-    | LPAREN RPAREN                                                                // empty tuple / void:   ()
-    | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET                               // array literal:        [a, b, …]
-    | anonFuncExpr                                                                 // anonymous function
-    | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN                               // Result(Ok,v) / Result(Err,e)
-    | asmExpr                                                                      // inline assembly
+    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LPAREN argList? RPAREN
+    | qualifiedIdent LT typeExpr (COMMA typeExpr)* GT LBRACE structLiteralFields? RBRACE
+    | qualifiedIdent LBRACE structLiteralFields? RBRACE
+    | LBRACE mapLiteralFields? RBRACE
+    | MAP LBRACKET typeExpr RBRACKET typeExpr LPAREN argList? RPAREN
+    | literal
+    | IDENTIFIER
+    | DOT IDENTIFIER
+    | LPAREN expr RPAREN
+    | LPAREN expr (COMMA expr)+ RPAREN
+    | LPAREN RPAREN
+    | LBRACKET (expr (COMMA expr)* COMMA?)? RBRACKET    // array literal: [], [1,2,3]
+    | anonFuncExpr
+    | RESULT LPAREN (OK | ERR_KW) COMMA expr RPAREN
+    | asmExpr
     ;
 
 argList
@@ -399,25 +409,24 @@ asmClobberDecl
 // ════════════════════════════════════════════════════════════════════════════
 // TYPE EXPRESSIONS  §3–§4, §24, §34, §37, §38.3, §42
 //
-// Generic instantiation added: baseType LT typeExpr (COMMA typeExpr)* GT
-// Listed before plain baseType so ANTLR4 tries the longer match first.
-// Covers all type positions: return types, annotations, struct fields, etc.
-//   func foo() -> Box<int32>
-//   var x: Box<string> = ...
-//   struct Pair<A, B> { first: A   second: B }
+// [T; N] is listed before [T] so ANTLR4 tries the longer match first.
+// After LBRACKET typeExpr, the SEMI token unambiguously selects [T; N]
+// over [T]. N is an expr — the backend validates it is a compile-time
+// integer literal.
 // ════════════════════════════════════════════════════════════════════════════
 
 typeExpr
     : STAR CONST_KW? typeExpr QUESTION?                              // §4   *T, *const T, *T?
-    | LBRACKET typeExpr RBRACKET                                     // §24  [T] array
+    | LBRACKET typeExpr SEMI expr RBRACKET                           // §24  [T; N] fixed array
+    | LBRACKET typeExpr RBRACKET                                     // §24  [T]   dynamic array
     | MAP LBRACKET typeExpr RBRACKET typeExpr                        // §25  map[K]V
     | CHAN typeExpr                                                   // §42  chan T
     | FUNC LPAREN funcTypeParams? RPAREN (ARROW typeExpr)?           // §34  func(T)->T
     | LPAREN tupleTypeElems? RPAREN                                  // §37  (T,T) tuple / ()
     | RESULT LPAREN typeExpr COMMA typeExpr RPAREN                   // §38.3 Result(T,E)
-    | EXPECTED LPAREN typeExpr COMMA STRING_LIT RPAREN               // compiler_testing §4.2
-    | baseType LT typeExpr (COMMA typeExpr)* GT QUESTION?            // §32  generic: Box<T>, Box<T>?
-    | baseType QUESTION?                                             // named type T, or optional T?
+    | EXPECTED LPAREN typeExpr COMMA STRING_LIT RPAREN               // §48  compiler testing
+    | baseType LT typeExpr (COMMA typeExpr)* GT QUESTION?            // §32  generic: Box<T>
+    | baseType QUESTION?                                             // named type T, or T?
     ;
 
 funcTypeParams

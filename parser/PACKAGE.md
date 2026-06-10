@@ -92,18 +92,19 @@ const (
 	VertexLexerRBRACKET             = 87
 	VertexLexerDOT                  = 88
 	VertexLexerCOMMA                = 89
-	VertexLexerHEX_FLOAT_LIT        = 90
-	VertexLexerHEX_INT_LIT          = 91
-	VertexLexerOCT_INT_LIT          = 92
-	VertexLexerBIN_INT_LIT          = 93
-	VertexLexerDEC_FLOAT_LIT        = 94
-	VertexLexerDEC_INT_LIT          = 95
-	VertexLexerCHAR_LIT             = 96
-	VertexLexerSTRING_LIT           = 97
-	VertexLexerMULTILINE_STRING_LIT = 98
-	VertexLexerIDENTIFIER           = 99
-	VertexLexerWS                   = 100
-	VertexLexerLINE_COMMENT         = 101
+	VertexLexerSEMI                 = 90
+	VertexLexerHEX_FLOAT_LIT        = 91
+	VertexLexerHEX_INT_LIT          = 92
+	VertexLexerOCT_INT_LIT          = 93
+	VertexLexerBIN_INT_LIT          = 94
+	VertexLexerDEC_FLOAT_LIT        = 95
+	VertexLexerDEC_INT_LIT          = 96
+	VertexLexerCHAR_LIT             = 97
+	VertexLexerSTRING_LIT           = 98
+	VertexLexerMULTILINE_STRING_LIT = 99
+	VertexLexerIDENTIFIER           = 100
+	VertexLexerWS                   = 101
+	VertexLexerLINE_COMMENT         = 102
 )
     VertexLexer tokens.
 
@@ -198,18 +199,19 @@ const (
 	VertexParserRBRACKET             = 87
 	VertexParserDOT                  = 88
 	VertexParserCOMMA                = 89
-	VertexParserHEX_FLOAT_LIT        = 90
-	VertexParserHEX_INT_LIT          = 91
-	VertexParserOCT_INT_LIT          = 92
-	VertexParserBIN_INT_LIT          = 93
-	VertexParserDEC_FLOAT_LIT        = 94
-	VertexParserDEC_INT_LIT          = 95
-	VertexParserCHAR_LIT             = 96
-	VertexParserSTRING_LIT           = 97
-	VertexParserMULTILINE_STRING_LIT = 98
-	VertexParserIDENTIFIER           = 99
-	VertexParserWS                   = 100
-	VertexParserLINE_COMMENT         = 101
+	VertexParserSEMI                 = 90
+	VertexParserHEX_FLOAT_LIT        = 91
+	VertexParserHEX_INT_LIT          = 92
+	VertexParserOCT_INT_LIT          = 93
+	VertexParserBIN_INT_LIT          = 94
+	VertexParserDEC_FLOAT_LIT        = 95
+	VertexParserDEC_INT_LIT          = 96
+	VertexParserCHAR_LIT             = 97
+	VertexParserSTRING_LIT           = 98
+	VertexParserMULTILINE_STRING_LIT = 99
+	VertexParserIDENTIFIER           = 100
+	VertexParserWS                   = 101
+	VertexParserLINE_COMMENT         = 102
 )
     VertexParser tokens.
 
@@ -2442,6 +2444,8 @@ type ITypeExprContext interface {
 	CONST_KW() antlr.TerminalNode
 	QUESTION() antlr.TerminalNode
 	LBRACKET() antlr.TerminalNode
+	SEMI() antlr.TerminalNode
+	Expr() IExprContext
 	RBRACKET() antlr.TerminalNode
 	MAP() antlr.TerminalNode
 	CHAN() antlr.TerminalNode
@@ -2473,13 +2477,17 @@ type IVarDeclContext interface {
 
 	// Getter signatures
 	BindingPattern() IBindingPatternContext
-	ASSIGN() antlr.TerminalNode
-	Expr() IExprContext
+	COLON() antlr.TerminalNode
+	LBRACKET() antlr.TerminalNode
+	TypeExpr() ITypeExprContext
+	SEMI() antlr.TerminalNode
+	AllExpr() []IExprContext
+	Expr(i int) IExprContext
+	RBRACKET() antlr.TerminalNode
 	LET() antlr.TerminalNode
 	VAR() antlr.TerminalNode
 	WEAK() antlr.TerminalNode
-	COLON() antlr.TerminalNode
-	TypeExpr() ITypeExprContext
+	ASSIGN() antlr.TerminalNode
 
 	// IsVarDeclContext differentiates from other interfaces.
 	IsVarDeclContext()
@@ -3256,6 +3264,8 @@ func (s *TypeExprContext) CONST_KW() antlr.TerminalNode
 
 func (s *TypeExprContext) EXPECTED() antlr.TerminalNode
 
+func (s *TypeExprContext) Expr() IExprContext
+
 func (s *TypeExprContext) FUNC() antlr.TerminalNode
 
 func (s *TypeExprContext) FuncTypeParams() IFuncTypeParamsContext
@@ -3284,6 +3294,8 @@ func (s *TypeExprContext) RESULT() antlr.TerminalNode
 
 func (s *TypeExprContext) RPAREN() antlr.TerminalNode
 
+func (s *TypeExprContext) SEMI() antlr.TerminalNode
+
 func (s *TypeExprContext) STAR() antlr.TerminalNode
 
 func (s *TypeExprContext) STRING_LIT() antlr.TerminalNode
@@ -3307,11 +3319,13 @@ func (s *VarDeclContext) ASSIGN() antlr.TerminalNode
 
 func (s *VarDeclContext) Accept(visitor antlr.ParseTreeVisitor) interface{}
 
+func (s *VarDeclContext) AllExpr() []IExprContext
+
 func (s *VarDeclContext) BindingPattern() IBindingPatternContext
 
 func (s *VarDeclContext) COLON() antlr.TerminalNode
 
-func (s *VarDeclContext) Expr() IExprContext
+func (s *VarDeclContext) Expr(i int) IExprContext
 
 func (s *VarDeclContext) GetParser() antlr.Parser
 
@@ -3319,7 +3333,13 @@ func (s *VarDeclContext) GetRuleContext() antlr.RuleContext
 
 func (*VarDeclContext) IsVarDeclContext()
 
+func (s *VarDeclContext) LBRACKET() antlr.TerminalNode
+
 func (s *VarDeclContext) LET() antlr.TerminalNode
+
+func (s *VarDeclContext) RBRACKET() antlr.TerminalNode
+
+func (s *VarDeclContext) SEMI() antlr.TerminalNode
 
 func (s *VarDeclContext) ToStringTree(ruleNames []string, recog antlr.Recognizer) string
 
