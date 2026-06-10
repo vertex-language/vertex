@@ -1498,6 +1498,31 @@ func (l *Lowerer) lowerBinaryExpr(b *cir.Builder, e *BinaryExpr, fc *funcCtx) ci
 }
 
 func (l *Lowerer) lowerUnaryExpr(b *cir.Builder, e *UnaryExpr, fc *funcCtx) cir.Expr {
+	switch e.Op {
+	case UnAddrOf:
+		// The Vertex grammar gives 'as' higher precedence than '&', so the
+		// user's "&x as *T" is parsed as "&(x as *T)" — i.e.:
+		//   UnaryExpr{UnAddrOf, CastExpr{Value: x, TargetType: *T}}
+		//
+		// Taking the address of a cast result is not a valid C lvalue.
+		// When the cast target is a pointer type, flip the order:
+		//   &(x as *T)  →  (*T)(&x)
+		if cast, ok := e.Operand.(*CastExpr); ok {
+			targetVT := l.resolveTypeExprVType(cast.TargetType)
+			if _, isPtr := targetVT.(*VPointer); isPtr {
+				inner := l.lowerExpr(b, cast.Value, fc)
+				addr := b.AddrOf(inner)
+				ct := l.vtypeToCIR(targetVT)
+				if ct == nil {
+					ct = l.vtypeToCIRFallback(targetVT)
+				}
+				return b.Cast(ct, addr)
+			}
+		}
+		op := l.lowerExpr(b, e.Operand, fc)
+		return b.AddrOf(op)
+	}
+
 	op := l.lowerExpr(b, e.Operand, fc)
 	switch e.Op {
 	case UnNeg:
@@ -1506,8 +1531,6 @@ func (l *Lowerer) lowerUnaryExpr(b *cir.Builder, e *UnaryExpr, fc *funcCtx) cir.
 		return b.Not(op)
 	case UnBitNot:
 		return b.BitNot(op)
-	case UnAddrOf:
-		return b.AddrOf(op)
 	}
 	return op
 }

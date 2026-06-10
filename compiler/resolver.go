@@ -658,7 +658,6 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 		return recvType
 	}
 
-	// Look up user-defined receiver methods (struct, class, or enum).
 	if r.file != nil {
 		var typeName string
 		switch rt := recvType.(type) {
@@ -670,6 +669,7 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 			typeName = rt.Name
 		}
 		if typeName != "" {
+			// Pass 1: user-defined receiver methods (FuncDecl with a receiver).
 			for _, decl := range r.file.Decls {
 				fn, ok := decl.(*FuncDecl)
 				if !ok || fn.Receiver == nil || fn.Name != e.Method {
@@ -678,6 +678,25 @@ func (r *Resolver) resolveMethodCall(e *MethodCallExpr, scope *Scope) VType {
 				if extractTypeName(fn.Receiver.Type) == typeName {
 					if fn.RetType != nil {
 						return r.resolveTypeExpr(fn.RetType, scope)
+					}
+					return &VVoid{}
+				}
+			}
+
+			// Pass 2: native class member method signatures (ClassDecl.Members).
+			// This handles calls like libc.socket(...) where "socket" is declared
+			// as a ClassMember, not as a FuncDecl with a receiver.
+			for _, decl := range r.file.Decls {
+				cl, ok := decl.(*ClassDecl)
+				if !ok || cl.Name != typeName {
+					continue
+				}
+				for _, m := range cl.Members {
+					if m.IsField || m.Name != e.Method {
+						continue
+					}
+					if m.RetType != nil {
+						return r.resolveTypeExpr(m.RetType, scope)
 					}
 					return &VVoid{}
 				}
