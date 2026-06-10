@@ -258,7 +258,7 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 	case *OptionalTypeExpr:
 		return cir.Ptr(l.resolvedFieldCIRType(t.Elem))
 	case *ArrayTypeExpr:
-		return l.at.VtxArrayPtr
+		return l.arrStructPtr
 	}
 	return cir.VoidPtr
 }
@@ -904,9 +904,9 @@ func (l *Lowerer) vtypeToCIR(vt VType) cir.Type {
 	case *VEnum:
 		return cir.Int32
 	case *VDynArray:
-		return l.at.VtxArrayPtr
+		return l.arrStructPtr
 	case *VString:
-		return cir.ConstPtr(cir.Char) // all strings are now const char*
+		return cir.ConstPtr(cir.Char)
 	case *VTypeAlias:
 		return l.vtypeToCIR(t.Underlying)
 	}
