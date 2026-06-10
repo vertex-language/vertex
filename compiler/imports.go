@@ -1,102 +1,109 @@
+// imports.go
 package compiler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
+	cir "github.com/vertex-language/ir/c"
 	"github.com/vertex-language/vertex/parser"
 )
 
+// ObjectFunc compiles a CIR module to target-specific object-file bytes.
+// Provided by cmd/vertex/main.go so the compiler package stays backend-agnostic.
+type ObjectFunc func(*cir.Module) ([]byte, error)
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Package — a compiled Vertex package (one directory)
+// CompiledPackage
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Package represents a resolved Vertex package.  For this release we parse the
-// files and extract symbol names for type-checking; we do NOT emit ir/c for
-// imported packages (assume they are linked separately).
-type Package struct {
+// CompiledPackage holds the type-checking scope and the compiled object bytes
+// for one Vertex package.
+type CompiledPackage struct {
 	ImportPath string
-	Name       string // last path segment
-	Scope      *Scope // exported symbols
+	Name       string
+	Scope      *Scope // exported symbols for type-checking
+	ObjBytes   []byte // compiled .o; nil if objectFunc was nil or compilation failed
 }
 
-// ExportTo copies all symbols from p.Scope into dst under both bare name and
-// "pkg.Name" qualified form.
-func (p *Package) ExportTo(dst *Scope) {
+// ExportTo copies all symbols into dst under both bare and qualified forms.
+func (p *CompiledPackage) ExportTo(dst *Scope) {
 	for name, sym := range p.Scope.Symbols() {
 		dst.Define(sym)
-		qualified := &Symbol{
+		dst.Define(&Symbol{
 			Name:    p.Name + "." + name,
 			Kind:    sym.Kind,
 			Type:    sym.Type,
 			Decl:    sym.Decl,
 			IsConst: sym.IsConst,
-		}
-		dst.Define(qualified)
+		})
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PackageLoader — resolves import paths → Package
+// PackageLoader
 // ─────────────────────────────────────────────────────────────────────────────
 
-// PackageLoader finds and parses Vertex packages from a list of search paths.
-// Results are cached by import path.
+// PackageLoader resolves, compiles, and caches Vertex packages from the
+// central packages directory (VERTEX_PATH equivalent).
 type PackageLoader struct {
-	searchPaths []string
-	cache       map[string]*Package
+	packagesDir string
+	target      cir.Target
+	objectFunc  ObjectFunc                  // nil → symbol extraction only
+	cache       map[string]*CompiledPackage // keyed by import path
+	cacheDir    string                      // packagesDir/.cache
 }
 
-func NewPackageLoader(searchPaths []string) *PackageLoader {
+func NewPackageLoader(packagesDir string, target cir.Target, objectFunc ObjectFunc) *PackageLoader {
+	cacheDir := ""
+	if packagesDir != "" {
+		cacheDir = filepath.Join(packagesDir, ".cache")
+	}
 	return &PackageLoader{
-		searchPaths: searchPaths,
-		cache:       make(map[string]*Package),
+		packagesDir: packagesDir,
+		target:      target,
+		objectFunc:  objectFunc,
+		cache:       make(map[string]*CompiledPackage),
+		cacheDir:    cacheDir,
 	}
 }
 
-// LoadImports resolves all imports declared in a file.
-func (l *PackageLoader) LoadImports(imports []*ImportDecl) ([]*Package, error) {
-	var pkgs []*Package
+// LoadImports resolves and compiles every import declared in a file.
+func (l *PackageLoader) LoadImports(imports []*ImportDecl) ([]*CompiledPackage, error) {
+	var pkgs []*CompiledPackage
 	for _, imp := range imports {
-		// A grouped import block generates one ImportDecl per path already.
-		paths := l.expandImport(imp.Path)
-		for _, path := range paths {
-			pkg, err := l.Load(path)
-			if err != nil {
-				return nil, fmt.Errorf("loading %q: %w", path, err)
-			}
-			pkgs = append(pkgs, pkg)
+		pkg, err := l.Load(imp.Path)
+		if err != nil {
+			return nil, fmt.Errorf("loading %q: %w", imp.Path, err)
 		}
+		pkgs = append(pkgs, pkg)
 	}
 	return pkgs, nil
 }
 
-// expandImport handles the case where a single ImportDecl might contain
-// a grouped import block (parsed as one path per line). For now it
-// returns the path as-is.
-func (l *PackageLoader) expandImport(path string) []string {
-	// Future: handle multi-path grouped imports.
-	return []string{path}
-}
-
-// Load returns the Package for the given import path, loading it if necessary.
-func (l *PackageLoader) Load(importPath string) (*Package, error) {
+// Load returns the CompiledPackage for importPath, compiling it if needed.
+func (l *PackageLoader) Load(importPath string) (*CompiledPackage, error) {
 	if pkg, ok := l.cache[importPath]; ok {
 		return pkg, nil
 	}
+
 	dir, err := l.resolve(importPath)
 	if err != nil {
-		// Non-fatal: emit a warning and return an empty package.
-		return &Package{
+		// Non-fatal: return an empty package so type-checking can continue.
+		// The linker will surface any missing symbols later.
+		return &CompiledPackage{
 			ImportPath: importPath,
 			Name:       filepath.Base(importPath),
 			Scope:      NewScope(nil),
 		}, nil
 	}
-	pkg, err := l.loadDir(importPath, dir)
+
+	pkg, err := l.buildPackage(importPath, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -104,57 +111,164 @@ func (l *PackageLoader) Load(importPath string) (*Package, error) {
 	return pkg, nil
 }
 
-// resolve searches all search paths for the given import path.
+// resolve maps importPath to a directory under packagesDir.
 func (l *PackageLoader) resolve(importPath string) (string, error) {
-	rel := filepath.FromSlash(importPath)
-	for _, sp := range l.searchPaths {
-		candidate := filepath.Join(sp, rel)
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate, nil
-		}
+	if l.packagesDir == "" {
+		return "", fmt.Errorf("no packages directory configured (set VERTEX_PATH or --packages-dir)")
 	}
-	return "", fmt.Errorf("package %q not found in search paths %v", importPath, l.searchPaths)
+	candidate := filepath.Join(l.packagesDir, filepath.FromSlash(importPath))
+	info, err := os.Stat(candidate)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("package %q not found in %s", importPath, l.packagesDir)
+	}
+	return candidate, nil
 }
 
-// loadDir parses all *.vs files in dir and extracts top-level symbols.
-func (l *PackageLoader) loadDir(importPath, dir string) (*Package, error) {
-	entries, err := os.ReadDir(dir)
+// buildPackage parses symbols and compiles all .vs files in dir.
+func (l *PackageLoader) buildPackage(importPath, dir string) (*CompiledPackage, error) {
+	srcPaths, sources, err := collectSources(dir)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", dir, err)
+		return nil, err
 	}
 
+	// ── Symbol extraction (for type-checking the caller) ──────────────────────
+	diags := NewDiagnostics()
 	pkgName := filepath.Base(importPath)
 	scope := NewScope(nil)
-	diags := NewDiagnostics()
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".vs") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", path, err)
-		}
-		file := parseFileQuick(string(data), path, diags)
+	for i, src := range sources {
+		file := parseFileQuick(src, srcPaths[i], diags)
 		if file == nil {
 			continue
 		}
-		// Override package name from the source file declaration.
 		if file.Package != "" {
 			pkgName = file.Package
 		}
 		collectFileSymbols(file, scope)
 	}
 
-	return &Package{
+	pkg := &CompiledPackage{
 		ImportPath: importPath,
 		Name:       pkgName,
 		Scope:      scope,
-	}, nil
+	}
+
+	// ── Compile to object file ────────────────────────────────────────────────
+	if l.objectFunc != nil && len(sources) > 0 {
+		if obj, err := l.compileToObject(importPath, srcPaths, sources, pkgName); err == nil {
+			pkg.ObjBytes = obj
+		}
+		// Non-fatal: linker will surface missing symbols.
+	}
+
+	return pkg, nil
 }
 
-// parseFileQuick parses a single Vertex source file and returns the AST File.
+// compileToObject drives the parse → resolve → lower → encode pipeline for a
+// package, using a content-hash disk cache to skip redundant work.
+func (l *PackageLoader) compileToObject(importPath string, paths, sources []string, pkgName string) ([]byte, error) {
+	hash := contentHash(sources)
+	if cached, err := l.readCache(hash); err == nil {
+		return cached, nil
+	}
+
+	mod, err := l.buildModule(importPath, paths, sources, pkgName)
+	if err != nil {
+		return nil, err
+	}
+
+	obj, err := l.objectFunc(mod)
+	if err != nil {
+		return nil, fmt.Errorf("encoding package %q: %w", importPath, err)
+	}
+
+	l.writeCache(hash, obj)
+	return obj, nil
+}
+
+// buildModule is the shared parse → resolve → lower pipeline used by both
+// package compilation and Compiler.CompileDir.
+func (l *PackageLoader) buildModule(importPath string, paths, sources []string, pkgName string) (*cir.Module, error) {
+	combined := strings.Join(sources, "\n\n")
+	diags := NewDiagnostics()
+
+	file := parseFileQuick(combined, paths[0], diags)
+	if file == nil || diags.HasErrors() {
+		return nil, fmt.Errorf("parse errors in package %q", importPath)
+	}
+	if file.Package == "" {
+		file.Package = pkgName
+	}
+
+	global := newGlobalScope()
+	resolver := NewResolver(diags, global)
+	resolver.ResolveFile(file)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("type errors in package %q: %v", importPath, diags.Error())
+	}
+
+	mod := cir.NewModule(pkgName)
+	mod.BindTarget(l.target)
+
+	lowerer := NewLowerer(diags, mod)
+	lowerer.LowerFile(file)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("lowering errors in package %q: %v", importPath, diags.Error())
+	}
+
+	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
+	return mod, nil
+}
+
+// ── Cache ─────────────────────────────────────────────────────────────────────
+
+func (l *PackageLoader) readCache(hash string) ([]byte, error) {
+	if l.cacheDir == "" {
+		return nil, fmt.Errorf("no cache dir")
+	}
+	return os.ReadFile(filepath.Join(l.cacheDir, hash+".o"))
+}
+
+func (l *PackageLoader) writeCache(hash string, data []byte) {
+	if l.cacheDir == "" {
+		return
+	}
+	_ = os.MkdirAll(l.cacheDir, 0o755)
+	_ = os.WriteFile(filepath.Join(l.cacheDir, hash+".o"), data, 0o644)
+}
+
+func contentHash(sources []string) string {
+	h := sha256.New()
+	for _, s := range sources {
+		h.Write([]byte(s))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ── Source helpers ────────────────────────────────────────────────────────────
+
+// collectSources returns all .vs paths and their contents from dir.
+func collectSources(dir string) (paths, sources []string, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".vs") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading %s: %w", p, err)
+		}
+		paths = append(paths, p)
+		sources = append(sources, string(data))
+	}
+	return paths, sources, nil
+}
+
+// parseFileQuick parses a single Vertex source file and returns the AST.
 // Parse errors are added to diags but do not stop processing.
 func parseFileQuick(src, filename string, diags *Diagnostics) *File {
 	input := antlr.NewInputStream(src)
@@ -172,11 +286,10 @@ func parseFileQuick(src, filename string, diags *Diagnostics) *File {
 	if diags.HasErrors() {
 		return nil
 	}
-	builder := newASTBuilder(filename, diags)
-	return builder.BuildFile(tree)
+	return newASTBuilder(filename, diags).BuildFile(tree)
 }
 
-// collectFileSymbols adds the top-level symbol names from file into scope.
+// collectFileSymbols adds top-level symbol names from file into scope.
 // Types are left as VUnknown; the resolver fills them in for the main file.
 func collectFileSymbols(file *File, scope *Scope) {
 	for _, decl := range file.Decls {

@@ -1,8 +1,11 @@
+// compiler.go
 package compiler
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
 	cir "github.com/vertex-language/ir/c"
@@ -16,37 +19,24 @@ import (
 // Config holds the compiler's runtime configuration.
 type Config struct {
 	Target      cir.Target
-	SearchPaths []string
-	// StdlibPath is the directory that contains the Vertex runtime packages
-	// (e.g. the folder that holds runtime/arrays). When set it is prepended to
-	// SearchPaths so built-in packages are always found before user paths.
-	StdlibPath string
+	PackagesDir string     // central packages root ($VERTEX_PATH / --packages-dir)
+	ObjectFunc  ObjectFunc // backend: *cir.Module → .o bytes; nil disables package compilation
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TestFuncInfo — metadata extracted from a test function's Expected annotation
+// TestFuncInfo
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestFuncInfo describes one test-qualified function and what it expects.
 type TestFuncInfo struct {
-	Name     string // function name, e.g. "test_add"
-	Channel  string // "stdout" | "exitCode"
-	Expected string // expected output string, e.g. "15"
+	Name     string
+	Channel  string
+	Expected string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compiler
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Compiler orchestrates the frontend pipeline for a single source file.
-//
-// Pipeline:
-//
-//	Source
-//	  └─ Parse (ANTLR)       → *File AST
-//	       └─ Import loading  → package scopes
-//	            └─ Resolve    → typed *File AST
-//	                 └─ Lower → ir/c module
 type Compiler struct {
 	cfg    Config
 	diags  *Diagnostics
@@ -57,43 +47,70 @@ func New(cfg Config) *Compiler {
 	if cfg.Target == cir.TargetUnknown {
 		cfg.Target = cir.TargetLinuxAMD64
 	}
-	searchPaths := cfg.SearchPaths
-	if cfg.StdlibPath != "" {
-		searchPaths = append([]string{cfg.StdlibPath}, searchPaths...)
-	}
 	return &Compiler{
 		cfg:    cfg,
 		diags:  NewDiagnostics(),
-		loader: NewPackageLoader(searchPaths),
+		loader: NewPackageLoader(cfg.PackagesDir, cfg.Target, cfg.ObjectFunc),
 	}
 }
 
 func (c *Compiler) Diagnostics() *Diagnostics { return c.diags }
 
-// CompileFile reads path and compiles it, returning the optimised C IR module.
-func (c *Compiler) CompileFile(path string) (*cir.Module, error) {
+// ─────────────────────────────────────────────────────────────────────────────
+// CompileFile — single file or package directory
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CompileFile compiles path, which may be a .vs file or a package directory.
+// It returns the CIR module and the compiled object bytes of all imported packages.
+func (c *Compiler) CompileFile(path string) (*cir.Module, [][]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot access %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return c.CompileDir(path)
+	}
 	data, err := readFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", path, err)
+		return nil, nil, fmt.Errorf("cannot read %s: %w", path, err)
 	}
 	return c.CompileSource(string(data), path)
 }
 
-// CompileSource compiles src (identified by filename for diagnostics) and
-// returns the optimised C IR module.
-func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
+// CompileDir compiles all .vs files in dir as a single package module.
+// Unlike CompileSource, runtime imports are not injected — package directories
+// are expected to declare their own dependencies explicitly.
+func (c *Compiler) CompileDir(dir string) (*cir.Module, [][]byte, error) {
 	c.diags.Reset()
 
-	file, err := c.parseSource(src, filename)
+	srcPaths, sources, err := collectSources(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if len(sources) == 0 {
+		return nil, nil, fmt.Errorf("no .vs files found in %s", dir)
 	}
 
-	injectRuntimeImports(file)
+	pkgName := filepath.Base(dir)
+	combined := strings.Join(sources, "\n\n")
+	// Use a virtual filename rooted in the directory for error reporting.
+	virtualFile := filepath.Join(dir, pkgName+".vs")
 
-	pkgs, err := c.loader.LoadImports(file.Imports)
+	file, err := c.parseSource(combined, virtualFile)
 	if err != nil {
-		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
+		return nil, nil, err
+	}
+
+	pkgs, loadErr := c.loader.LoadImports(file.Imports)
+	if loadErr != nil {
+		c.diags.Errorf(Pos{File: virtualFile}, "import error: %v", loadErr)
+	}
+
+	var pkgObjs [][]byte
+	for _, pkg := range pkgs {
+		if pkg.ObjBytes != nil {
+			pkgObjs = append(pkgObjs, pkg.ObjBytes)
+		}
 	}
 
 	global := newGlobalScope()
@@ -104,7 +121,55 @@ func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
 	resolver := NewResolver(c.diags, global)
 	resolver.ResolveFile(file)
 	if c.diags.HasErrors() {
-		return nil, c.diags.Error()
+		return nil, nil, c.diags.Error()
+	}
+
+	mod := cir.NewModule(pkgName)
+	mod.BindTarget(c.cfg.Target)
+
+	lowerer := NewLowerer(c.diags, mod)
+	lowerer.LowerFile(file)
+	if c.diags.HasErrors() {
+		return nil, nil, c.diags.Error()
+	}
+
+	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
+	return mod, pkgObjs, nil
+}
+
+// CompileSource compiles src (identified by filename for diagnostics) and
+// returns the CIR module together with compiled object bytes for all imports.
+func (c *Compiler) CompileSource(src, filename string) (*cir.Module, [][]byte, error) {
+	c.diags.Reset()
+
+	file, err := c.parseSource(src, filename)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	injectRuntimeImports(file)
+
+	pkgs, err := c.loader.LoadImports(file.Imports)
+	if err != nil {
+		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
+	}
+
+	var pkgObjs [][]byte
+	for _, pkg := range pkgs {
+		if pkg.ObjBytes != nil {
+			pkgObjs = append(pkgObjs, pkg.ObjBytes)
+		}
+	}
+
+	global := newGlobalScope()
+	for _, pkg := range pkgs {
+		pkg.ExportTo(global)
+	}
+
+	resolver := NewResolver(c.diags, global)
+	resolver.ResolveFile(file)
+	if c.diags.HasErrors() {
+		return nil, nil, c.diags.Error()
 	}
 
 	modName := file.Package
@@ -117,35 +182,33 @@ func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
 	lowerer := NewLowerer(c.diags, mod)
 	lowerer.LowerFile(file)
 	if c.diags.HasErrors() {
-		return nil, c.diags.Error()
+		return nil, nil, c.diags.Error()
 	}
 
 	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
-	return mod, nil
+	return mod, pkgObjs, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test compilation
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CompileTestFile parses a "build test" file and returns one *cir.Module per
-// test function. Each module is compiled as a standalone program with its own
-// main() that calls the single test function and prints its return value.
-// The returned slices are parallel: infos[i] describes modules[i].
-func (c *Compiler) CompileTestFile(path string) ([]TestFuncInfo, []*cir.Module, error) {
+// CompileTestFile parses a test file and returns one *cir.Module per test
+// function, the shared package object bytes for linking, and test metadata.
+func (c *Compiler) CompileTestFile(path string) ([]TestFuncInfo, []*cir.Module, [][]byte, error) {
 	data, err := readFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("cannot read %s: %w", path, err)
 	}
 	return c.compileTestSource(string(data), path)
 }
 
-func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*cir.Module, error) {
+func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*cir.Module, [][]byte, error) {
 	c.diags.Reset()
 
 	file, err := c.parseSource(src, filename)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	injectRuntimeImports(file)
@@ -164,13 +227,21 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		infos = append(infos, info)
 	}
 	if len(infos) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	pkgs, err := c.loader.LoadImports(file.Imports)
 	if err != nil {
 		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
 	}
+
+	var pkgObjs [][]byte
+	for _, pkg := range pkgs {
+		if pkg.ObjBytes != nil {
+			pkgObjs = append(pkgObjs, pkg.ObjBytes)
+		}
+	}
+
 	global := newGlobalScope()
 	for _, pkg := range pkgs {
 		pkg.ExportTo(global)
@@ -179,7 +250,7 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 	resolver := NewResolver(c.diags, global)
 	resolver.ResolveFile(file)
 	if c.diags.HasErrors() {
-		return nil, nil, c.diags.Error()
+		return nil, nil, nil, c.diags.Error()
 	}
 
 	modBase := stripExt(filepath.Base(filename))
@@ -195,14 +266,14 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		lwr.testEntryFunc = info.Name
 		lwr.LowerFile(file)
 		if c.diags.HasErrors() {
-			return nil, nil, c.diags.Error()
+			return nil, nil, nil, c.diags.Error()
 		}
 
 		mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
 		modules = append(modules, mod)
 	}
 
-	return infos, modules, nil
+	return infos, modules, pkgObjs, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,8 +296,7 @@ func (c *Compiler) parseSource(src, filename string) (*File, error) {
 	if c.diags.HasErrors() {
 		return nil, c.diags.Error()
 	}
-	b := newASTBuilder(filename, c.diags)
-	return b.BuildFile(tree), nil
+	return newASTBuilder(filename, c.diags).BuildFile(tree), nil
 }
 
 func stripExt(name string) string {
@@ -260,9 +330,8 @@ func readFile(path string) ([]byte, error) {
 	return osReadFile(path)
 }
 
-// injectRuntimeImports prepends the core runtime packages that every
-// compilation unit implicitly depends on. Safe to call multiple times —
-// it skips paths already present in the import list.
+// injectRuntimeImports prepends the core runtime packages that every user
+// compilation unit implicitly depends on. Safe to call multiple times.
 func injectRuntimeImports(file *File) {
 	for _, path := range []string{"arrays"} {
 		found := false

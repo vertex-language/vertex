@@ -42,7 +42,7 @@ func (f *stringListFlag) String() string {
 func (f *stringListFlag) Set(v string) error { *f = append(*f, v); return nil }
 
 func expandShortFlags(args []string) []string {
-	valueFlags := map[byte]bool{'l': true, 'L': true, 'I': true, 'o': true}
+	valueFlags := map[byte]bool{'l': true, 'L': true, 'o': true}
 	out := make([]string, 0, len(args))
 	for _, arg := range args {
 		if len(arg) >= 3 && arg[0] == '-' && arg[1] != '-' && valueFlags[arg[1]] {
@@ -74,35 +74,37 @@ func run(args []string, stderr io.Writer) int {
 		outputFile  string
 		targetStr   string
 		printVer    bool
-		paths       stringListFlag
+		packagesDir string
 		libDirs     stringListFlag
 		libs        stringListFlag
 	)
 
-	fs.BoolVar(&emitC, "emit-c", false, "emit C source code instead of native binary")
-	fs.BoolVar(&compileOnly, "c", false, "compile and assemble, but do not link (outputs object file)")
-	fs.BoolVar(&testMode, "test", false, "compile and run 'build test' functions, checking Expected(...) output")
+	fs.BoolVar(&emitC, "emit-c", false, "emit C source instead of a native binary (accepts file or directory)")
+	fs.BoolVar(&compileOnly, "c", false, "compile and assemble but do not link (outputs object file)")
+	fs.BoolVar(&testMode, "test", false, "compile and run test functions, checking Expected(...) output")
 	fs.StringVar(&testDir, "dir", "", "run tests recursively in `directory` (used with -test)")
 	fs.StringVar(&outputFile, "o", "", "write output to `file`")
 	fs.StringVar(&targetStr, "target", "linux-amd64",
 		"target platform: linux-amd64 (default), darwin-amd64, windows-amd64")
 	fs.BoolVar(&printVer, "version", false, "print version and exit")
 	fs.BoolVar(&printVer, "v", false, "shorthand for -version")
-	fs.Var(&paths, "I", "add a package search `path` (repeatable)")
+	fs.StringVar(&packagesDir, "packages-dir", defaultPackagesDir(),
+		"Vertex packages directory (overrides $VERTEX_PATH)")
 	fs.Var(&libDirs, "L", "add a library search `dir` (ELF targets only, repeatable)")
 	fs.Var(&libs, "l", "link against lib`name` e.g. -lc -lm (ELF targets only, repeatable)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
-		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs>\n\nFlags:\n")
+		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs|package/>\n\nFlags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(stderr, "\nExamples:\n")
-		fmt.Fprintf(stderr, "  vertex -o main main.vs                (build native executable)\n")
-		fmt.Fprintf(stderr, "  vertex -lc -lm -o main main.vs        (link against libc and libm)\n")
-		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs           (build object file only)\n")
-		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs      (emit C source)\n")
-		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs       (run test functions in file)\n")
-		fmt.Fprintf(stderr, "  vertex -test -dir .                   (run all test functions recursively)\n")
+		fmt.Fprintf(stderr, "  vertex -o main main.vs                        (build native executable)\n")
+		fmt.Fprintf(stderr, "  vertex -lc -o main main.vs                    (link against libc)\n")
+		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs                   (build object file only)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs              (emit C source for a file)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-c -o arrays.c ./packages/arrays/ (emit C source for a package)\n")
+		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs                (run test functions in file)\n")
+		fmt.Fprintf(stderr, "  vertex -test -dir .                            (run all tests recursively)\n")
 	}
 
 	if err := fs.Parse(expandShortFlags(args)); err != nil {
@@ -113,9 +115,10 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	var inputFiles []string
+	// ── Determine inputs ──────────────────────────────────────────────────────
 
-	// Determine input file(s) based on recursive directory flag
+	var inputFiles []string // used only by test mode
+
 	if testMode && testDir != "" {
 		if fs.NArg() > 0 {
 			fmt.Fprintf(stderr, "vertex: cannot specify both -dir and individual input files\n")
@@ -140,12 +143,16 @@ func run(args []string, stderr io.Writer) int {
 		}
 	} else {
 		if fs.NArg() != 1 {
-			fmt.Fprintf(stderr, "vertex: expected exactly 1 input file, got %d\n", fs.NArg())
+			fmt.Fprintf(stderr, "vertex: expected exactly 1 input file or directory, got %d\n", fs.NArg())
 			fs.Usage()
 			return 2
 		}
-		inputFiles = append(inputFiles, fs.Arg(0))
+		if testMode {
+			inputFiles = append(inputFiles, fs.Arg(0))
+		}
 	}
+
+	// ── Target + config ───────────────────────────────────────────────────────
 
 	cTarget, mTarget, ok := parseTarget(targetStr)
 	if !ok {
@@ -158,18 +165,25 @@ func run(args []string, stderr io.Writer) int {
 
 	cfg := compiler.Config{
 		Target:      cTarget,
-		SearchPaths: []string(paths),
+		PackagesDir: packagesDir,
+		ObjectFunc: func(mod *cir.Module) ([]byte, error) {
+			return moduleToObject(mod, mTarget)
+		},
 	}
 
 	// ── Test mode ─────────────────────────────────────────────────────────────
+
 	if testMode {
 		return runTests(inputFiles, cfg, mTarget, []string(libDirs), []string(libs), stderr)
 	}
 
 	// ── Normal compile ────────────────────────────────────────────────────────
-	inputFile := inputFiles[0] // Only ever 1 element during normal compilation
+
+	inputPath := fs.Arg(0)
+	inputIsDir := isDir(inputPath)
+
 	comp := compiler.New(cfg)
-	cMod, err := comp.CompileFile(inputFile)
+	cMod, pkgObjs, err := comp.CompileFile(inputPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -180,9 +194,15 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 
+	// ── -emit-c ───────────────────────────────────────────────────────────────
+
 	if emitC {
 		if outputFile == "" {
-			outputFile = replaceExt(inputFile, ".c")
+			if inputIsDir {
+				outputFile = replaceExt(filepath.Base(inputPath), ".c")
+			} else {
+				outputFile = replaceExt(inputPath, ".c")
+			}
 		}
 		cSource, err := cMod.EmitC()
 		if err != nil {
@@ -196,11 +216,18 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
+	// ── -c (compile only, no link) ────────────────────────────────────────────
+
 	if compileOnly {
 		if outputFile == "" {
-			outputFile = replaceExt(inputFile, ".o")
+			base := inputPath
+			if inputIsDir {
+				base = filepath.Base(inputPath)
+			}
 			if mTarget == mir.TargetWindowsAMD64 {
-				outputFile = replaceExt(inputFile, ".obj")
+				outputFile = replaceExt(base, ".obj")
+			} else {
+				outputFile = replaceExt(base, ".o")
 			}
 		}
 		objBytes, err := moduleToObject(cMod, mTarget)
@@ -215,13 +242,19 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
+	// ── Full binary ───────────────────────────────────────────────────────────
+
 	if outputFile == "" {
-		outputFile = replaceExt(inputFile, "")
+		if inputIsDir {
+			outputFile = filepath.Base(inputPath)
+		} else {
+			outputFile = replaceExt(inputPath, "")
+		}
 		if mTarget == mir.TargetWindowsAMD64 {
 			outputFile += ".exe"
 		}
 	}
-	if err := buildBinaryFromModule(cMod, outputFile, mTarget, []string(libDirs), []string(libs)); err != nil {
+	if err := buildBinaryFromModule(cMod, pkgObjs, outputFile, mTarget, []string(libDirs), []string(libs)); err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
 		return 1
 	}
@@ -235,8 +268,6 @@ func run(args []string, stderr io.Writer) int {
 // Test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
-// runTests compiles each test function as its own binary across multiple files,
-// executes it, and diffs stdout against the Expected(...) annotation.
 func runTests(
 	inputFiles []string,
 	cfg compiler.Config,
@@ -253,8 +284,6 @@ func runTests(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// On Linux, auto-prepend libc so printf resolves without the caller
-	// needing to pass -lc explicitly for test mode.
 	testLibs := append([]string(nil), libs...)
 	if mTarget == mir.TargetLinuxAMD64 {
 		hasC := false
@@ -270,17 +299,17 @@ func runTests(
 	}
 
 	passed, failed := 0, 0
-	binCounter := 0 // Ensures unique binary names if tests across files share names
+	binCounter := 0
 
 	for _, file := range inputFiles {
-		infos, modules, err := comp.CompileTestFile(file)
+		infos, modules, pkgObjs, err := comp.CompileTestFile(file)
 		if err != nil {
 			fmt.Fprintf(stderr, "vertex: %s: %v\n", file, err)
 			failed++
 			continue
 		}
 		if len(infos) == 0 {
-			continue // Gracefully skip files that don't have testing functions
+			continue
 		}
 
 		for i, info := range infos {
@@ -292,7 +321,7 @@ func runTests(
 				binPath += ".exe"
 			}
 
-			if buildErr := buildBinaryFromModule(modules[i], binPath, mTarget, libDirs, testLibs); buildErr != nil {
+			if buildErr := buildBinaryFromModule(modules[i], pkgObjs, binPath, mTarget, libDirs, testLibs); buildErr != nil {
 				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[build: %v]\n", info.Name, file, buildErr)
 				failed++
 				continue
@@ -332,7 +361,6 @@ func runTests(
 // Backend pipeline helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// moduleToObject runs MIR lowering + encoding and returns raw object-file bytes.
 func moduleToObject(mod *cir.Module, mTarget mir.Target) ([]byte, error) {
 	abi := mirAMD64.ABIForTarget(mTarget)
 	mirMod := mir.NewModule(mTarget)
@@ -370,10 +398,11 @@ func moduleToObject(mod *cir.Module, mTarget mir.Target) ([]byte, error) {
 	return nil, fmt.Errorf("unsupported target for object file")
 }
 
-// buildBinaryFromModule runs the full backend pipeline (object file → link)
-// and writes an executable to outputPath.
+// buildBinaryFromModule links the main module object together with all
+// compiled package objects and any requested C shared libraries.
 func buildBinaryFromModule(
 	mod *cir.Module,
+	pkgObjs [][]byte,
 	outputPath string,
 	mTarget mir.Target,
 	libDirs, libs []string,
@@ -395,6 +424,11 @@ func buildBinaryFromModule(
 		if addErr := linker.AddObject(objName, objBytes); addErr != nil {
 			return fmt.Errorf("add object: %w", addErr)
 		}
+		for i, pkgObj := range pkgObjs {
+			if addErr := linker.AddObject(fmt.Sprintf("pkg%d.o", i), pkgObj); addErr != nil {
+				return fmt.Errorf("add package object %d: %w", i, addErr)
+			}
+		}
 		searchDirs := append(append([]string(nil), libDirs...), elfLibSearchDirs()...)
 		for _, p := range searchDirs {
 			linker.AddLibraryPath(p)
@@ -413,11 +447,17 @@ func buildBinaryFromModule(
 	case mir.TargetWindowsAMD64:
 		linker := lnkPE.NewLinker(lnkPE.ArchAMD64)
 		linker.AddObject(objName, objBytes)
+		for i, pkgObj := range pkgObjs {
+			linker.AddObject(fmt.Sprintf("pkg%d.obj", i), pkgObj)
+		}
 		exeBytes, err = linker.Link()
 
 	case mir.TargetDarwinAMD64:
 		linker := lnkMachO.NewLinker(lnkMachO.ArchAMD64)
 		linker.AddObject(objName, objBytes)
+		for i, pkgObj := range pkgObjs {
+			linker.AddObject(fmt.Sprintf("pkg%d.o", i), pkgObj)
+		}
 		exeBytes, err = linker.Link()
 
 	default:
@@ -437,7 +477,7 @@ func buildBinaryFromModule(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ELF shared-library resolution (unchanged)
+// ELF shared-library resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
 func elfLibSearchDirs() []string {
@@ -480,8 +520,26 @@ func isELF(data []byte) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Misc helpers (unchanged)
+// Misc helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// defaultPackagesDir returns $VERTEX_PATH if set, otherwise ~/.vertex/packages.
+func defaultPackagesDir() string {
+	if p := os.Getenv("VERTEX_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".vertex", "packages")
+}
+
+// isDir reports whether path is an existing directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
 
 func writeOutput(path string, data []byte) error {
 	if path == "-" {
