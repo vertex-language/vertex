@@ -2119,11 +2119,11 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		if e.Field == "length" {
-			return b.GetField(recv, l.arrStruct, "len", cir.UInt32)
+			return b.Cast(cir.Int32, b.GetField(recv, l.arrStruct, "len", cir.UInt32))
 		}
 	case *VString:
 		if e.Field == "length" {
-			return b.Call("strlen", recv)
+			return b.Cast(cir.Int32, b.Call("strlen", recv))
 		}
 	case *VClass:
 		if st, ok := l.classTypes[rt.Name]; ok {

@@ -712,7 +712,7 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		if e.Field == "length" {
-			return &VInt{Bits: 32, Signed: false}
+			return &VInt{Bits: 32, Signed: true}
 		}
 	case *VStruct:
 		if rt.Decl != nil {
@@ -732,10 +732,9 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 		}
 	case *VString:
 		if e.Field == "length" {
-			return &VInt{Bits: 64, Signed: false}
+			return &VInt{Bits: 32, Signed: true}
 		}
 	case *VEnum:
-		// NEW: Resolve the .rawValue property wrapper
 		if e.Field == "rawValue" {
 			return rt.RawType
 		}
