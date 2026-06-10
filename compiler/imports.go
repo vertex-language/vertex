@@ -131,7 +131,6 @@ func (l *PackageLoader) buildPackage(importPath, dir string) (*CompiledPackage, 
 		return nil, err
 	}
 
-	// ── Symbol extraction (for type-checking the caller) ──────────────────────
 	diags := NewDiagnostics()
 	pkgName := filepath.Base(importPath)
 	scope := NewScope(nil)
@@ -153,12 +152,12 @@ func (l *PackageLoader) buildPackage(importPath, dir string) (*CompiledPackage, 
 		Scope:      scope,
 	}
 
-	// ── Compile to object file ────────────────────────────────────────────────
 	if l.objectFunc != nil && len(sources) > 0 {
-		if obj, err := l.compileToObject(importPath, srcPaths, sources, pkgName); err == nil {
-			pkg.ObjBytes = obj
+		obj, err := l.compileToObject(importPath, srcPaths, sources, pkgName)
+		if err != nil {
+			return nil, fmt.Errorf("package %q failed to compile:\n%w", importPath, err)
 		}
-		// Non-fatal: linker will surface missing symbols.
+		pkg.ObjBytes = obj
 	}
 
 	return pkg, nil
@@ -186,15 +185,14 @@ func (l *PackageLoader) compileToObject(importPath string, paths, sources []stri
 	return obj, nil
 }
 
-// buildModule is the shared parse → resolve → lower pipeline used by both
-// package compilation and Compiler.CompileDir.
+// buildModule is the shared parse → resolve → lower pipeline.
 func (l *PackageLoader) buildModule(importPath string, paths, sources []string, pkgName string) (*cir.Module, error) {
 	combined := strings.Join(sources, "\n\n")
 	diags := NewDiagnostics()
 
 	file := parseFileQuick(combined, paths[0], diags)
 	if file == nil || diags.HasErrors() {
-		return nil, fmt.Errorf("parse errors in package %q", importPath)
+		return nil, diags.Error()
 	}
 	if file.Package == "" {
 		file.Package = pkgName
@@ -204,7 +202,7 @@ func (l *PackageLoader) buildModule(importPath string, paths, sources []string, 
 	resolver := NewResolver(diags, global)
 	resolver.ResolveFile(file)
 	if diags.HasErrors() {
-		return nil, fmt.Errorf("type errors in package %q: %v", importPath, diags.Error())
+		return nil, diags.Error()
 	}
 
 	mod := cir.NewModule(pkgName)
@@ -213,7 +211,7 @@ func (l *PackageLoader) buildModule(importPath string, paths, sources []string, 
 	lowerer := NewLowerer(diags, mod)
 	lowerer.LowerFile(file)
 	if diags.HasErrors() {
-		return nil, fmt.Errorf("lowering errors in package %q: %v", importPath, diags.Error())
+		return nil, diags.Error()
 	}
 
 	mod.Optimize(cir.ConstantFold, cir.DeadCodeElim, cir.StrengthReduce)
