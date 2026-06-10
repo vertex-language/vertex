@@ -17,6 +17,10 @@ import (
 type Config struct {
 	Target      cir.Target
 	SearchPaths []string
+	// StdlibPath is the directory that contains the Vertex runtime packages
+	// (e.g. the folder that holds runtime/arrays). When set it is prepended to
+	// SearchPaths so built-in packages are always found before user paths.
+	StdlibPath string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,10 +57,14 @@ func New(cfg Config) *Compiler {
 	if cfg.Target == cir.TargetUnknown {
 		cfg.Target = cir.TargetLinuxAMD64
 	}
+	searchPaths := cfg.SearchPaths
+	if cfg.StdlibPath != "" {
+		searchPaths = append([]string{cfg.StdlibPath}, searchPaths...)
+	}
 	return &Compiler{
 		cfg:    cfg,
 		diags:  NewDiagnostics(),
-		loader: NewPackageLoader(cfg.SearchPaths),
+		loader: NewPackageLoader(searchPaths),
 	}
 }
 
@@ -80,6 +88,8 @@ func (c *Compiler) CompileSource(src, filename string) (*cir.Module, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	injectRuntimeImports(file)
 
 	pkgs, err := c.loader.LoadImports(file.Imports)
 	if err != nil {
@@ -138,8 +148,8 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		return nil, nil, err
 	}
 
-	// Collect test-function metadata (no resolution needed yet — names and
-	// Expected annotations are available straight from the AST).
+	injectRuntimeImports(file)
+
 	var infos []TestFuncInfo
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*FuncDecl)
@@ -157,7 +167,6 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		return nil, nil, nil
 	}
 
-	// Load imports and resolve once — the typed AST is read-only during lowering.
 	pkgs, err := c.loader.LoadImports(file.Imports)
 	if err != nil {
 		c.diags.Errorf(Pos{File: filename}, "import error: %v", err)
@@ -173,7 +182,6 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		return nil, nil, c.diags.Error()
 	}
 
-	// Lower one isolated module per test function.
 	modBase := stripExt(filepath.Base(filename))
 	var modules []*cir.Module
 
@@ -184,7 +192,7 @@ func (c *Compiler) compileTestSource(src, filename string) ([]TestFuncInfo, []*c
 		mod.BindTarget(c.cfg.Target)
 
 		lwr := NewLowerer(c.diags, mod)
-		lwr.testEntryFunc = info.Name // drives test-specific lowering
+		lwr.testEntryFunc = info.Name
 		lwr.LowerFile(file)
 		if c.diags.HasErrors() {
 			return nil, nil, c.diags.Error()
@@ -250,4 +258,22 @@ func (l *antlrErrorListener) SyntaxError(
 
 func readFile(path string) ([]byte, error) {
 	return osReadFile(path)
+}
+
+// injectRuntimeImports prepends the core runtime packages that every
+// compilation unit implicitly depends on. Safe to call multiple times —
+// it skips paths already present in the import list.
+func injectRuntimeImports(file *File) {
+	for _, path := range []string{"arrays"} {
+		found := false
+		for _, imp := range file.Imports {
+			if imp.Path == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			file.Imports = append([]*ImportDecl{{Path: path}}, file.Imports...)
+		}
+	}
 }
