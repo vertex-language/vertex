@@ -1710,7 +1710,6 @@ func (l *Lowerer) lowerDynArrayMethod(
 	case "pop":
 		optVT := &VOptional{Elem: rt.Elem}
 		optCT := l.vtypeToCIRFallback(optVT)
-		optSt := optCT.(*cir.StructType)
 		result := b.Local(l.tempName(), optCT)
 		b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
 			cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
@@ -1720,21 +1719,21 @@ func (l *Lowerer) lowerDynArrayMethod(
 			cir.B(func(b *cir.Builder) {
 				newLen := b.Sub(lenVal, cir.UIntLit(1))
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
-				elem := b.Index(dataPtr, newLen, elemCIR)
+				// capture element BEFORE decrementing len
+				elemLocal := b.Local(l.tempName(), elemCIR)
+				b.Assign(elemLocal, b.Index(dataPtr, newLen, elemCIR))
 				b.StructStore(cir.Deref(recv, as), newLen, cir.Step(as, "len", cir.UInt32))
 				b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
 					cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
-					cir.FieldInit{Field: "value", Value: elem},
+					cir.FieldInit{Field: "value", Value: elemLocal},
 				)))
 			}),
 		)
-		_ = optSt
 		return result
 
 	case "shift":
 		optVT := &VOptional{Elem: rt.Elem}
 		optCT := l.vtypeToCIRFallback(optVT)
-		optSt := optCT.(*cir.StructType)
 		result := b.Local(l.tempName(), optCT)
 		b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
 			cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
@@ -1743,15 +1742,16 @@ func (l *Lowerer) lowerDynArrayMethod(
 		b.If(b.Gt(lenVal, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
-				elem := b.Index(dataPtr, cir.UIntLit(0), elemCIR)
+				// capture element BEFORE removeAt shifts the array
+				elemLocal := b.Local(l.tempName(), elemCIR)
+				b.Assign(elemLocal, b.Index(dataPtr, cir.UIntLit(0), elemCIR))
 				b.Stmt(b.Call("arrays_removeAt", recv, cir.UIntLit(0)))
 				b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
 					cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
-					cir.FieldInit{Field: "value", Value: elem},
+					cir.FieldInit{Field: "value", Value: elemLocal},
 				)))
 			}),
 		)
-		_ = optSt
 		return result
 
 	case "delete":
