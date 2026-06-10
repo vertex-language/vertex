@@ -753,14 +753,6 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		}
 	}
 
-	autoDeref := false
-	if d.TypeHint == nil {
-		if ptr, isPtr := vtype.(*VPointer); isPtr {
-			vtype = ptr.Elem
-			autoDeref = true
-		}
-	}
-
 	for i, name := range d.Binding.Names {
 		_ = i
 		ref := l.declareLocal(b, name, vtype, d.IsLet)
@@ -784,23 +776,10 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		}
 
 		initExpr := l.lowerExpr(b, d.Value, fc)
-		if autoDeref && initExpr != nil {
-			elemCIR := l.vtypeToCIR(vtype)
-			if elemCIR == nil {
-				elemCIR = l.vtypeToCIRFallback(vtype)
-			}
-			initExpr = cir.Deref(initExpr, elemCIR)
-		}
 
 		if initExpr != nil {
 			initExpr = l.wrapOptional(vtype, d.Value.GetVType(), initExpr)
 
-			// Do NOT cast struct types. A struct compound literal must reach the
-			// MIR lowerer as a bare *c.CompoundLiteralExpr so the AssignStmt
-			// handler can detect it, spill the struct to a stack slot, and record
-			// addressTaken. Wrapping it in a CastExpr defeats that detection,
-			// causing DotFieldExpr reads to fall through to the broken shift-based
-			// fallback instead of the direct memory-load fast path.
 			if _, isOpt := vtype.(*VOptional); !isOpt {
 				if _, isStruct := vtype.(*VStruct); !isStruct {
 					if targetCT := l.vtypeToCIR(vtype); targetCT != nil {
