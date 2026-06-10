@@ -1708,29 +1708,51 @@ func (l *Lowerer) lowerDynArrayMethod(
 		return nil
 
 	case "pop":
-		tmp := b.Local(l.tempName(), elemCIR)
+		optVT := &VOptional{Elem: rt.Elem}
+		optCT := l.vtypeToCIRFallback(optVT)
+		optSt := optCT.(*cir.StructType)
+		result := b.Local(l.tempName(), optCT)
+		b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
+			cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
+		)))
 		lenVal := b.GetField(recv, as, "len", cir.UInt32)
 		b.If(b.Gt(lenVal, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
 				newLen := b.Sub(lenVal, cir.UIntLit(1))
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
-				b.Assign(tmp, b.Index(dataPtr, newLen, elemCIR))
+				elem := b.Index(dataPtr, newLen, elemCIR)
 				b.StructStore(cir.Deref(recv, as), newLen, cir.Step(as, "len", cir.UInt32))
+				b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
+					cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
+					cir.FieldInit{Field: "value", Value: elem},
+				)))
 			}),
 		)
-		return tmp
+		_ = optSt
+		return result
 
 	case "shift":
-		tmp := b.Local(l.tempName(), elemCIR)
+		optVT := &VOptional{Elem: rt.Elem}
+		optCT := l.vtypeToCIRFallback(optVT)
+		optSt := optCT.(*cir.StructType)
+		result := b.Local(l.tempName(), optCT)
+		b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
+			cir.FieldInit{Field: "has_value", Value: cir.BoolLit(false)},
+		)))
 		lenVal := b.GetField(recv, as, "len", cir.UInt32)
 		b.If(b.Gt(lenVal, cir.UIntLit(0)),
 			cir.B(func(b *cir.Builder) {
 				dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, as, "data", cir.VoidPtr))
-				b.Assign(tmp, b.Index(dataPtr, cir.UIntLit(0), elemCIR))
+				elem := b.Index(dataPtr, cir.UIntLit(0), elemCIR)
 				b.Stmt(b.Call("arrays_removeAt", recv, cir.UIntLit(0)))
+				b.Assign(result, cir.CompoundLit(optCT, cir.InitStruct(
+					cir.FieldInit{Field: "has_value", Value: cir.BoolLit(true)},
+					cir.FieldInit{Field: "value", Value: elem},
+				)))
 			}),
 		)
-		return tmp
+		_ = optSt
+		return result
 
 	case "delete":
 		b.Stmt(b.Call("arrays_free", recv))

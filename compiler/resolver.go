@@ -289,7 +289,6 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 }
 
 func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
-	// Value may be nil for fixed-array declarations without initializer: var buf: [T; N]
 	var valType VType
 	if d.Value != nil {
 		valType = r.resolveExpr(d.Value, scope)
@@ -299,26 +298,18 @@ func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
 
 	if d.TypeHint != nil {
 		hinted := r.resolveTypeExpr(d.TypeHint, scope)
-		// With the updated grammar, [T; N] and [T] are unambiguous:
-		//   FixedArrayTypeExpr → always VFixedArray (stack)
-		//   ArrayTypeExpr      → always VDynArray   (heap)
-		// The old VDynArray → VFixedArray coercion is no longer correct; remove it.
-
 		if d.Value != nil {
 			if dot, ok := d.Value.(*DotEnumExpr); ok {
 				dot.SetVType(hinted)
 			}
 		}
-
 		valType = hinted
 	} else if d.Value != nil {
-		// No explicit annotation — infer from binding kind:
-		//   let + array literal → fixed stack array  (keep VFixedArray)
-		//   var + array literal → dynamic heap array (convert to VDynArray)
 		if !d.IsLet {
 			if fa, isFixed := valType.(*VFixedArray); isFixed {
 				if _, isArr := d.Value.(*ArrayLitExpr); isArr {
 					valType = &VDynArray{Elem: fa.Elem}
+					d.Value.SetVType(valType) // propagate so lowerer sees VDynArray
 				}
 			}
 		}
