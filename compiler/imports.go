@@ -166,7 +166,11 @@ func (l *PackageLoader) buildPackage(importPath, dir string) (*CompiledPackage, 
 // compileToObject drives the parse → resolve → lower → encode pipeline for a
 // package, using a content-hash disk cache to skip redundant work.
 func (l *PackageLoader) compileToObject(importPath string, paths, sources []string, pkgName string) ([]byte, error) {
-	hash := contentHash(sources)
+	// contentHash includes the target so that cross-compiling for different
+	// platforms never returns a cached object built for a different ABI, and
+	// so that a compiler update that changes code generation (e.g. the SizeOf
+	// struct fix) is reflected in a new hash once the cache directory is cleared.
+	hash := contentHash(sources, l.target)
 	if cached, err := l.readCache(hash); err == nil {
 		return cached, nil
 	}
@@ -235,8 +239,14 @@ func (l *PackageLoader) writeCache(hash string, data []byte) {
 	_ = os.WriteFile(filepath.Join(l.cacheDir, hash+".o"), data, 0o644)
 }
 
-func contentHash(sources []string) string {
+// contentHash returns a short fingerprint of the package source files combined
+// with the compilation target. Including the target ensures that object files
+// cached for linux-amd64 are never served to a windows-amd64 build, and that
+// clearing the cache after a compiler update forces a clean rebuild.
+func contentHash(sources []string, target cir.Target) string {
 	h := sha256.New()
+	// Target string first so a target change always produces a different prefix.
+	h.Write([]byte(target.String()))
 	for _, s := range sources {
 		h.Write([]byte(s))
 	}
