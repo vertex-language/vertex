@@ -2143,6 +2143,10 @@ func (l *Lowerer) lowerFieldExpr(b *cir.Builder, e *FieldExpr, fc *funcCtx) cir.
 		if e.Field == "length" {
 			return b.Cast(cir.Int32, b.GetField(recv, l.arrStruct, "len", cir.UInt32))
 		}
+	case *VFixedArray:
+		if e.Field == "length" {
+			return cir.IntLit(int64(rt.Size))
+		}
 	case *VString:
 		if e.Field == "length" {
 			return b.Cast(cir.Int32, b.Call("strlen", recv))

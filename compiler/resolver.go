@@ -705,6 +705,10 @@ func (r *Resolver) resolveFieldExpr(e *FieldExpr, scope *Scope) VType {
 		if e.Field == "length" {
 			return &VInt{Bits: 32, Signed: true}
 		}
+	case *VFixedArray:
+		if e.Field == "length" {
+			return &VInt{Bits: 32, Signed: true}
+		}
 	case *VStruct:
 		if rt.Decl != nil {
 			for _, f := range rt.Decl.Fields {
