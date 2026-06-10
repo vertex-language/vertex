@@ -1,6 +1,6 @@
 # Vertex Programming Language
 
-**Version 2.1** · [Grammar Spec](docs/v2/grammar.md) · [Native Interface](docs/v2/native_interface.md)
+**Version 2.1** · [Grammar Spec](https://github.com/vertex-language/specs/README.md) · [Native Interface](https://github.com/vertex-language/specs/docs/)
 
 Vertex is a statically-typed systems and application programming language built
 for explicit control, zero-overhead C interop, and first-class concurrency.
@@ -58,7 +58,7 @@ build linux
 import "linux/lib/c"
 
 class C : c {
-    func printf(fmt:  ...*const char) -> int
+    func printf(fmt: ...*const char) -> int32
 }
 
 // fibRecursive computes the nth Fibonacci number using classic recursion.
@@ -78,9 +78,7 @@ func fibIterative(n: int32) -> int32 {
     var b: int32 = 1
     var i: int32 = 2
     while true {
-        if i > n {
-            break
-        }
+        if i > n { break }
         var tmp: int32 = a + b
         a = b
         b = tmp
@@ -89,16 +87,13 @@ func fibIterative(n: int32) -> int32 {
     return b
 }
 
-func main() -> int {
-
+func main() -> int32 {
     var libc = C()
 
     libc.printf("--- Recursive ---\n")
     var i: int32 = 0
     while true {
-        if i >= 10 {
-            break
-        }
+        if i >= 10 { break }
         libc.printf("fib(%d) = %d\n", i, fibRecursive(i))
         i = i + 1
     }
@@ -106,9 +101,7 @@ func main() -> int {
     libc.printf("--- Iterative ---\n")
     var j: int32 = 0
     while true {
-        if j >= 10 {
-            break
-        }
+        if j >= 10 { break }
         libc.printf("fib(%d) = %d\n", j, fibIterative(j))
         j = j + 1
     }
@@ -132,10 +125,10 @@ vertex -lc -o fib fib.vs
 All numeric conversions are explicit — there is no implicit coercion.
 
 ```vertex
-let x: int32  = 42
-var y: float32  = float32(x)   // explicit int → float32
+let x: int32   = 42
+var y: float32 = float32(x)   // explicit int → float32
 let name: string = "vertex"
-let flag: bool = true
+let flag: bool   = true
 
 // multiline string
 let banner: string = `
@@ -146,15 +139,15 @@ let banner: string = `
 
 Scalar types map directly to C:
 
-| Vertex          | C type     |
-|-----------------|------------|
-| `int` / `int32` | `int32_t`  |
-| `int64`         | `int64_t`  |
-| `uint8`         | `uint8_t`  |
-| `float32`       | `float`    |
-| `float64`       | `double`   |
-| `bool`          | `bool`     |
-| `string`        | see docs   |
+| Vertex          | C type    |
+|-----------------|-----------|
+| `int` / `int32` | `int32_t` |
+| `int64`         | `int64_t` |
+| `uint8`         | `uint8_t` |
+| `float32`       | `float`   |
+| `float64`       | `double`  |
+| `bool`          | `bool`    |
+| `string`        | see docs  |
 
 ---
 
@@ -175,7 +168,7 @@ increment(n: &count)   // count is now 1
 ```
 
 `let`/`var` and `*const` are orthogonal: `let` locks the binding;
-`*const` locks the data. All four combinations are valid.
+`*const` locks the pointed-to data. All four combinations are valid.
 
 ---
 
@@ -203,7 +196,7 @@ via `.delete()`, or opts into reference counting with `.new()`.
 
 ```vertex
 class Animal {
-    name: string
+    name:   string
     health: int32
 }
 
@@ -229,17 +222,21 @@ weak let observer = cat    // observer: Animal? — non-owning
 
 ### Arrays and Maps
 
-**Fixed arrays** are stack-allocated:
+**Fixed arrays** are stack-allocated. The size is part of the type and must be
+a compile-time literal.
 
 ```vertex
-var buf  = [uint8](1024)             // 1024 zero bytes, stack
-var mask = [uint8](repeating: 0xFF, count: 64)
+var buf:  [uint8; 1024]              // zero-filled, stack
+var mask: [uint8; 64]
+mask.fill(0xFF)
+
+let coords: [int32; 3] = [10, 20, 30]
 ```
 
-**Growable arrays** are heap-allocated and must be freed:
+**Dynamic arrays** are heap-allocated and growable. The caller must free them.
 
 ```vertex
-var items = [int32]()
+var items: [int32] = []
 defer items.delete()
 
 items.push(10)
@@ -321,10 +318,11 @@ func(data: [float32], out: chan float32) thread {
     out.close()
 }(dataset, ch).spawn()
 
-while true {
-    let val = ch.tryReceive() ?? break
-    // consume val
-}
+// blocking receive
+let val = ch.receive()
+
+// non-blocking receive — returns float32?
+let val = ch.tryReceive()
 ```
 
 ---
@@ -369,11 +367,9 @@ case Err(let msg):
 
 ### Native Interface
 
-Every foreign target — C libraries, OS syscalls, COM, CUDA, bare metal
-interrupts — is expressed through the same three-part pattern:
-an **import path**, a **class declaration**, and a **package**.
-
-The import prefix is the single source of truth for how the compiler emits:
+Every foreign target is expressed through the same pattern: an **import path**,
+a **class declaration**, and a **package**. The import prefix is the single
+source of truth for how the compiler emits the call.
 
 | Prefix       | Strategy                              |
 |--------------|---------------------------------------|
@@ -395,18 +391,8 @@ class C : c {
     func fopen(path: *const char, mode: *const char) -> *void?
     func fwrite(ptr: *const void, size: uint64, count: uint64, stream: *void) -> uint64
     func fclose(stream: *void) -> int32
-    func printf(fmt: *const char, ...) -> int32
+    func printf(fmt: ...*const char) -> int32
 }
-```
-
-```vertex
-var c = libc.C()
-let f = c.fopen("/tmp/out.bin", "wb")
-defer c.fclose(f)
-
-var data = [uint8](repeating: 0xFF, count: 256)
-c.fwrite(&data, 1, data.byteSize(), f)
-c.printf("wrote %d bytes\n", data.length)
 ```
 
 **Linux syscalls:**
@@ -418,7 +404,7 @@ import "linux/syscalls"
 
 class Syscalls : syscalls {
     func write(fd: int32, buf: *const void, count: uint64) -> int32
-    func read(fd: int32, buf: *void, count: uint64) -> int32
+    func read(fd: int32,  buf: *void,       count: uint64) -> int32
 }
 ```
 
@@ -429,8 +415,8 @@ No allocation, no runtime overhead.
 
 ### Testing
 
-Test functions use the `test` qualifier and are auto-discovered by the
-test runner. Declare them in files tagged `build test`.
+Test functions use the `test` qualifier and are auto-discovered by the test
+runner. Declare them in files tagged `build test`.
 
 ```vertex
 package arithmetic_test
@@ -438,19 +424,30 @@ build test
 
 import "arithmetic"
 
-func test_add()        test -> Expected("15")   { return add(a: 10, b: 5) }
-func test_comparison() test -> Expected("true") { return 5 > 3 }
-func test_no_crash()   test                     { add(a: 0, b: 0) }
+func test_add()        test -> Expected(int32, "15") { return add(a: 10, b: 5) }
+func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
+func test_no_crash()   test                          { add(a: 0, b: 0) }
 ```
 
 ```sh
-vertex -test arithmetic_test.vs        # run tests in one file
-vertex -test -dir .                    # run all tests recursively
+vertex -test arithmetic_test.vs   # run tests in one file
+vertex -test -dir .               # run all tests recursively
 ```
 
-A test passes when its return value — auto-formatted to stdout — matches
-the `Expected` string. Omitting `Expected` means the test passes if it
-completes without crashing.
+`Expected(type, string)` declares both the return type and the exact stdout
+string the runner checks against. Omitting `Expected` means the test passes if
+it completes without crashing.
+
+**Return value format reference:**
+
+| Return type | Format | `Expected` for value `5`         |
+|-------------|--------|----------------------------------|
+| `int32`     | `%d`   | `Expected(int32, "5")`           |
+| `int64`     | `%lld` | `Expected(int64, "5")`           |
+| `uint32`    | `%u`   | `Expected(uint32, "5")`          |
+| `float32`   | `%f`   | `Expected(float32, "5.000000")`  |
+| `bool`      | `%d`   | `Expected(bool, "1")` / `"0"`    |
+| `string`    | `%s`   | `Expected(string, "hello")`      |
 
 ---
 
@@ -458,49 +455,51 @@ completes without crashing.
 
 ```
 Usage:
-  vertex [flags] <source.vs>
+  vertex [flags] <source.vs|package/>
 
 Flags:
-  -o file           write output to file
-  -target string    linux-amd64 (default), darwin-amd64, windows-amd64
-  -emit-c           emit C source instead of native binary
-  -c                compile and assemble, do not link (outputs .o)
-  -I path           add a package search path (repeatable)
-  -L dir            add a library search dir — ELF targets only (repeatable)
-  -l name           link against libname e.g. -lc -lm (repeatable)
-  -test             compile and run build-test functions
-  -dir directory    run tests recursively in directory (with -test)
-  -version          print version and exit
+  -o file                write output to file
+  -target string         linux-amd64 (default), darwin-amd64, windows-amd64
+  -emit-c                emit C source instead of a native binary (accepts file or directory)
+  -c                     compile and assemble but do not link (outputs object file)
+  -L dir                 add a library search dir (ELF targets only, repeatable)
+  -l name                link against libname e.g. -lc -lm (ELF targets only, repeatable)
+  -packages-dir string   Vertex packages directory (overrides $VERTEX_PATH)
+  -rebuild               force rebuild of cached packages
+  -test                  compile and run test functions, checking Expected(...) output
+  -dir directory         run tests recursively in directory (used with -test)
+  -v / -version          print version and exit
 
 Examples:
-  vertex -o main main.vs                    # native executable
-  vertex -lc -lm -o main main.vs            # link against libc and libm
-  vertex -c -o main.o main.vs               # object file only
-  vertex -emit-c -o main.c main.vs          # emit C source
-  vertex -test arithmetic_test.vs           # run tests in file
-  vertex -test -dir .                       # run all tests recursively
-  vertex -target darwin-amd64 -o app main.vs
+  vertex -o main main.vs                         (build native executable)
+  vertex -lc -o main main.vs                     (link against libc)
+  vertex -c -o main.o main.vs                    (build object file only)
+  vertex -emit-c -o main.c main.vs               (emit C source for a file)
+  vertex -emit-c -o arrays.c ./packages/arrays/  (emit C source for a package)
+  vertex -test arithmetic_test.vs                (run test functions in file)
+  vertex -test -dir .                            (run all tests recursively)
+  vertex -rebuild -o main main.vs                (force rebuild of cached packages)
 ```
 
 ---
 
 ## Platform Support
 
-| Target           | Status     |
-|------------------|------------|
-| `linux-amd64`    | Supported  |
-| `darwin-amd64`   | Supported  |
-| `windows-amd64`  | Supported  |
-| `browser/wasm`   | Upcoming   |
-| `android`        | Upcoming   |
-| `browser/js`     | Upcoming   |
+| Target           | Status    |
+|------------------|-----------|
+| `linux-amd64`    | Supported |
+| `darwin-amd64`   | Supported |
+| `windows-amd64`  | Supported |
+| `browser/wasm`   | Upcoming  |
+| `android`        | Upcoming  |
+| `browser/js`     | Upcoming  |
 
 ---
 
 ## Documentation
 
-- [Grammar Specification 2.1](docs/grammar.md)
-- [Native Interface](docs/native_interface.md)
+- [Grammar Specification 2.1](https://github.com/vertex-language/specs/README.md)
+- [Native Interface](https://github.com/vertex-language/specs/docs/)
 
 ---
 
