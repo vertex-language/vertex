@@ -2065,14 +2065,13 @@ func (l *Lowerer) lowerIndexExpr(b *cir.Builder, e *IndexExpr, fc *funcCtx) cir.
 	recv := l.lowerExpr(b, e.Recv, fc)
 	idx := l.lowerExpr(b, e.Index, fc)
 	recvType := e.Recv.GetVType()
-
 	switch rt := recvType.(type) {
 	case *VDynArray:
 		elemCIR := l.vtypeToCIR(rt.Elem)
 		if elemCIR == nil {
 			elemCIR = l.vtypeToCIRFallback(rt.Elem)
 		}
-		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, l.at.VtxArray, "data", cir.VoidPtr))
+		dataPtr := b.Cast(cir.Ptr(elemCIR), b.GetField(recv, l.arrStruct, "data", cir.VoidPtr))
 		return b.Index(dataPtr, idx, elemCIR)
 	case *VFixedArray:
 		elemCIR := l.vtypeToCIR(rt.Elem)
