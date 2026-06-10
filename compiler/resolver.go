@@ -169,7 +169,13 @@ func (r *Resolver) resolveClass(d *ClassDecl) {
 
 func (r *Resolver) resolveVarDeclGlobal(d *VarDecl) {
 	scope := r.pkg
-	vtype := r.resolveExpr(d.Value, scope)
+	// Value may be nil for: var buf: [T; N]  (no initializer required)
+	var vtype VType
+	if d.Value != nil {
+		vtype = r.resolveExpr(d.Value, scope)
+	} else {
+		vtype = &VVoid{}
+	}
 	if d.TypeHint != nil {
 		vtype = r.resolveTypeExpr(d.TypeHint, scope)
 	}
@@ -283,24 +289,39 @@ func (r *Resolver) resolveStmt(s Stmt, scope *Scope, retType VType) {
 }
 
 func (r *Resolver) resolveLocalDecl(d *VarDecl, scope *Scope) {
-	valType := r.resolveExpr(d.Value, scope)
+	// Value may be nil for fixed-array declarations without initializer: var buf: [T; N]
+	var valType VType
+	if d.Value != nil {
+		valType = r.resolveExpr(d.Value, scope)
+	} else {
+		valType = &VVoid{}
+	}
 
 	if d.TypeHint != nil {
 		hinted := r.resolveTypeExpr(d.TypeHint, scope)
-		// [T] on a fixed-size literal → keep VFixedArray, adopt hint's element type.
-		// e.g. let bytes: [uint8] = [0x00, 0xFF] should stay a fixed array.
-		if da, isDyn := hinted.(*VDynArray); isDyn {
-			if fa, isFixed := valType.(*VFixedArray); isFixed {
-				hinted = &VFixedArray{Elem: da.Elem, Size: fa.Size}
+		// With the updated grammar, [T; N] and [T] are unambiguous:
+		//   FixedArrayTypeExpr → always VFixedArray (stack)
+		//   ArrayTypeExpr      → always VDynArray   (heap)
+		// The old VDynArray → VFixedArray coercion is no longer correct; remove it.
+
+		if d.Value != nil {
+			if dot, ok := d.Value.(*DotEnumExpr); ok {
+				dot.SetVType(hinted)
 			}
 		}
-		
-		// NEW: Pass the type hint down to shorthand enums
-		if dot, ok := d.Value.(*DotEnumExpr); ok {
-			dot.SetVType(hinted)
-		}
-		
+
 		valType = hinted
+	} else if d.Value != nil {
+		// No explicit annotation — infer from binding kind:
+		//   let + array literal → fixed stack array  (keep VFixedArray)
+		//   var + array literal → dynamic heap array (convert to VDynArray)
+		if !d.IsLet {
+			if fa, isFixed := valType.(*VFixedArray); isFixed {
+				if _, isArr := d.Value.(*ArrayLitExpr); isArr {
+					valType = &VDynArray{Elem: fa.Elem}
+				}
+			}
+		}
 	}
 
 	if s, ok := valType.(*VString); ok {
@@ -805,6 +826,16 @@ func (r *Resolver) resolveTypeExpr(te TypeExpr, scope *Scope) VType {
 			return &VOptional{Elem: pt}
 		}
 		return pt
+	case *FixedArrayTypeExpr:
+		elem := r.resolveTypeExpr(t.Elem, scope)
+		size := -1
+		if t.Size != nil {
+			r.resolveExpr(t.Size, scope) // walk for completeness
+			if il, ok := t.Size.(*IntLitExpr); ok {
+				size = int(il.Value)
+			}
+		}
+		return &VFixedArray{Elem: elem, Size: size}
 	case *ArrayTypeExpr:
 		elem := r.resolveTypeExpr(t.Elem, scope)
 		return &VDynArray{Elem: elem}

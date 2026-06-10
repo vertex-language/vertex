@@ -246,6 +246,17 @@ func (l *Lowerer) resolvedFieldCIRType(te TypeExpr) cir.Type {
 			return cir.Ptr(st)
 		}
 		return cir.VoidPtr
+	case *FixedArrayTypeExpr:
+		elem := l.resolvedFieldCIRType(t.Elem)
+		if elem == nil {
+			elem = cir.Void
+		}
+		if t.Size != nil {
+			if il, ok := t.Size.(*IntLitExpr); ok && il.Value > 0 {
+				return cir.Array(elem, int(il.Value))
+			}
+		}
+		return cir.VoidPtr
 	case *PointerTypeExpr:
 		elem := l.resolvedFieldCIRType(t.Elem)
 		if elem == nil {
@@ -511,7 +522,14 @@ func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
 	if len(d.Binding.Names) == 0 {
 		return
 	}
-	vt := d.Value.GetVType()
+	// Value may be nil for: var buf: [T; N]  (fixed array without initializer)
+	var vt VType
+	if d.Value != nil {
+		vt = d.Value.GetVType()
+	}
+	if d.TypeHint != nil {
+		vt = l.resolveTypeExprVType(d.TypeHint)
+	}
 	if vt == nil {
 		return
 	}
@@ -520,8 +538,7 @@ func (l *Lowerer) lowerGlobalVar(d *VarDecl) {
 		ct = cir.VoidPtr
 	}
 	name := d.Binding.Names[0]
-	// Only constant literals can be global initialisers in C.
-	if d.IsLet {
+	if d.IsLet && d.Value != nil {
 		switch v := d.Value.(type) {
 		case *IntLitExpr:
 			l.mod.Global(name, ct, cir.IntLit(v.Value))
@@ -739,7 +756,11 @@ func (l *Lowerer) lowerStmt(b *cir.Builder, s Stmt, fc *funcCtx) {
 }
 
 func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
-	vtype := d.Value.GetVType()
+	// Value may be nil for: var buf: [T; N]  (fixed array without initializer)
+	var vtype VType
+	if d.Value != nil {
+		vtype = d.Value.GetVType()
+	}
 	if d.TypeHint != nil {
 		vtype = l.resolveTypeExprVType(d.TypeHint)
 	}
@@ -747,11 +768,27 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		vtype = &VUnknown{}
 	}
 
-	if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
-		if da, isDyn := vtype.(*VDynArray); isDyn {
-			vtype = &VFixedArray{Elem: da.Elem, Size: len(arrLit.Elems)}
+	// ── Fixed array with no initializer: var buf: [T; N] ─────────────────────
+	// Declare the local and emit memset for zero-fill, then return early.
+	if d.Value == nil {
+		for _, name := range d.Binding.Names {
+			ref := l.declareLocal(b, name, vtype, d.IsLet)
+			fc.locals[name] = ref
+			if fa, isFixed := vtype.(*VFixedArray); isFixed && fa.Size > 0 {
+				elemCIR := l.vtypeToCIR(fa.Elem)
+				if elemCIR == nil {
+					elemCIR = l.vtypeToCIRFallback(fa.Elem)
+				}
+				arrSize := b.Mul(cir.UIntLit(uint64(fa.Size)), b.SizeOf(elemCIR))
+				b.Stmt(b.Call("memset", ref, cir.IntLit(0), arrSize))
+			}
 		}
+		return
 	}
+
+	// NOTE: With the updated grammar, [T] is always dynamic and [T; N] is always
+	// fixed. The TypeHint (already resolved above) is authoritative — do NOT
+	// coerce VDynArray to VFixedArray based on the value being an array literal.
 
 	for i, name := range d.Binding.Names {
 		_ = i
@@ -759,6 +796,28 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		fc.locals[name] = ref
 
 		if arrLit, ok := d.Value.(*ArrayLitExpr); ok {
+			// ── Dynamic array from literal ─────────────────────────────────────
+			// var x = [e1, e2, ...]       → vtype is VDynArray (inferred by resolver)
+			// var x: [T] = [e1, e2, ...]  → vtype is VDynArray (annotated)
+			if da, isDyn := vtype.(*VDynArray); isDyn {
+				elemCIR := l.vtypeToCIR(da.Elem)
+				if elemCIR == nil {
+					elemCIR = l.vtypeToCIRFallback(da.Elem)
+				}
+				elemSize := b.Cast(cir.UInt32, b.SizeOf(elemCIR))
+				b.Assign(ref, b.Call("arrays_newWithCapacity", elemSize,
+					b.Cast(cir.UInt32, cir.UIntLit(uint64(len(arrLit.Elems))))))
+				for _, elem := range arrLit.Elems {
+					val := l.lowerExpr(b, elem, fc)
+					tmp := b.Local(l.tempName(), elemCIR)
+					b.Assign(tmp, b.Cast(elemCIR, val))
+					b.Stmt(b.Call("arrays_push", ref, b.AddrOf(tmp)))
+				}
+				continue
+			}
+			// ── Fixed array from literal ───────────────────────────────────────
+			// let arr = [e1, e2, ...]          → vtype is VFixedArray (inferred)
+			// var arr: [T; N] = [e1, e2, ...]  → vtype is VFixedArray (annotated)
 			if fa, isFixed := vtype.(*VFixedArray); isFixed {
 				elemCIR := l.vtypeToCIR(fa.Elem)
 				if elemCIR == nil {
@@ -794,6 +853,18 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 
 func (l *Lowerer) vtypeToCIRFallback(vt VType) cir.Type {
 	switch t := vt.(type) {
+	case *VFixedArray:
+		if t.Size <= 0 {
+			return cir.VoidPtr
+		}
+		elemCT := l.vtypeToCIR(t.Elem)
+		if elemCT == nil {
+			elemCT = l.vtypeToCIRFallback(t.Elem)
+		}
+		if elemCT == nil {
+			return cir.VoidPtr
+		}
+		return cir.Array(elemCT, t.Size)
 	case *VDynArray:
 		return l.arrStructPtr
 	case *VString:
@@ -2216,10 +2287,19 @@ func (l *Lowerer) resolveTypeExprVType(te TypeExpr) VType {
 		if _, ok := l.classTypes[t.Name]; ok {
 			return &VClass{Name: t.Name}
 		}
-		if ev, ok := l.enumTypes[t.Name]; ok { // ADDED: Resolve enum type hints
+		if ev, ok := l.enumTypes[t.Name]; ok {
 			return ev
 		}
 		return &VUnknown{Name: t.Name}
+	case *FixedArrayTypeExpr:
+		elem := l.resolveTypeExprVType(t.Elem)
+		size := -1
+		if t.Size != nil {
+			if il, ok := t.Size.(*IntLitExpr); ok {
+				size = int(il.Value)
+			}
+		}
+		return &VFixedArray{Elem: elem, Size: size}
 	case *PointerTypeExpr:
 		return &VPointer{Elem: l.resolveTypeExprVType(t.Elem), IsConst: t.IsConst}
 	case *ArrayTypeExpr:

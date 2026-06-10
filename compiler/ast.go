@@ -665,3 +665,13 @@ type MapLitField struct {
 	Key   Expr
 	Value Expr
 }
+
+// FixedArrayTypeExpr is a fixed-size stack array type: [T; N]
+type FixedArrayTypeExpr struct {
+	Pos  Pos
+	Elem TypeExpr // element type T
+	Size Expr     // size expression N (must be a compile-time integer literal)
+}
+
+func (*FixedArrayTypeExpr) typeExprNode()          {}
+func (t *FixedArrayTypeExpr) nodePos() Pos { return t.Pos }

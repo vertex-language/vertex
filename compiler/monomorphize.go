@@ -103,15 +103,20 @@ func cloneTypeExpr(t TypeExpr, subst map[string]TypeExpr) TypeExpr {
 	}
 	switch te := t.(type) {
 	case *NamedTypeExpr:
-		// Substitute the type argument!
 		if rep, ok := subst[te.Name]; ok {
-			return cloneTypeExpr(rep, nil) 
+			return cloneTypeExpr(rep, nil)
 		}
 		c := &NamedTypeExpr{Pos: te.Pos, Pkg: te.Pkg, Name: te.Name}
 		for _, arg := range te.TypeArgs {
 			c.TypeArgs = append(c.TypeArgs, cloneTypeExpr(arg, subst))
 		}
 		return c
+	case *FixedArrayTypeExpr:
+		return &FixedArrayTypeExpr{
+			Pos:  te.Pos,
+			Elem: cloneTypeExpr(te.Elem, subst),
+			Size: cloneExpr(te.Size, subst),
+		}
 	case *PointerTypeExpr:
 		return &PointerTypeExpr{Pos: te.Pos, IsConst: te.IsConst, Optional: te.Optional, Elem: cloneTypeExpr(te.Elem, subst)}
 	case *ArrayTypeExpr:

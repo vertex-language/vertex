@@ -269,10 +269,36 @@ func (b *ASTBuilder) buildVarDecl(ctx parser.IVarDeclContext) *VarDecl {
 		IsWeak: ctx.WEAK() != nil,
 	}
 	vd.Binding = b.buildBindingPattern(ctx.BindingPattern())
+
+	// Alt 1: (LET|VAR) name: [T; N]  or  (LET|VAR) name: [T; N] = expr
+	// The SEMI token between the brackets is the unambiguous discriminator.
+	if ctx.SEMI() != nil {
+		var elem TypeExpr
+		if ctx.TypeExpr() != nil {
+			elem = b.buildTypeExpr(ctx.TypeExpr())
+		}
+		exprs := ctx.AllExpr()
+		var sizeExpr Expr
+		if len(exprs) > 0 {
+			sizeExpr = b.buildExpr(exprs[0])
+		}
+		vd.TypeHint = &FixedArrayTypeExpr{Pos: pos, Elem: elem, Size: sizeExpr}
+		if len(exprs) > 1 {
+			// Optional initializer: var arr: [int32; 3] = [1, 2, 3]
+			vd.Value = b.buildExpr(exprs[1])
+		}
+		// No initializer → Value stays nil; lowerer emits zero-fill.
+		return vd
+	}
+
+	// Alt 2: (LET|VAR) name = expr  or  (LET|VAR) name: T = expr
 	if ctx.TypeExpr() != nil {
 		vd.TypeHint = b.buildTypeExpr(ctx.TypeExpr())
 	}
-	vd.Value = b.buildExpr(ctx.Expr())
+	exprs := ctx.AllExpr()
+	if len(exprs) > 0 {
+		vd.Value = b.buildExpr(exprs[0])
+	}
 	return vd
 }
 
@@ -307,18 +333,34 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			Elem:     elem,
 			Optional: ctx.QUESTION() != nil,
 		}
+
+	// [T; N] fixed array — must be checked before plain [T].
+	case ctx.LBRACKET() != nil && ctx.SEMI() != nil && ctx.RBRACKET() != nil:
+		var elem TypeExpr
+		if len(subExprs) > 0 {
+			elem = b.buildTypeExpr(subExprs[0])
+		}
+		var sizeExpr Expr
+		if ctx.Expr() != nil {
+			sizeExpr = b.buildExpr(ctx.Expr())
+		}
+		return &FixedArrayTypeExpr{Pos: pos, Elem: elem, Size: sizeExpr}
+
+	// [T] dynamic array.
 	case ctx.LBRACKET() != nil && ctx.RBRACKET() != nil:
 		var elem TypeExpr
 		if len(subExprs) > 0 {
 			elem = b.buildTypeExpr(subExprs[0])
 		}
 		return &ArrayTypeExpr{Pos: pos, Elem: elem}
+
 	case ctx.CHAN() != nil:
 		var elem TypeExpr
 		if len(subExprs) > 0 {
 			elem = b.buildTypeExpr(subExprs[0])
 		}
 		return &ChanTypeExpr{Pos: pos, Elem: elem}
+
 	case ctx.FUNC() != nil:
 		te := &FuncTypeExpr{Pos: pos}
 		if ctx.FuncTypeParams() != nil {
@@ -330,7 +372,7 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			te.RetType = b.buildTypeExpr(subExprs[len(subExprs)-1])
 		}
 		return te
-		
+
 	case ctx.RESULT() != nil:
 		rt := &ResultTypeExpr{Pos: pos}
 		if len(subExprs) >= 2 {
@@ -338,6 +380,7 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			rt.Err = b.buildTypeExpr(subExprs[1])
 		}
 		return rt
+
 	case ctx.EXPECTED() != nil:
 		var returnType TypeExpr
 		if len(subExprs) > 0 {
@@ -353,7 +396,7 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			Channel:    "stdout",
 			Value:      val,
 		}
-	
+
 	case ctx.LPAREN() != nil && ctx.RPAREN() != nil:
 		tt := &TupleTypeExpr{Pos: pos}
 		if ctx.TupleTypeElems() != nil {
@@ -367,6 +410,7 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			}
 		}
 		return tt
+
 	case ctx.BaseType() != nil:
 		bt := ctx.BaseType()
 		var parts []string
@@ -381,14 +425,13 @@ func (b *ASTBuilder) buildTypeExpr(ctx parser.ITypeExprContext) TypeExpr {
 			name = parts[0]
 		}
 		named := &NamedTypeExpr{Pos: pos, Pkg: pkg, Name: name}
-		
-		// NEW: Extract Type Arguments if present (<T, U>)
+
 		if ctx.LT() != nil && ctx.GT() != nil {
 			for _, te := range subExprs {
 				named.TypeArgs = append(named.TypeArgs, b.buildTypeExpr(te))
 			}
 		}
-		
+
 		if ctx.QUESTION() != nil {
 			return &OptionalTypeExpr{Pos: pos, Elem: named}
 		}
