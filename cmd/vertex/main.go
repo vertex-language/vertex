@@ -499,6 +499,36 @@ func buildBinaryFromModule(
 	switch objTarget {
 	case object.TargetLinuxAMD64:
 		linker := lnkELF.NewLinker(lnkELF.ArchAMD64)
+		
+		// 1. Setup search paths
+		searchDirs := append(append([]string(nil), libDirs...), elfLibSearchDirs()...)
+		for _, p := range searchDirs {
+			linker.AddLibraryPath(p)
+		}
+
+		// Check if we are hosted (linking against libc)
+		isHosted := false
+		for _, l := range libs {
+			if l == "c" {
+				isHosted = true
+				break
+			}
+		}
+
+		// 2. Add CRT Prologue (provides _start and initialization)
+		if isHosted {
+			for _, crt := range []string{"crt1.o", "crti.o"} {
+				data, err := findCrtObj(crt, searchDirs)
+				if err != nil {
+					return fmt.Errorf("hosted link requires %s: %w", crt, err)
+				}
+				if err := linker.AddObject(crt, data); err != nil {
+					return err
+				}
+			}
+		}
+
+		// 3. Add your compiled Vertex objects
 		if addErr := linker.AddObject(mainObjName, objBytes); addErr != nil {
 			return fmt.Errorf("add object: %w", addErr)
 		}
@@ -507,10 +537,8 @@ func buildBinaryFromModule(
 				return fmt.Errorf("add package object %d: %w", i, addErr)
 			}
 		}
-		searchDirs := append(append([]string(nil), libDirs...), elfLibSearchDirs()...)
-		for _, p := range searchDirs {
-			linker.AddLibraryPath(p)
-		}
+
+		// 4. Add Dynamic Libraries (-lc, etc.)
 		for _, name := range libs {
 			data, soname, ferr := findSharedLib(name, searchDirs)
 			if ferr != nil {
@@ -520,6 +548,18 @@ func buildBinaryFromModule(
 				return fmt.Errorf("-l%s: %w", name, lerr)
 			}
 		}
+
+		// 5. Add CRT Epilogue (provides cleanup/destructors)
+		if isHosted {
+			data, err := findCrtObj("crtn.o", searchDirs)
+			if err != nil {
+				return fmt.Errorf("hosted link requires crtn.o: %w", err)
+			}
+			if err := linker.AddObject("crtn.o", data); err != nil {
+				return err
+			}
+		}
+
 		exeBytes, err = linker.Link()
 
 	case object.TargetWindowsAMD64:
@@ -568,6 +608,17 @@ func elfLibSearchDirs() []string {
 		"/usr/lib",
 		"/usr/local/lib",
 	}
+}
+
+func findCrtObj(name string, searchDirs []string) ([]byte, error) {
+	for _, dir := range searchDirs {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err == nil && isELF(data) {
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("c runtime object %s not found (searched: %s)", name, strings.Join(searchDirs, ", "))
 }
 
 func findSharedLib(name string, searchDirs []string) ([]byte, string, error) {
