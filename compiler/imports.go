@@ -14,10 +14,6 @@ import (
 	"github.com/vertex-language/vertex/parser"
 )
 
-// ObjectFunc compiles a CIR module to target-specific object-file bytes.
-// Provided by cmd/vertex/main.go so the compiler package stays backend-agnostic.
-type ObjectFunc func(*cir.Module) ([]byte, error)
-
 // ─────────────────────────────────────────────────────────────────────────────
 // CompiledPackage
 // ─────────────────────────────────────────────────────────────────────────────

@@ -298,7 +298,7 @@ func (c *Compiler) parseSource(src, filename string) (*File, error) {
 
 // collectObjBytes extracts the compiled object bytes from a loaded package
 // slice, skipping packages that were loaded from cache without re-compilation.
-func collectObjBytes(pkgs []*Package) [][]byte {
+func collectObjBytes(pkgs []*CompiledPackage) [][]byte {
 	var out [][]byte
 	for _, pkg := range pkgs {
 		if pkg.ObjBytes != nil {
