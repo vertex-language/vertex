@@ -11,15 +11,17 @@ import (
 	"strings"
 
 	cir "github.com/vertex-language/ir/c"
-	"github.com/vertex-language/ir/mir"
-	mirAMD64 "github.com/vertex-language/ir/mir/amd64"
-	cLower "github.com/vertex-language/ir/mir/amd64/c"
+	cirlower "github.com/vertex-language/ir/c/lower"
+	mirir "github.com/vertex-language/ir/mir/ir"
+	mircompiler "github.com/vertex-language/ir/mir/compiler"
+	mirprofile "github.com/vertex-language/ir/mir/profile"
+	mirtext "github.com/vertex-language/ir/mir/text"
+	mirvalidate "github.com/vertex-language/ir/mir/validate"
 
-	encAMD64 "github.com/vertex-language/encoder/amd64"
-
-	objCOFF "github.com/vertex-language/objectfile/coff"
-	objELF "github.com/vertex-language/objectfile/elf"
-	objMachO "github.com/vertex-language/objectfile/macho"
+	"github.com/vertex-language/objectfile/object"
+	objcoff "github.com/vertex-language/objectfile/coff"
+	objelf "github.com/vertex-language/objectfile/elf"
+	objmacho "github.com/vertex-language/objectfile/macho"
 
 	lnkELF "github.com/vertex-language/linker/elf"
 	lnkMachO "github.com/vertex-language/linker/macho"
@@ -41,6 +43,7 @@ func (f *stringListFlag) String() string {
 }
 func (f *stringListFlag) Set(v string) error { *f = append(*f, v); return nil }
 
+// expandShortFlags lets the user write -lc instead of -l c (and -Ldir, -ofile).
 func expandShortFlags(args []string) []string {
 	valueFlags := map[byte]bool{'l': true, 'L': true, 'o': true}
 	out := make([]string, 0, len(args))
@@ -68,6 +71,7 @@ func run(args []string, stderr io.Writer) int {
 
 	var (
 		emitC       bool
+		emitMIR     bool
 		compileOnly bool
 		testMode    bool
 		testDir     string
@@ -81,6 +85,7 @@ func run(args []string, stderr io.Writer) int {
 	)
 
 	fs.BoolVar(&emitC, "emit-c", false, "emit C source instead of a native binary (accepts file or directory)")
+	fs.BoolVar(&emitMIR, "emit-mir", false, "emit MIR text (S-expression) instead of a native binary (accepts file or directory)")
 	fs.BoolVar(&compileOnly, "c", false, "compile and assemble but do not link (outputs object file)")
 	fs.BoolVar(&testMode, "test", false, "compile and run test functions, checking Expected(...) output")
 	fs.StringVar(&testDir, "dir", "", "run tests recursively in `directory` (used with -test)")
@@ -105,8 +110,10 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  vertex -c -o main.o main.vs                   (build object file only)\n")
 		fmt.Fprintf(stderr, "  vertex -emit-c -o main.c main.vs              (emit C source for a file)\n")
 		fmt.Fprintf(stderr, "  vertex -emit-c -o arrays.c ./packages/arrays/ (emit C source for a package)\n")
-		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs                (run test functions in file)\n")
-		fmt.Fprintf(stderr, "  vertex -test -dir .                            (run all tests recursively)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-mir -o main.mir main.vs          (emit MIR text for a file)\n")
+		fmt.Fprintf(stderr, "  vertex -emit-mir -o arrays.mir ./packages/arrays/ (emit MIR text for a package)\n")
+		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs               (run test functions in file)\n")
+		fmt.Fprintf(stderr, "  vertex -test -dir .                           (run all tests recursively)\n")
 		fmt.Fprintf(stderr, "  vertex -rebuild -o main main.vs               (force rebuild of cached packages)\n")
 	}
 
@@ -118,9 +125,15 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── Determine inputs ──────────────────────────────────────────────────────
+	// Emission flags are mutually exclusive.
+	if emitC && emitMIR {
+		fmt.Fprintf(stderr, "vertex: -emit-c and -emit-mir are mutually exclusive\n")
+		return 2
+	}
 
-	var inputFiles []string // used only by test mode
+	// ── Collect input files ───────────────────────────────────────────────────
+
+	var inputFiles []string // only populated in test mode
 
 	if testMode && testDir != "" {
 		if fs.NArg() > 0 {
@@ -155,14 +168,14 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 
-	// ── Target + config ───────────────────────────────────────────────────────
+	// ── Target resolution ─────────────────────────────────────────────────────
 
-	cTarget, mTarget, ok := parseTarget(targetStr)
+	cTarget, objTarget, ok := parseTarget(targetStr)
 	if !ok {
 		fmt.Fprintf(stderr, "vertex: unsupported target %q\n", targetStr)
 		return 2
 	}
-	if mTarget != mir.TargetLinuxAMD64 && (len(libs) > 0 || len(libDirs) > 0) {
+	if objTarget.OS != object.OSLinux && (len(libs) > 0 || len(libDirs) > 0) {
 		fmt.Fprintf(stderr, "vertex: warning: -l / -L flags are only supported for Linux ELF targets; ignored\n")
 	}
 
@@ -170,7 +183,7 @@ func run(args []string, stderr io.Writer) int {
 		Target:      cTarget,
 		PackagesDir: packagesDir,
 		ObjectFunc: func(mod *cir.Module) ([]byte, error) {
-			return moduleToObject(mod, mTarget)
+			return moduleToObject(mod, objTarget)
 		},
 		Rebuild: rebuild,
 	}
@@ -178,7 +191,7 @@ func run(args []string, stderr io.Writer) int {
 	// ── Test mode ─────────────────────────────────────────────────────────────
 
 	if testMode {
-		return runTests(inputFiles, cfg, mTarget, []string(libDirs), []string(libs), stderr)
+		return runTests(inputFiles, cfg, objTarget, []string(libDirs), []string(libs), stderr)
 	}
 
 	// ── Normal compile ────────────────────────────────────────────────────────
@@ -220,7 +233,29 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── -c (compile only, no link) ────────────────────────────────────────────
+	// ── -emit-mir ─────────────────────────────────────────────────────────────
+
+	if emitMIR {
+		if outputFile == "" {
+			if inputIsDir {
+				outputFile = replaceExt(filepath.Base(inputPath), ".mir")
+			} else {
+				outputFile = replaceExt(inputPath, ".mir")
+			}
+		}
+		mirSource, err := moduleToMIRText(cMod)
+		if err != nil {
+			fmt.Fprintf(stderr, "vertex: MIR emission failed: %v\n", err)
+			return 1
+		}
+		if err := writeOutput(outputFile, mirSource); err != nil {
+			fmt.Fprintf(stderr, "vertex: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// ── -c (compile to object, no link) ──────────────────────────────────────
 
 	if compileOnly {
 		if outputFile == "" {
@@ -228,13 +263,13 @@ func run(args []string, stderr io.Writer) int {
 			if inputIsDir {
 				base = filepath.Base(inputPath)
 			}
-			if mTarget == mir.TargetWindowsAMD64 {
+			if objTarget.OS == object.OSWindows {
 				outputFile = replaceExt(base, ".obj")
 			} else {
 				outputFile = replaceExt(base, ".o")
 			}
 		}
-		objBytes, err := moduleToObject(cMod, mTarget)
+		objBytes, err := moduleToObject(cMod, objTarget)
 		if err != nil {
 			fmt.Fprintf(stderr, "vertex: %v\n", err)
 			return 1
@@ -254,15 +289,15 @@ func run(args []string, stderr io.Writer) int {
 		} else {
 			outputFile = replaceExt(inputPath, "")
 		}
-		if mTarget == mir.TargetWindowsAMD64 {
+		if objTarget.OS == object.OSWindows {
 			outputFile += ".exe"
 		}
 	}
-	if err := buildBinaryFromModule(cMod, pkgObjs, outputFile, mTarget, []string(libDirs), []string(libs)); err != nil {
+	if err := buildBinaryFromModule(cMod, pkgObjs, outputFile, objTarget, []string(libDirs), []string(libs)); err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
 		return 1
 	}
-	if mTarget != mir.TargetWindowsAMD64 && outputFile != "-" {
+	if objTarget.OS != object.OSWindows && outputFile != "-" {
 		os.Chmod(outputFile, 0755)
 	}
 	return 0
@@ -275,7 +310,7 @@ func run(args []string, stderr io.Writer) int {
 func runTests(
 	inputFiles []string,
 	cfg compiler.Config,
-	mTarget mir.Target,
+	objTarget object.Target,
 	libDirs, libs []string,
 	stderr io.Writer,
 ) int {
@@ -288,8 +323,9 @@ func runTests(
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// Tests on Linux always need libc (for printf, etc.); prepend it if absent.
 	testLibs := append([]string(nil), libs...)
-	if mTarget == mir.TargetLinuxAMD64 {
+	if objTarget == object.TargetLinuxAMD64 {
 		hasC := false
 		for _, l := range libs {
 			if l == "c" {
@@ -321,11 +357,11 @@ func runTests(
 			binCounter++
 
 			binPath := filepath.Join(tmpDir, binName)
-			if mTarget == mir.TargetWindowsAMD64 {
+			if objTarget.OS == object.OSWindows {
 				binPath += ".exe"
 			}
 
-			if buildErr := buildBinaryFromModule(modules[i], pkgObjs, binPath, mTarget, libDirs, testLibs); buildErr != nil {
+			if buildErr := buildBinaryFromModule(modules[i], pkgObjs, binPath, objTarget, libDirs, testLibs); buildErr != nil {
 				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[build: %v]\n", info.Name, file, buildErr)
 				failed++
 				continue
@@ -362,70 +398,108 @@ func runTests(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Backend pipeline helpers
+// Backend pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
-func moduleToObject(mod *cir.Module, mTarget mir.Target) ([]byte, error) {
-	abi := mirAMD64.ABIForTarget(mTarget)
-	mirMod := mir.NewModule(mTarget)
-
-	cFrames, err := cLower.LowerModule(mod, mirMod, abi)
+// lowerToMIR is the shared first half of the backend pipeline.  It lowers a
+// CIR module to Machine IR and validates the result against the resolved target
+// profile.  Both moduleToObject and moduleToMIRText call this so that the
+// lowering and validation logic lives in exactly one place.
+func lowerToMIR(cmod *cir.Module) (*mirir.Module, mirprofile.Profile, error) {
+	mirMod, err := cirlower.NewLowerMIR(cmod)
 	if err != nil {
-		return nil, fmt.Errorf("mir lowering failed: %w", err)
-	}
-	enc := encAMD64.NewEncoder(abi)
-	sections, err := enc.Encode(mirMod, cFrames)
-	if err != nil {
-		return nil, fmt.Errorf("encoding failed: %w", err)
+		return nil, mirprofile.Profile{}, fmt.Errorf("c→mir lowering failed: %w", err)
 	}
 
-	switch mTarget {
-	case mir.TargetLinuxAMD64:
-		obj := objELF.NewObjectFile(mTarget)
-		for _, s := range sections {
-			obj.AddSection(s)
-		}
-		return obj.Serialize()
-	case mir.TargetWindowsAMD64:
-		obj := objCOFF.NewObjectFile(mTarget)
-		for _, s := range sections {
-			obj.AddSection(s)
-		}
-		return obj.Serialize()
-	case mir.TargetDarwinAMD64:
-		obj := objMachO.NewObjectFile(mTarget)
-		for _, s := range sections {
-			obj.AddSection(s)
-		}
-		return obj.Serialize()
+	prof, err := mirprofile.Resolve(mirMod.Target)
+	if err != nil {
+		return nil, mirprofile.Profile{}, fmt.Errorf("profile resolution failed: %w", err)
 	}
-	return nil, fmt.Errorf("unsupported target for object file")
+
+	if diags := mirvalidate.Validate(mirMod, prof); len(diags) > 0 {
+		var sb strings.Builder
+		for _, d := range diags {
+			fmt.Fprintln(&sb, d)
+		}
+		return nil, mirprofile.Profile{}, fmt.Errorf("MIR validation failed:\n%s", sb.String())
+	}
+
+	return mirMod, prof, nil
 }
 
-// buildBinaryFromModule links the main module object together with all
-// compiled package objects and any requested C shared libraries.
+// moduleToMIRText lowers cmod to MIR and returns the S-expression text
+// representation as a UTF-8 byte slice suitable for writing to a .mir file.
+func moduleToMIRText(cmod *cir.Module) ([]byte, error) {
+	mirMod, _, err := lowerToMIR(cmod)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(mirtext.Format(mirMod)), nil
+}
+
+// moduleToObject lowers cmod all the way to a relocatable object file and
+// returns its raw bytes.
+//
+// Full pipeline:
+//  1. lowerToMIR       — CIR → MIR + profile resolution + validation
+//  2. newObjectBuilder — pick ELF / COFF / Mach-O for objTarget
+//  3. mircompiler.Compile — emit sections / symbols / relocs into the builder
+//  4. builder.Serialize   — produce the on-disk bytes
+func moduleToObject(cmod *cir.Module, objTarget object.Target) ([]byte, error) {
+	mirMod, prof, err := lowerToMIR(cmod)
+	if err != nil {
+		return nil, err
+	}
+
+	out := newObjectBuilder(objTarget)
+	if err := mircompiler.Compile(mirMod, prof, out); err != nil {
+		return nil, fmt.Errorf("MIR compilation failed: %w", err)
+	}
+
+	return out.Serialize()
+}
+
+// newObjectBuilder selects the correct object.Builder for the given target.
+func newObjectBuilder(t object.Target) object.Builder {
+	switch t.OS {
+	case object.OSLinux, object.OSFreestanding:
+		return objelf.NewFile(t)
+	case object.OSDarwin:
+		return objmacho.NewFile(t)
+	case object.OSWindows:
+		return objcoff.NewFile(t)
+	default:
+		panic(fmt.Sprintf("newObjectBuilder: unsupported OS %v", t.OS))
+	}
+}
+
+// buildBinaryFromModule compiles cmod to an object file, links it together
+// with all package objects and any requested shared libraries, and writes a
+// native executable to outputPath.
 func buildBinaryFromModule(
-	mod *cir.Module,
+	cmod *cir.Module,
 	pkgObjs [][]byte,
 	outputPath string,
-	mTarget mir.Target,
+	objTarget object.Target,
 	libDirs, libs []string,
 ) error {
-	objBytes, err := moduleToObject(mod, mTarget)
+	objBytes, err := moduleToObject(cmod, objTarget)
 	if err != nil {
 		return err
 	}
 
-	objName := filepath.Base(outputPath) + ".o"
-	if mTarget == mir.TargetWindowsAMD64 {
-		objName = filepath.Base(outputPath) + ".obj"
+	objExt := ".o"
+	if objTarget.OS == object.OSWindows {
+		objExt = ".obj"
 	}
+	mainObjName := filepath.Base(outputPath) + objExt
 
 	var exeBytes []byte
-	switch mTarget {
-	case mir.TargetLinuxAMD64:
+
+	switch objTarget {
+	case object.TargetLinuxAMD64:
 		linker := lnkELF.NewLinker(lnkELF.ArchAMD64)
-		if addErr := linker.AddObject(objName, objBytes); addErr != nil {
+		if addErr := linker.AddObject(mainObjName, objBytes); addErr != nil {
 			return fmt.Errorf("add object: %w", addErr)
 		}
 		for i, pkgObj := range pkgObjs {
@@ -448,24 +522,24 @@ func buildBinaryFromModule(
 		}
 		exeBytes, err = linker.Link()
 
-	case mir.TargetWindowsAMD64:
+	case object.TargetWindowsAMD64:
 		linker := lnkPE.NewLinker(lnkPE.ArchAMD64)
-		linker.AddObject(objName, objBytes)
+		linker.AddObject(mainObjName, objBytes)
 		for i, pkgObj := range pkgObjs {
 			linker.AddObject(fmt.Sprintf("pkg%d.obj", i), pkgObj)
 		}
 		exeBytes, err = linker.Link()
 
-	case mir.TargetDarwinAMD64:
+	case object.TargetDarwinAMD64:
 		linker := lnkMachO.NewLinker(lnkMachO.ArchAMD64)
-		linker.AddObject(objName, objBytes)
+		linker.AddObject(mainObjName, objBytes)
 		for i, pkgObj := range pkgObjs {
 			linker.AddObject(fmt.Sprintf("pkg%d.o", i), pkgObj)
 		}
 		exeBytes, err = linker.Link()
 
 	default:
-		return fmt.Errorf("unsupported target for linking")
+		return fmt.Errorf("unsupported target for linking: %v", objTarget)
 	}
 	if err != nil {
 		return fmt.Errorf("linking failed: %w", err)
@@ -474,7 +548,7 @@ func buildBinaryFromModule(
 	if err := writeOutput(outputPath, exeBytes); err != nil {
 		return err
 	}
-	if mTarget != mir.TargetWindowsAMD64 {
+	if objTarget.OS != object.OSWindows {
 		os.Chmod(outputPath, 0755)
 	}
 	return nil
@@ -499,6 +573,7 @@ func elfLibSearchDirs() []string {
 func findSharedLib(name string, searchDirs []string) ([]byte, string, error) {
 	base := "lib" + name + ".so"
 	for _, dir := range searchDirs {
+		// Prefer versioned sonames (libfoo.so.6) over the bare link name.
 		matches, _ := filepath.Glob(filepath.Join(dir, base+".[0-9]*"))
 		for _, m := range matches {
 			data, err := os.ReadFile(m)
@@ -507,6 +582,7 @@ func findSharedLib(name string, searchDirs []string) ([]byte, string, error) {
 			}
 			return data, filepath.Base(m), nil
 		}
+		// Fall back to the unversioned name.
 		path := filepath.Join(dir, base)
 		data, err := os.ReadFile(path)
 		if err != nil || !isELF(data) {
@@ -527,6 +603,21 @@ func isELF(data []byte) bool {
 // Misc helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+// parseTarget maps a user-supplied target string to the pair of type values
+// that the vertex compiler and object-file library each need.
+func parseTarget(s string) (cir.Target, object.Target, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "linux-amd64", "linux-x86_64", "linux/amd64":
+		return cir.TargetLinuxAMD64, object.TargetLinuxAMD64, true
+	case "darwin-amd64", "darwin-x86_64", "macos-amd64":
+		return cir.TargetDarwinAMD64, object.TargetDarwinAMD64, true
+	case "windows-amd64", "windows-x86_64", "windows/amd64":
+		return cir.TargetWindowsAMD64, object.TargetWindowsAMD64, true
+	default:
+		return cir.TargetUnknown, object.Target{}, false
+	}
+}
+
 // defaultPackagesDir returns $VERTEX_PATH if set, otherwise ~/.vertex/packages.
 func defaultPackagesDir() string {
 	if p := os.Getenv("VERTEX_PATH"); p != "" {
@@ -539,7 +630,6 @@ func defaultPackagesDir() string {
 	return filepath.Join(home, ".vertex", "packages")
 }
 
-// isDir reports whether path is an existing directory.
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
@@ -562,22 +652,8 @@ func writeOutput(path string, data []byte) error {
 }
 
 func replaceExt(path, newExt string) string {
-	ext := filepath.Ext(path)
-	if ext == "" {
-		return path + newExt
+	if ext := filepath.Ext(path); ext != "" {
+		return path[:len(path)-len(ext)] + newExt
 	}
-	return path[:len(path)-len(ext)] + newExt
-}
-
-func parseTarget(s string) (cir.Target, mir.Target, bool) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "linux-amd64", "linux-x86_64", "linux/amd64":
-		return cir.TargetLinuxAMD64, mir.TargetLinuxAMD64, true
-	case "darwin-amd64", "darwin-x86_64", "macos-amd64":
-		return cir.TargetDarwinAMD64, mir.TargetDarwinAMD64, true
-	case "windows-amd64", "windows-x86_64", "windows/amd64":
-		return cir.TargetWindowsAMD64, mir.TargetWindowsAMD64, true
-	default:
-		return cir.TargetUnknown, 0, false
-	}
+	return path + newExt
 }
