@@ -15,7 +15,7 @@ import (
 	mirir "github.com/vertex-language/ir/mir/ir"
 	mircompiler "github.com/vertex-language/ir/mir/compiler"
 	mirprofile "github.com/vertex-language/ir/mir/profile"
-	mirtext "github.com/vertex-language/ir/mir/text"
+	mirtext "github.com/vertex-language/ir/mir/encoding/text"
 	mirvalidate "github.com/vertex-language/ir/mir/validate"
 
 	"github.com/vertex-language/objectfile/object"
