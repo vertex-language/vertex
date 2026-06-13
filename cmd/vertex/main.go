@@ -113,6 +113,7 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "  vertex -emit-mir -o main.mir main.vs          (emit MIR text for a file)\n")
 		fmt.Fprintf(stderr, "  vertex -emit-mir -o arrays.mir ./packages/arrays/ (emit MIR text for a package)\n")
 		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs               (run test functions in file)\n")
+		fmt.Fprintf(stderr, "  vertex -test arithmetic_test.vs -o ./out      (run tests and save binaries)\n")
 		fmt.Fprintf(stderr, "  vertex -test -dir .                           (run all tests recursively)\n")
 		fmt.Fprintf(stderr, "  vertex -rebuild -o main main.vs               (force rebuild of cached packages)\n")
 	}
@@ -125,15 +126,12 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	// Emission flags are mutually exclusive.
 	if emitC && emitMIR {
 		fmt.Fprintf(stderr, "vertex: -emit-c and -emit-mir are mutually exclusive\n")
 		return 2
 	}
 
-	// ── Collect input files ───────────────────────────────────────────────────
-
-	var inputFiles []string // only populated in test mode
+	var inputFiles []string
 
 	if testMode && testDir != "" {
 		if fs.NArg() > 0 {
@@ -168,8 +166,6 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 
-	// ── Target resolution ─────────────────────────────────────────────────────
-
 	cTarget, objTarget, ok := parseTarget(targetStr)
 	if !ok {
 		fmt.Fprintf(stderr, "vertex: unsupported target %q\n", targetStr)
@@ -188,13 +184,9 @@ func run(args []string, stderr io.Writer) int {
 		Rebuild: rebuild,
 	}
 
-	// ── Test mode ─────────────────────────────────────────────────────────────
-
 	if testMode {
-		return runTests(inputFiles, cfg, objTarget, []string(libDirs), []string(libs), stderr)
+		return runTests(inputFiles, cfg, objTarget, []string(libDirs), []string(libs), outputFile, stderr)
 	}
-
-	// ── Normal compile ────────────────────────────────────────────────────────
 
 	inputPath := fs.Arg(0)
 	inputIsDir := isDir(inputPath)
@@ -210,8 +202,6 @@ func run(args []string, stderr io.Writer) int {
 			fmt.Fprintln(stderr, d)
 		}
 	}
-
-	// ── -emit-c ───────────────────────────────────────────────────────────────
 
 	if emitC {
 		if outputFile == "" {
@@ -233,8 +223,6 @@ func run(args []string, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── -emit-mir ─────────────────────────────────────────────────────────────
-
 	if emitMIR {
 		if outputFile == "" {
 			if inputIsDir {
@@ -254,8 +242,6 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
-
-	// ── -c (compile to object, no link) ──────────────────────────────────────
 
 	if compileOnly {
 		if outputFile == "" {
@@ -280,8 +266,6 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
-
-	// ── Full binary ───────────────────────────────────────────────────────────
 
 	if outputFile == "" {
 		if inputIsDir {
@@ -312,6 +296,7 @@ func runTests(
 	cfg compiler.Config,
 	objTarget object.Target,
 	libDirs, libs []string,
+	outputFile string,
 	stderr io.Writer,
 ) int {
 	comp := compiler.New(cfg)
@@ -323,7 +308,6 @@ func runTests(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Tests on Linux always need libc (for printf, etc.); prepend it if absent.
 	testLibs := append([]string(nil), libs...)
 	if objTarget == object.TargetLinuxAMD64 {
 		hasC := false
@@ -338,56 +322,82 @@ func runTests(
 		}
 	}
 
-	passed, failed := 0, 0
-	binCounter := 0
+	// Count total tests across all files so we know whether -o needs suffixing.
+	totalTests := 0
+	type pendingFile struct {
+		file    string
+		infos   []compiler.TestFuncInfo
+		modules []*cir.Module
+		pkgObjs [][]byte
+	}
+	var pending []pendingFile
 
 	for _, file := range inputFiles {
 		infos, modules, pkgObjs, err := comp.CompileTestFile(file)
 		if err != nil {
 			fmt.Fprintf(stderr, "vertex: %s: %v\n", file, err)
-			failed++
 			continue
 		}
 		if len(infos) == 0 {
 			continue
 		}
+		totalTests += len(infos)
+		pending = append(pending, pendingFile{file, infos, modules, pkgObjs})
+	}
 
-		for i, info := range infos {
-			binName := fmt.Sprintf("%s_%d", info.Name, binCounter)
+	if totalTests == 0 {
+		fmt.Fprintln(stderr, "vertex: no test functions found (functions need 'test' qualifier and Expected(...) return type)")
+		return 1
+	}
+
+	passed, failed := 0, 0
+	binCounter := 0
+
+	for _, pf := range pending {
+		for i, info := range pf.infos {
 			binCounter++
 
-			binPath := filepath.Join(tmpDir, binName)
-			if objTarget.OS == object.OSWindows {
+			// Determine binary output path.
+			var binPath string
+			if outputFile != "" {
+				if totalTests == 1 {
+					binPath = outputFile
+				} else {
+					binPath = fmt.Sprintf("%s_%s", outputFile, info.Name)
+				}
+			} else {
+				binPath = filepath.Join(tmpDir, fmt.Sprintf("%s_%d", info.Name, binCounter))
+			}
+			if objTarget.OS == object.OSWindows && !strings.HasSuffix(binPath, ".exe") {
 				binPath += ".exe"
 			}
 
-			if buildErr := buildBinaryFromModule(modules[i], pkgObjs, binPath, objTarget, libDirs, testLibs); buildErr != nil {
-				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[build: %v]\n", info.Name, file, buildErr)
+			if buildErr := buildBinaryFromModule(pf.modules[i], pf.pkgObjs, binPath, objTarget, libDirs, testLibs); buildErr != nil {
+				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[build: %v]\n", info.Name, pf.file, buildErr)
 				failed++
 				continue
 			}
 
+			if objTarget.OS != object.OSWindows {
+				os.Chmod(binPath, 0755)
+			}
+
 			out, runErr := exec.Command(binPath).Output()
 			if runErr != nil {
-				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[run: %v]\n", info.Name, file, runErr)
+				fmt.Printf("FAIL\t%s\t(%s)\n\t\t[run: %v]\n", info.Name, pf.file, runErr)
 				failed++
 				continue
 			}
 
 			got := strings.TrimRight(string(out), "\r\n")
 			if got == info.Expected {
-				fmt.Printf("ok  \t%s\t(%s)\n", info.Name, file)
+				fmt.Printf("ok  \t%s\t(%s)\n", info.Name, pf.file)
 				passed++
 			} else {
-				fmt.Printf("FAIL\t%s\t(%s)\n\t\twant: %q\n\t\t got: %q\n", info.Name, file, info.Expected, got)
+				fmt.Printf("FAIL\t%s\t(%s)\n\t\twant: %q\n\t\t got: %q\n", info.Name, pf.file, info.Expected, got)
 				failed++
 			}
 		}
-	}
-
-	if passed == 0 && failed == 0 {
-		fmt.Fprintln(stderr, "vertex: no test functions found (functions need 'test' qualifier and Expected(...) return type)")
-		return 1
 	}
 
 	fmt.Printf("\n%d passed, %d failed\n", passed, failed)
