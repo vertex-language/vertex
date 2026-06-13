@@ -2401,7 +2401,6 @@ func (l *Lowerer) lowerTestFuncDecl(fn *FuncDecl) {
 // injectTestMain emits:
 func (l *Lowerer) injectTestMain() {
 	l.ensurePrintf()
-	// Use the prefixed C name when calling the test entry function.
 	entryCName := l.cFuncName(l.testEntryFunc)
 
 	vt := l.testEntryVType
@@ -2417,16 +2416,13 @@ func (l *Lowerer) injectTestMain() {
 
 	def := l.mod.Func("main", cir.Returns(cir.Int32))
 	def.Body(func(b *cir.Builder) {
-		tmp := b.Local(l.tempName(), retCIR)
-
 		callExpr := b.Call(entryCName)
 		if ce, ok := callExpr.(*cir.CallExpr); ok {
 			ce.Type = retCIR
 		}
 
-		b.Assign(tmp, callExpr)
 		fmtLit := l.mod.StringLit(l.tempName(), fmtStr)
-		b.Stmt(b.Call("printf", fmtLit, tmp))
+		b.Stmt(b.Call("printf", fmtLit, callExpr))
 		b.ReturnVal(cir.IntLit(0))
 	})
 }
