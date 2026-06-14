@@ -761,6 +761,20 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 	if d.Value != nil {
 		vtype = d.Value.GetVType()
 	}
+
+	// Auto-dereference pointer params in let/var bindings that have no explicit
+	// type hint. Vertex pointer params behave as transparent references, so
+	//   let tmp = ptrParam   ≡   let tmp: pointeeType = *ptrParam
+	ptrParamAutoDeref := false
+	if d.TypeHint == nil && d.Value != nil {
+		if id, ok := d.Value.(*IdentExpr); ok && fc.params[id.Name] {
+			if ptr, isPtr := vtype.(*VPointer); isPtr {
+				vtype = ptr.Elem
+				ptrParamAutoDeref = true
+			}
+		}
+	}
+
 	if d.TypeHint != nil {
 		vtype = l.resolveTypeExprVType(d.TypeHint)
 	}
@@ -835,6 +849,17 @@ func (l *Lowerer) lowerLocalDecl(b *cir.Builder, d *VarDecl, fc *funcCtx) {
 		}
 
 		initExpr := l.lowerExpr(b, d.Value, fc)
+
+		// Emit the load-through-pointer for auto-deref'd pointer params.
+		if ptrParamAutoDeref && initExpr != nil {
+			elemCT := l.vtypeToCIR(vtype)
+			if elemCT == nil {
+				elemCT = l.vtypeToCIRFallback(vtype)
+			}
+			if elemCT != nil {
+				initExpr = cir.Deref(initExpr, elemCT)
+			}
+		}
 
 		if initExpr != nil {
 			initExpr = l.wrapOptional(vtype, d.Value.GetVType(), initExpr)
