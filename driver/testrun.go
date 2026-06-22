@@ -12,17 +12,15 @@ import (
 	"github.com/vertex-language/ir/vertex/ast"
 )
 
-// testCase is one discovered test function with its extracted metadata.
 type testCase struct {
-	file          string        // source file the function came from
-	funcName      string        // e.g. "test_bool_true"
-	expectedType  string        // e.g. "bool", "int32", "float64"
-	expectedValue string        // e.g. "1", "42", "3.140000"
-	decl          *ast.FuncDecl // mutated in place: IsTest=false, Return=plain type
-	origFile      *ast.File     // the parsed source file (for helper decls)
+	file          string
+	funcName      string
+	expectedType  string
+	expectedValue string
+	decl          *ast.FuncDecl
+	origFile      *ast.File
 }
 
-// runTests is the entry point called by driver.Run for modeTest.
 func runTests(cfg config, stderr io.Writer) int {
 	files, err := collectTestFiles(cfg)
 	if err != nil {
@@ -64,8 +62,6 @@ func runTests(cfg config, stderr io.Writer) int {
 	return 0
 }
 
-// collectTestFiles finds all .vs files that carry a `build test` tag.
-// It does a quick byte scan before committing to a full ANTLR parse.
 func collectTestFiles(cfg config) ([]string, error) {
 	if cfg.testFile != "" {
 		return []string{cfg.testFile}, nil
@@ -86,8 +82,6 @@ func collectTestFiles(cfg config) ([]string, error) {
 	return out, err
 }
 
-// quickHasBuildTest scans the first 512 bytes of a file looking for a line
-// that is exactly "build test". This avoids a full ANTLR parse during discovery.
 func quickHasBuildTest(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -105,10 +99,6 @@ func quickHasBuildTest(path string) bool {
 	return false
 }
 
-// parseTestCases fully parses one test file and returns a testCase for every
-// function decorated with the `test` qualifier. The FuncDecl is mutated in
-// place: IsTest is cleared and the Expected(T,"v") return type is unwrapped
-// to plain T so the existing VIR lowerer sees a normal function.
 func parseTestCases(path string) ([]testCase, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -131,11 +121,10 @@ func parseTestCases(path string) ([]testCase, error) {
 		typeName, value, ok := extractExpected(fd)
 		if !ok {
 			return nil, fmt.Errorf(
-				"test function %q: return type must be Expected(Type, \"value\"), got %T",
-				fd.Name, fd.Return,
+				"test function %q: return type must be Expected(Type, \"value\")",
+				fd.Name,
 			)
 		}
-		// Mutate in place so the VIR lowerer sees a plain function.
 		fd.IsTest = false
 		fd.Return = &ast.NamedType{Name: typeName}
 
@@ -151,7 +140,6 @@ func parseTestCases(path string) ([]testCase, error) {
 	return cases, nil
 }
 
-// hasBuildTest returns true when the parsed file has a `build test` tag.
 func hasBuildTest(f *ast.File) bool {
 	for _, b := range f.Build {
 		if b.Tag == "test" {
@@ -161,8 +149,6 @@ func hasBuildTest(f *ast.File) bool {
 	return false
 }
 
-// extractExpected pulls the type name and expected stdout string out of
-// Expected(TypeName, "value") in the return clause of a test FuncDecl.
 func extractExpected(fd *ast.FuncDecl) (typeName, value string, ok bool) {
 	nt, ok := fd.Return.(*ast.NamedType)
 	if !ok || nt.Name != "Expected" || len(nt.CtorArgs) != 2 {
@@ -175,12 +161,10 @@ func extractExpected(fd *ast.FuncDecl) (typeName, value string, ok bool) {
 	if !nt.CtorArgs[1].IsString {
 		return "", "", false
 	}
-	// CtorArgs[1].String is the raw lexeme including surrounding quotes — strip them.
 	raw := strings.Trim(nt.CtorArgs[1].String, `"`)
 	return typeArg.Name, raw, true
 }
 
-// execTest compiles and runs one test case, returning true on pass.
 func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 	label := fmt.Sprintf("%s::%s", filepath.Base(tc.file), tc.funcName)
 
@@ -230,25 +214,14 @@ func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 	return false
 }
 
-// buildSyntheticPackage constructs an ast.Package for one test binary.
-// It contains:
-//   - all non-test decls from the original file (helpers, types, globals)
-//   - the mutated test FuncDecl (already has IsTest=false, plain return type)
-//   - a synthetic `class C : c` with printf
-//   - a synthetic `main()` that calls the test function and prints the result
 func buildSyntheticPackage(tc testCase) *ast.Package {
 	var decls []ast.Decl
-
-	// Include every decl from the original file except other (still-unmutated)
-	// test functions. The target test function has already been mutated to
-	// IsTest=false so it passes through the loop naturally.
 	for _, d := range tc.origFile.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.IsTest {
-			continue // skip test functions that belong to other test cases
+			continue
 		}
 		decls = append(decls, d)
 	}
-
 	decls = append(decls, syntheticClassC())
 	decls = append(decls, syntheticMain(tc))
 
@@ -264,11 +237,6 @@ func buildSyntheticPackage(tc testCase) *ast.Package {
 	}
 }
 
-// syntheticClassC returns the AST for:
-//
-//	class C : c {
-//	    func printf(fmt: *const char, args: ...*const char) -> int32
-//	}
 func syntheticClassC() *ast.ClassDecl {
 	charPtr := &ast.PointerType{
 		Const: true,
@@ -290,25 +258,12 @@ func syntheticClassC() *ast.ClassDecl {
 	}
 }
 
-// syntheticMain returns the AST for:
-//
-//	func main() -> int32 {
-//	    let result = <funcName>()
-//	    let libc   = C()
-//	    libc.printf("<fmt>\n", result)
-//	    return 0
-//	}
 func syntheticMain(tc testCase) *ast.FuncDecl {
-	fmtLit := &ast.BasicLit{
-		Kind:  ast.LitString,
-		Value: printfFmt(tc.expectedType),
-	}
 	return &ast.FuncDecl{
 		Name:   "main",
 		Return: &ast.NamedType{Name: "int32"},
 		Body: &ast.Block{
 			Stmts: []ast.Stmt{
-				// let result = <funcName>()
 				&ast.VarDecl{
 					Kind:  ast.BindLet,
 					Names: []string{"result"},
@@ -316,7 +271,6 @@ func syntheticMain(tc testCase) *ast.FuncDecl {
 						Fun: &ast.Ident{Name: tc.funcName},
 					},
 				},
-				// let libc = C()
 				&ast.VarDecl{
 					Kind:  ast.BindLet,
 					Names: []string{"libc"},
@@ -324,7 +278,6 @@ func syntheticMain(tc testCase) *ast.FuncDecl {
 						Fun: &ast.Ident{Name: "C"},
 					},
 				},
-				// libc.printf("<fmt>\n", result)
 				&ast.ExprStmt{
 					X: &ast.CallExpr{
 						Fun: &ast.SelectorExpr{
@@ -332,12 +285,14 @@ func syntheticMain(tc testCase) *ast.FuncDecl {
 							Sel: "printf",
 						},
 						Args: []*ast.Arg{
-							{Value: fmtLit},
+							{Value: &ast.BasicLit{
+								Kind:  ast.LitString,
+								Value: printfFmt(tc.expectedType),
+							}},
 							{Value: &ast.Ident{Name: "result"}},
 						},
 					},
 				},
-				// return 0
 				&ast.ReturnStmt{
 					Value: &ast.BasicLit{Kind: ast.LitIntDec, Value: "0"},
 				},
@@ -346,15 +301,13 @@ func syntheticMain(tc testCase) *ast.FuncDecl {
 	}
 }
 
-// printfFmt returns the raw Vertex string literal (quotes included) for
-// printing a value of the given type name via printf.
 func printfFmt(typeName string) string {
 	switch typeName {
 	case "float32", "float64":
 		return `"%f\n"`
 	case "int64", "uint64":
 		return `"%lld\n"`
-	default: // bool, int, int32, uint32, int8, uint8, int16, uint16
+	default:
 		return `"%d\n"`
 	}
 }
