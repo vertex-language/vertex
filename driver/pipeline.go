@@ -32,6 +32,9 @@ import (
 // emit is the top-level pipeline entry for normal (non-test) compilation.
 // It parses the input from disk then hands off to emitPackage.
 func emit(cfg config, stderr io.Writer) int {
+	if cfg.mode == modeTest {
+		return runTests(cfg, stderr)
+	}
 	if cfg.mode == modeDump {
 		return dumpAll(cfg, stderr)
 	}
