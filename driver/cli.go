@@ -28,7 +28,7 @@ type config struct {
 	output      string
 	target      string
 	packagesDir string
-	sysroot     string  // optional sysroot for cross-compilation library resolution
+	sysroot     string
 	mode        emitMode
 	optLevel    int
 	debugInfo   bool
@@ -47,7 +47,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fASM    bool
 		fObj    bool
 		fC      bool
-		fLC     bool
 		fDump   bool
 
 		fO0, fO1, fO2, fOs bool
@@ -60,7 +59,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fASM,    "emit-asm",    false, "emit native assembly text (.s)")
 	fs.BoolVar(&fObj,    "emit-obj",    false, "emit relocatable object file (.o / .obj)")
 	fs.BoolVar(&fC,      "c",           false, "compile to object file (alias for -emit-obj)")
-	fs.BoolVar(&fLC,     "lc",          false, "compile and link to a native executable")
 	fs.BoolVar(&fDump,   "dump",        false, "dump all pipeline stages to a single annotated file (.dump)")
 	fs.BoolVar(&fDump,   "dump-all",    false, "alias for -dump")
 
@@ -80,13 +78,12 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
 		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs | package/>\n\n")
-		fmt.Fprintf(stderr, "Emit mode (exactly one required):\n")
+		fmt.Fprintf(stderr, "Emit mode (default: compile and link to native executable):\n")
 		fmt.Fprintf(stderr, "  -emit-vir             emit Vertex IR text (.vir)\n")
 		fmt.Fprintf(stderr, "  -emit-vbytes          emit Vertex IR binary (.vbytes)\n")
 		fmt.Fprintf(stderr, "  -emit-mir             emit Machine IR text (.mir)\n")
 		fmt.Fprintf(stderr, "  -emit-asm             emit native assembly text (.s)\n")
 		fmt.Fprintf(stderr, "  -emit-obj, -c         emit relocatable object file (.o / .obj)\n")
-		fmt.Fprintf(stderr, "  -lc                   compile and link to native executable\n")
 		fmt.Fprintf(stderr, "  -dump, -dump-all      dump all pipeline stages (.dump)\n\n")
 		fmt.Fprintf(stderr, "Options:\n")
 		fmt.Fprintf(stderr, "  -o <file>        output file (default: derived from input)\n")
@@ -101,14 +98,13 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  -g               include debug information\n")
 		fmt.Fprintf(stderr, "  -v, -version     print version and exit\n\n")
 		fmt.Fprintf(stderr, "Examples:\n")
+		fmt.Fprintf(stderr, "  vertex -o main        main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -o main        -target darwin-arm64 -O2 main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -c           -o main.o      main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -emit-asm    -o main.s      main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -emit-mir    -o main.mir    main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -emit-vir    -o main.vir    main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -emit-vbytes -o main.vbytes main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -emit-mir    -o main.mir    main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -emit-asm    -o main.s      main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -c           -o main.o      main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -lc          -o main        main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -lc -target darwin-arm64 -O2 -o main main.vs\n")
-		fmt.Fprintf(stderr, "  vertex -lc -sysroot /opt/sysroot/aarch64-linux-gnu -target linux-arm64 -o main main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o main.dump   main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o -           main.vs\n")
 	}
@@ -121,7 +117,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		return config{}, 0
 	}
 
-	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fLC, fDump}
+	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fDump}
 	count := 0
 	for _, b := range modes {
 		if b {
@@ -130,10 +126,9 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	switch count {
 	case 0:
-		fmt.Fprintf(stderr, "vertex: one emit mode is required (-emit-vir, -emit-vbytes, -emit-mir, -emit-asm, -c/-emit-obj, -lc, -dump)\n\n")
-		fs.Usage()
-		return config{}, 2
+		cfg.mode = modeExe
 	case 1:
+		// good
 	default:
 		fmt.Fprintf(stderr, "vertex: emit modes are mutually exclusive\n")
 		return config{}, 2
@@ -150,8 +145,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		cfg.mode = modeASM
 	case fObj || fC:
 		cfg.mode = modeObj
-	case fLC:
-		cfg.mode = modeExe
 	case fDump:
 		cfg.mode = modeDump
 	}
