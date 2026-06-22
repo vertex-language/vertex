@@ -144,7 +144,7 @@ func emit(cfg config, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── Stage 6: Resolve shared libraries from VIR imports ───────────────────
+	// ── Stage 6: Resolve shared libraries and CRT objects ────────────────────
 	if tri.os == "freestanding" {
 		fmt.Fprintf(stderr, "vertex: cannot link a freestanding target; use -c/-emit-obj instead\n")
 		return 2
@@ -157,8 +157,14 @@ func emit(cfg config, stderr io.Writer) int {
 		return 1
 	}
 
+	crt, err := resolveCRT(tri, cfg.sysroot)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: %v\n", err)
+		return 1
+	}
+
 	// ── Stage 7: Link to native executable ───────────────────────────────────
-	exeBytes, err := linkObject(tri, objBytes, dynLibs)
+	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
@@ -238,10 +244,13 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	return f.Serialize()
 }
 
-// linkObject links objBytes against the provided dynamic libraries and returns
-// the final executable bytes. dynLibs comes from extractDynLibs + resolveLibs
-// and contains every shared library referenced by the VIR module's imports.
-func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib) ([]byte, error) {
+// linkObject links objBytes against the provided dynamic libraries and CRT
+// objects, returning the final executable bytes.
+//
+// The canonical ELF link order is: crt1.o, crti.o, <user object>, crtn.o,
+// followed by dynamic libraries. crtObjects is empty for non-Linux targets
+// where the system linker or runtime handles startup transparently.
+func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects) ([]byte, error) {
 	objName := "main.o"
 	if tri.os == "windows" {
 		objName = "main.obj"
@@ -250,8 +259,17 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib) ([]byte, err
 	switch tri.os {
 	case "linux":
 		l := linkerelf.NewLinker(tri.elfArch())
+		if err := l.AddObject("crt1.o", crt.crt1); err != nil {
+			return nil, fmt.Errorf("add crt1.o: %w", err)
+		}
+		if err := l.AddObject("crti.o", crt.crti); err != nil {
+			return nil, fmt.Errorf("add crti.o: %w", err)
+		}
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
+		}
+		if err := l.AddObject("crtn.o", crt.crtn); err != nil {
+			return nil, fmt.Errorf("add crtn.o: %w", err)
 		}
 		for _, lib := range dynLibs {
 			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {

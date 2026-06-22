@@ -9,11 +9,15 @@ import (
 	"github.com/vertex-language/ir/vertex"
 )
 
-// resolvedLib is a shared library name paired with its raw bytes, ready to
-// hand directly to the linker's AddDynamicLibrary method.
 type resolvedLib struct {
 	name  string
 	bytes []byte
+}
+
+type crtObjects struct {
+	crt1 []byte // _start → __libc_start_main → main
+	crti []byte // .init section prologue
+	crtn []byte // .init section epilogue
 }
 
 // extractDynLibs walks the VIR import section and returns the unique set of
@@ -22,11 +26,7 @@ type resolvedLib struct {
 // Import Module strings follow the "<platform>:<libname>" convention defined
 // in §13.1 of the VIR spec (e.g. "linux:libc.so.6", "darwin:libSystem.B.dylib").
 // Only entries whose platform component equals tri.os are collected; imports
-// for other platforms present in the same module (cross-compiled packages,
-// conditional FFI) are silently skipped. Only FuncImport descriptors can
-// actually reference a shared library symbol, but we filter on the platform
-// prefix alone so table/global/memory imports to platform libs are also covered
-// if they ever appear.
+// for other platforms present in the same module are silently skipped.
 func extractDynLibs(m *vertex.Module, tri triple) []string {
 	seen := make(map[string]bool)
 	var libs []string
@@ -58,11 +58,7 @@ func splitImportModule(module string) (platform, lib string, ok bool) {
 // and returns a slice of resolvedLib ready for the linker.
 //
 // If sysroot is non-empty every search directory is prefixed with it, which
-// supports cross-compilation (e.g. sysroot="/opt/sysroot/aarch64-linux-gnu").
-// An empty sysroot searches the native host layout.
-//
-// Libraries that cannot be found produce an error that names both the library
-// and the directories that were searched, to help diagnose missing dev packages.
+// supports cross-compilation.
 func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, error) {
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
@@ -80,6 +76,53 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 	return out, nil
 }
 
+// resolveCRT finds and reads the system CRT objects required for a fully
+// linked ELF executable. The canonical link order is:
+//
+//	crt1.o  crti.o  <user object>  crtn.o
+//
+// crt1.o provides _start which calls __libc_start_main which calls main.
+// crti.o / crtn.o bracket the .init/.fini sections.
+//
+// CRT injection is only needed for Linux ELF targets. Darwin's libSystem
+// provides its own startup machinery and the Mach-O linker handles it
+// transparently; Windows uses a different startup model entirely.
+// For those targets resolveCRT returns an empty crtObjects with no error.
+func resolveCRT(tri triple, sysroot string) (crtObjects, error) {
+	if tri.os != "linux" {
+		return crtObjects{}, nil
+	}
+
+	dirs := libSearchDirs(tri, sysroot)
+
+	read := func(name string) ([]byte, error) {
+		path, err := findLib(name, dirs)
+		if err != nil {
+			return nil, fmt.Errorf("syslibs: crt: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("syslibs: read %s: %w", path, err)
+		}
+		return data, nil
+	}
+
+	crt1, err := read("crt1.o")
+	if err != nil {
+		return crtObjects{}, err
+	}
+	crti, err := read("crti.o")
+	if err != nil {
+		return crtObjects{}, err
+	}
+	crtn, err := read("crtn.o")
+	if err != nil {
+		return crtObjects{}, err
+	}
+
+	return crtObjects{crt1: crt1, crti: crti, crtn: crtn}, nil
+}
+
 // findLib searches dirs in order and returns the first path where name exists.
 func findLib(name string, dirs []string) (string, error) {
 	for _, dir := range dirs {
@@ -95,14 +138,8 @@ func findLib(name string, dirs []string) (string, error) {
 }
 
 // libSearchDirs returns the ordered list of directories to probe for shared
-// libraries for the given triple. If sysroot is non-empty it is prepended to
-// every path.
-//
-// Linux multiarch directories are listed first (Debian/Ubuntu layout), followed
-// by the legacy single-arch fallbacks so older distributions still work.
-// Darwin lists the standard SDK paths plus Homebrew's prefix.
-// Windows cross-compilation requires an explicit sysroot since there are no
-// standard Windows library paths on Linux/macOS hosts.
+// libraries and CRT objects for the given triple. If sysroot is non-empty
+// it is prepended to every path.
 func libSearchDirs(tri triple, sysroot string) []string {
 	var dirs []string
 
@@ -111,24 +148,24 @@ func libSearchDirs(tri triple, sysroot string) []string {
 		switch tri.arch {
 		case "arm64":
 			dirs = []string{
-				"/lib/aarch64-linux-gnu",
 				"/usr/lib/aarch64-linux-gnu",
-				"/lib",
+				"/lib/aarch64-linux-gnu",
 				"/usr/lib",
+				"/lib",
 			}
 		case "riscv64":
 			dirs = []string{
-				"/lib/riscv64-linux-gnu",
 				"/usr/lib/riscv64-linux-gnu",
-				"/lib",
+				"/lib/riscv64-linux-gnu",
 				"/usr/lib",
+				"/lib",
 			}
 		default: // amd64
 			dirs = []string{
-				"/lib/x86_64-linux-gnu",
 				"/usr/lib/x86_64-linux-gnu",
-				"/lib",
+				"/lib/x86_64-linux-gnu",
 				"/usr/lib",
+				"/lib",
 			}
 		}
 
@@ -139,8 +176,7 @@ func libSearchDirs(tri triple, sysroot string) []string {
 			"/opt/homebrew/lib",
 		}
 
-	// Windows: no native host paths are probed. An explicit -sysroot pointing
-	// at a MinGW or MSVC sysroot is required for cross-compilation.
+	// Windows: no native host paths; requires explicit -sysroot.
 	}
 
 	if sysroot == "" {
