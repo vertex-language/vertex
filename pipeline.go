@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/vertex-language/ir/vertex/ast"
 	virlower "github.com/vertex-language/ir/vertex/lower/vir"
@@ -33,36 +36,18 @@ func emit(cfg config, stderr io.Writer) int {
 	}
 
 	// ── Stage 1: Parse Vertex source (.vs) → AST ─────────────────────────────
-	pkg, err := ast.NewPackageFromPath(cfg.input, ast.ParseOptions{
-		PackagesDir: cfg.packagesDir,
-		BuildTags:   tri.buildTags(),
-	})
+	pkg, err := parseInput(cfg.input)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
-		return 1
-	}
-	hadFrontendError := false
-	for _, d := range pkg.Diagnostics() {
-		fmt.Fprintln(stderr, d)
-		if d.Severity == ast.SevError {
-			hadFrontendError = true
-		}
-	}
-	if hadFrontendError {
 		return 1
 	}
 
 	// ── Stage 2: Lower AST → Vertex IR ───────────────────────────────────────
 	virMod, virErr := virlower.NewLower(pkg, nil)
 	if virErr != nil {
-		// NewLower always returns a non-nil *vertex.Module; the error carries
-		// per-node diagnostics. Report and continue so partial VIR artifacts
-		// remain useful (e.g. for a language server).
 		fmt.Fprintln(stderr, virErr)
 	}
 
-	// Set the target on the module before handing it downstream; lowering
-	// and encoding both inspect it to resolve arch-specific behaviour.
 	virMod.SetTarget(tri.virTargetString())
 
 	if cfg.mode == modeVIR {
@@ -170,6 +155,50 @@ func emit(cfg config, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// parseInput reads one .vs file or all .vs files in a directory, parses each
+// with ast.NewFile, and merges them into a *ast.Package with ast.NewPackage.
+func parseInput(input string) (*ast.Package, error) {
+	var files []*ast.File
+
+	if isDir(input) {
+		entries, err := os.ReadDir(input)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read directory %s: %w", input, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".vs") {
+				continue
+			}
+			path := filepath.Join(input, e.Name())
+			f, err := parseFile(path)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, f)
+		}
+		if len(files) == 0 {
+			return nil, fmt.Errorf("no .vs files found in %s", input)
+		}
+	} else {
+		f, err := parseFile(input)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+
+	return ast.NewPackage(files)
+}
+
+// parseFile reads a single .vs file from disk and returns its AST.
+func parseFile(path string) (*ast.File, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	return ast.NewFile(path, src)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
