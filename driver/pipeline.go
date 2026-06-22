@@ -1,4 +1,4 @@
-package main
+package driver
 
 import (
 	"fmt"
@@ -43,9 +43,16 @@ func emit(cfg config, stderr io.Writer) int {
 	}
 
 	// ── Stage 2: Lower AST → Vertex IR ───────────────────────────────────────
-	virMod, virErr := virlower.NewLower(pkg, nil)
+	// Pass the target so extern-class declarations resolve library names
+	// correctly (e.g. "c" → "linux:libc.so.6"). NewLower returns (nil, errs)
+	// on hard failure, so we must guard the SetTarget call below.
+	virMod, virErr := virlower.NewLower(pkg, nil, cfg.target)
 	if virErr != nil {
 		fmt.Fprintln(stderr, virErr)
+	}
+	if virMod == nil {
+		// Hard error: no partial module to continue with.
+		return 1
 	}
 
 	virMod.SetTarget(tri.virTargetString())
@@ -124,7 +131,6 @@ func emit(cfg config, stderr io.Writer) int {
 	}
 
 	sections := buildSections(fns, mirMod)
-
 	objBytes, err := marshalObject(tri, objTarget, sections)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: object serialization: %v\n", err)
@@ -157,11 +163,9 @@ func emit(cfg config, stderr io.Writer) int {
 	return 0
 }
 
-// parseInput reads one .vs file or all .vs files in a directory, parses each
-// with ast.NewFile, and merges them into a *ast.Package with ast.NewPackage.
+// parseInput reads one .vs file or all .vs files in a directory.
 func parseInput(input string) (*ast.Package, error) {
 	var files []*ast.File
-
 	if isDir(input) {
 		entries, err := os.ReadDir(input)
 		if err != nil {
@@ -171,8 +175,7 @@ func parseInput(input string) (*ast.Package, error) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".vs") {
 				continue
 			}
-			path := filepath.Join(input, e.Name())
-			f, err := parseFile(path)
+			f, err := parseFile(filepath.Join(input, e.Name()))
 			if err != nil {
 				return nil, err
 			}
@@ -188,11 +191,9 @@ func parseInput(input string) (*ast.Package, error) {
 		}
 		files = append(files, f)
 	}
-
 	return ast.NewPackage(files)
 }
 
-// parseFile reads a single .vs file from disk and returns its AST.
 func parseFile(path string) (*ast.File, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -200,8 +201,6 @@ func parseFile(path string) (*ast.File, error) {
 	}
 	return ast.NewFile(path, src)
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 func buildSections(fns []objbridge.AssembledFunc, m *machine.Module) []object.Section {
 	secs := make([]object.Section, 0, 2)
@@ -215,7 +214,6 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 		AddSection(object.Section)
 		Serialize() ([]byte, error)
 	}
-
 	var f objectFile
 	switch tri.os {
 	case "linux", "freestanding":
@@ -227,7 +225,6 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	default:
 		return nil, fmt.Errorf("unsupported OS: %s", tri.os)
 	}
-
 	for _, s := range sections {
 		f.AddSection(s)
 	}
@@ -239,7 +236,6 @@ func linkObject(tri triple, objBytes []byte) ([]byte, error) {
 	if tri.os == "windows" {
 		objName = "main.obj"
 	}
-
 	switch tri.os {
 	case "linux":
 		l := linkerelf.NewLinker(tri.elfArch())
@@ -247,14 +243,12 @@ func linkObject(tri triple, objBytes []byte) ([]byte, error) {
 			return nil, err
 		}
 		return l.Link()
-
 	case "darwin":
 		l := linkermacho.NewLinker(tri.machoArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
 		return l.Link()
-
 	case "windows":
 		l := linkerpe.NewLinker(tri.peArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
