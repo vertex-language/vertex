@@ -324,6 +324,8 @@ func printfFmt(typeName string) string {
 		return `"%lld\n"`
 	case "string":
 		return `"%s\n"`
+	case "char":
+		return `"%c\n"`
 	default:
 		return `"%d\n"`
 	}
