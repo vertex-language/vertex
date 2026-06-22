@@ -238,26 +238,42 @@ func buildSyntheticPackage(tc testCase) *ast.Package {
 }
 
 func syntheticClassC() *ast.ClassDecl {
-    charPtr := &ast.PointerType{
-        Const: true,
-        Elem:  &ast.NamedType{Name: "char"},
-    }
-    return &ast.ClassDecl{
-        Name:   "C",
-        Parent: "c",
-        Methods: []*ast.MethodSig{
-            {
-                Name: "printf",
-                Params: []*ast.Param{
-                    {Name: "fmt", Variadic: true, Type: charPtr},
-                },
-                Return: &ast.NamedType{Name: "int32"},
-            },
-        },
-    }
+	charPtr := &ast.PointerType{
+		Const: true,
+		Elem:  &ast.NamedType{Name: "char"},
+	}
+	return &ast.ClassDecl{
+		Name:   "C",
+		Parent: "c",
+		Methods: []*ast.MethodSig{
+			{
+				Name: "printf",
+				Params: []*ast.Param{
+					{Name: "fmt", Variadic: true, Type: charPtr},
+				},
+				Return: &ast.NamedType{Name: "int32"},
+			},
+		},
+	}
 }
 
 func syntheticMain(tc testCase) *ast.FuncDecl {
+	// For string results, pass result.c_str() to printf instead of result
+	// directly — printf expects a null-terminated *const char for %s.
+	var printfResultArg *ast.Arg
+	if tc.expectedType == "string" {
+		printfResultArg = &ast.Arg{
+			Value: &ast.CallExpr{
+				Fun: &ast.SelectorExpr{
+					X:   &ast.Ident{Name: "result"},
+					Sel: "c_str",
+				},
+			},
+		}
+	} else {
+		printfResultArg = &ast.Arg{Value: &ast.Ident{Name: "result"}}
+	}
+
 	return &ast.FuncDecl{
 		Name:   "main",
 		Return: &ast.NamedType{Name: "int32"},
@@ -288,7 +304,7 @@ func syntheticMain(tc testCase) *ast.FuncDecl {
 								Kind:  ast.LitString,
 								Value: printfFmt(tc.expectedType),
 							}},
-							{Value: &ast.Ident{Name: "result"}},
+							printfResultArg,
 						},
 					},
 				},
@@ -306,6 +322,8 @@ func printfFmt(typeName string) string {
 		return `"%f\n"`
 	case "int64", "uint64":
 		return `"%lld\n"`
+	case "string":
+		return `"%s\n"`
 	default:
 		return `"%d\n"`
 	}
