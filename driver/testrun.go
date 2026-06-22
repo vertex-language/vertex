@@ -238,24 +238,23 @@ func buildSyntheticPackage(tc testCase) *ast.Package {
 }
 
 func syntheticClassC() *ast.ClassDecl {
-	charPtr := &ast.PointerType{
-		Const: true,
-		Elem:  &ast.NamedType{Name: "char"},
-	}
-	return &ast.ClassDecl{
-		Name:   "C",
-		Parent: "c",
-		Methods: []*ast.MethodSig{
-			{
-				Name: "printf",
-				Params: []*ast.Param{
-					{Name: "fmt", Type: charPtr},
-					{Name: "args", Variadic: true, Type: charPtr},
-				},
-				Return: &ast.NamedType{Name: "int32"},
-			},
-		},
-	}
+    charPtr := &ast.PointerType{
+        Const: true,
+        Elem:  &ast.NamedType{Name: "char"},
+    }
+    return &ast.ClassDecl{
+        Name:   "C",
+        Parent: "c",
+        Methods: []*ast.MethodSig{
+            {
+                Name: "printf",
+                Params: []*ast.Param{
+                    {Name: "fmt", Variadic: true, Type: charPtr},
+                },
+                Return: &ast.NamedType{Name: "int32"},
+            },
+        },
+    }
 }
 
 func syntheticMain(tc testCase) *ast.FuncDecl {
