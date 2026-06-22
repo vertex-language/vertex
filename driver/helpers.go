@@ -13,8 +13,18 @@ func isDir(path string) bool {
 }
 
 // writeOutput writes data to path, creating any missing parent directories.
-// Passing "-" writes to stdout.
+// Passing "-" writes to stdout. Output is written with 0644 permissions.
 func writeOutput(path string, data []byte) error {
+	return writeFile(path, data, 0o644)
+}
+
+// writeExe writes an executable to path with 0755 permissions.
+// Passing "-" writes to stdout.
+func writeExe(path string, data []byte) error {
+	return writeFile(path, data, 0o755)
+}
+
+func writeFile(path string, data []byte, perm os.FileMode) error {
 	if path == "-" {
 		_, err := os.Stdout.Write(data)
 		return err
@@ -24,7 +34,7 @@ func writeOutput(path string, data []byte) error {
 			return fmt.Errorf("cannot create output directory %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, perm); err != nil {
 		return fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	return nil

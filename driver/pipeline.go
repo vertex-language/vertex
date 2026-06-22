@@ -169,7 +169,7 @@ func emit(cfg config, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
 	}
-	if err := writeOutput(cfg.output, exeBytes); err != nil {
+	if err := writeExe(cfg.output, exeBytes); err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
 		return 1
 	}
