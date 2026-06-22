@@ -11,26 +11,26 @@ import (
 
 const version = "0.4.0"
 
-// emitMode controls how far through the pipeline to run and what to write out.
 type emitMode uint8
 
 const (
-	modeVIR    emitMode = iota // -emit-vir    → Vertex IR text      (.vir)
-	modeVBytes                  // -emit-vbytes → Vertex IR binary    (.vbytes)
-	modeMIR                     // -emit-mir    → Machine IR text      (.mir)
-	modeASM                     // -emit-asm    → native assembly text (.s)
-	modeObj                     // -c           → relocatable object   (.o / .obj)
-	modeExe                     // -lc          → native executable
-	modeDump                    // -dump        → all pipeline stages  (.dump)
+	modeVIR    emitMode = iota
+	modeVBytes
+	modeMIR
+	modeASM
+	modeObj
+	modeExe
+	modeDump
 )
 
 type config struct {
 	input       string
 	output      string
-	target      string   // e.g. "linux-amd64"
+	target      string
 	packagesDir string
+	sysroot     string  // optional sysroot for cross-compilation library resolution
 	mode        emitMode
-	optLevel    int  // 0=none 1=light 2=full -1=size
+	optLevel    int
 	debugInfo   bool
 }
 
@@ -45,16 +45,15 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fVBytes bool
 		fMIR    bool
 		fASM    bool
-		fObj    bool // -emit-obj
-		fC      bool // -c (alias)
-		fLC     bool // -lc
-		fDump   bool // -dump / -dump-all
+		fObj    bool
+		fC      bool
+		fLC     bool
+		fDump   bool
 
 		fO0, fO1, fO2, fOs bool
 		printVer            bool
 	)
 
-	// ── Emit modes ────────────────────────────────────────────────────────────
 	fs.BoolVar(&fVIR,    "emit-vir",    false, "emit Vertex IR text (.vir)")
 	fs.BoolVar(&fVBytes, "emit-vbytes", false, "emit Vertex IR binary (.vbytes)")
 	fs.BoolVar(&fMIR,    "emit-mir",    false, "emit Machine IR text (.mir)")
@@ -65,16 +64,15 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fDump,   "dump",        false, "dump all pipeline stages to a single annotated file (.dump)")
 	fs.BoolVar(&fDump,   "dump-all",    false, "alias for -dump")
 
-	// ── Optimisation ──────────────────────────────────────────────────────────
 	fs.BoolVar(&fO0, "O0", false, "disable optimisation (default)")
 	fs.BoolVar(&fO1, "O1", false, "light optimisation")
 	fs.BoolVar(&fO2, "O2", false, "full optimisation")
 	fs.BoolVar(&fOs, "Os", false, "optimise for size")
 
-	// ── Common options ────────────────────────────────────────────────────────
 	fs.StringVar(&cfg.output,      "o",            "",                   "write output to `file`")
 	fs.StringVar(&cfg.target,      "target",        defaultTarget(),      "target triple (os-arch)")
 	fs.StringVar(&cfg.packagesDir, "packages-dir",  defaultPackagesDir(), "Vertex packages root (overrides $VERTEX_PATH)")
+	fs.StringVar(&cfg.sysroot,     "sysroot",       "",                   "sysroot for cross-compilation library search")
 	fs.BoolVar(&cfg.debugInfo,     "g",             false,                "include debug information")
 	fs.BoolVar(&printVer, "version", false, "print version and exit")
 	fs.BoolVar(&printVer, "v",       false, "alias for -version")
@@ -97,6 +95,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "                   windows-amd64, windows-arm64,\n")
 		fmt.Fprintf(stderr, "                   freestanding-amd64, freestanding-arm64,\n")
 		fmt.Fprintf(stderr, "                   freestanding-riscv64  (default: %s)\n", defaultTarget())
+		fmt.Fprintf(stderr, "  -sysroot <path>  sysroot for cross-compilation library search\n")
 		fmt.Fprintf(stderr, "  -packages-dir    Vertex packages root (overrides $VERTEX_PATH)\n")
 		fmt.Fprintf(stderr, "  -O0/-O1/-O2/-Os  optimisation level (default: -O0)\n")
 		fmt.Fprintf(stderr, "  -g               include debug information\n")
@@ -109,6 +108,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  vertex -c           -o main.o      main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -lc          -o main        main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -lc -target darwin-arm64 -O2 -o main main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -lc -sysroot /opt/sysroot/aarch64-linux-gnu -target linux-arm64 -o main main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o main.dump   main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o -           main.vs\n")
 	}
@@ -121,7 +121,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		return config{}, 0
 	}
 
-	// Exactly one emit mode must be set.
 	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fLC, fDump}
 	count := 0
 	for _, b := range modes {
@@ -135,7 +134,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fs.Usage()
 		return config{}, 2
 	case 1:
-		// good
 	default:
 		fmt.Fprintf(stderr, "vertex: emit modes are mutually exclusive\n")
 		return config{}, 2
@@ -214,13 +212,11 @@ func deriveOutput(input string, mode emitMode, target string) string {
 	return replaceExt(base, ".out")
 }
 
-// defaultTarget returns the host OS and arch as a Vertex triple.
 func defaultTarget() string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 	switch goarch {
 	case "amd64", "arm64", "riscv64":
-		// already matching Vertex arch names
 	default:
 		goarch = "amd64"
 	}
@@ -232,7 +228,6 @@ func defaultTarget() string {
 	}
 }
 
-// expandShortFlag rewrites -oFILE → -o FILE so the stdlib flag parser is happy.
 func expandShortFlag(args []string) []string {
 	out := make([]string, 0, len(args))
 	for _, a := range args {

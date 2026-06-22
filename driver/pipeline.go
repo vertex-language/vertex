@@ -47,15 +47,11 @@ func emit(cfg config, stderr io.Writer) int {
 	}
 
 	// ── Stage 2: Lower AST → Vertex IR ───────────────────────────────────────
-	// Pass the target so extern-class declarations resolve library names
-	// correctly (e.g. "c" → "linux:libc.so.6"). NewLower returns (nil, errs)
-	// on hard failure, so we must guard the SetTarget call below.
 	virMod, virErr := virlower.NewLower(pkg, nil, cfg.target)
 	if virErr != nil {
 		fmt.Fprintln(stderr, virErr)
 	}
 	if virMod == nil {
-		// Hard error: no partial module to continue with.
 		return 1
 	}
 
@@ -81,12 +77,11 @@ func emit(cfg config, stderr io.Writer) int {
 		return boolToCode(virErr != nil)
 	}
 
-	// All stages below require clean VIR.
 	if virErr != nil {
 		return 1
 	}
 
-	// ── Stage 3: Lower Vertex IR → Machine IR (SSA) ───────────────────────────
+	// ── Stage 3: Lower Vertex IR → Machine IR ────────────────────────────────
 	mirMod, err := mirlower.NewLower(virMod)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: MIR lowering: %v\n", err)
@@ -149,13 +144,21 @@ func emit(cfg config, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── Stage 6: Link to native executable ───────────────────────────────────
+	// ── Stage 6: Resolve shared libraries from VIR imports ───────────────────
 	if tri.os == "freestanding" {
 		fmt.Fprintf(stderr, "vertex: cannot link a freestanding target; use -c/-emit-obj instead\n")
 		return 2
 	}
 
-	exeBytes, err := linkObject(tri, objBytes)
+	libNames := extractDynLibs(virMod, tri)
+	dynLibs, err := resolveLibs(libNames, tri, cfg.sysroot)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: %v\n", err)
+		return 1
+	}
+
+	// ── Stage 7: Link to native executable ───────────────────────────────────
+	exeBytes, err := linkObject(tri, objBytes, dynLibs)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
@@ -235,31 +238,53 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	return f.Serialize()
 }
 
-func linkObject(tri triple, objBytes []byte) ([]byte, error) {
+// linkObject links objBytes against the provided dynamic libraries and returns
+// the final executable bytes. dynLibs comes from extractDynLibs + resolveLibs
+// and contains every shared library referenced by the VIR module's imports.
+func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib) ([]byte, error) {
 	objName := "main.o"
 	if tri.os == "windows" {
 		objName = "main.obj"
 	}
+
 	switch tri.os {
 	case "linux":
 		l := linkerelf.NewLinker(tri.elfArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
+		for _, lib := range dynLibs {
+			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
+				return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
+			}
+		}
 		return l.Link()
+
 	case "darwin":
 		l := linkermacho.NewLinker(tri.machoArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
+		for _, lib := range dynLibs {
+			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
+				return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
+			}
+		}
 		return l.Link()
+
 	case "windows":
 		l := linkerpe.NewLinker(tri.peArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
+		for _, lib := range dynLibs {
+			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
+				return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
+			}
+		}
 		return l.Link()
 	}
+
 	return nil, fmt.Errorf("linking not supported for OS: %s", tri.os)
 }
 
