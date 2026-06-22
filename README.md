@@ -35,6 +35,7 @@ Requires Go 1.23 or later.
 
 ```sh
 GOPROXY=direct go install github.com/vertex-language/vertex@latest
+
 ```
 
 Verify:
@@ -42,6 +43,7 @@ Verify:
 ```sh
 vertex -version
 # vertex 0.4.0
+
 ```
 
 ---
@@ -103,11 +105,13 @@ func main() -> int32 {
 
     return 0
 }
+
 ```
 
 ```sh
-vertex -lc -o fib fib.vs
+vertex -o fib fib.vs
 ./fib
+
 ```
 
 ---
@@ -129,20 +133,21 @@ let banner: string = `
   Vertex 2.2
   systems · concurrency · zero-overhead interop
 `
+
 ```
 
 Scalar types map directly to C:
 
-| Vertex            | C type     |
-|-------------------|------------|
-| `int` / `int32`   | `int32_t`  |
-| `int64`           | `int64_t`  |
+| Vertex | C type |
+| --- | --- |
+| `int` / `int32` | `int32_t` |
+| `int64` | `int64_t` |
 | `uint` / `uint32` | `uint32_t` |
-| `uint8`           | `uint8_t`  |
-| `float32`         | `float`    |
-| `float64`         | `double`   |
-| `bool`            | `bool`     |
-| `string`          | see docs   |
+| `uint8` | `uint8_t` |
+| `float32` | `float` |
+| `float64` | `double` |
+| `bool` | `bool` |
+| `string` | see docs |
 
 ---
 
@@ -159,6 +164,7 @@ func increment(n: *int32) {
 
 var count = 0
 increment(n: &count)   // count is now 1
+
 ```
 
 `let`/`var` and `*const` are orthogonal: `let` locks the binding; `*const` locks
@@ -183,6 +189,7 @@ func (v: *Vec2) scale(factor: float32) {
 
 var pos = Vec2{x: 1.0, y: 2.0}
 pos.scale(factor: 2.0)
+
 ```
 
 **Classes** are heap-allocated. The programmer controls lifetime explicitly via
@@ -208,6 +215,7 @@ defer dog.delete()
 // reference counted
 let cat = Animal(name: "Luna", health: 100).new()
 weak let observer = cat    // Animal? — non-owning
+
 ```
 
 ---
@@ -222,6 +230,7 @@ var mask: [uint8; 64]
 mask.fill(0xFF)
 
 let coords: [int32; 3] = [10, 20, 30]
+
 ```
 
 **Dynamic arrays** are heap-allocated and growable.
@@ -235,6 +244,7 @@ items.push(20)
 
 var doubled = items.map(func(x: int32) -> int32 { return x * 2 })
 defer doubled.delete()
+
 ```
 
 **Maps** use brace literals. A type annotation is required for empty maps.
@@ -249,6 +259,7 @@ config["workers"] = 4
 config["verbose"] = nil    // removes key
 
 let w = config["workers"]  // int32? — nil if absent
+
 ```
 
 ---
@@ -271,6 +282,7 @@ let output = result.receive()
 // gpu — PTX / SPIR-V kernel
 let out = gpu(blocks: 16, threads: 256) vectorAdd(a: x, b: y)
 let ans = out.receive()
+
 ```
 
 **Channels** carry values across execution boundaries.
@@ -288,6 +300,7 @@ thread func(data: [float32], ch: chan float32) {
 while let val = stream.tryReceive() {
     print(val)
 }
+
 ```
 
 **`select`** suspends with 0% CPU until a channel is ready.
@@ -301,6 +314,7 @@ case b = task2.receive():
 default:
     print("neither ready yet")
 }
+
 ```
 
 **Reactive state** broadcasts a value to all subscribers.
@@ -322,6 +336,7 @@ async func(s: state AppState) {
 }(app)
 
 runtime.loop()
+
 ```
 
 ---
@@ -357,6 +372,7 @@ switch parseInt(s: input) {
 case Ok(let value):  // use value
 case Err(let msg):   // handle error
 }
+
 ```
 
 ---
@@ -366,13 +382,13 @@ case Err(let msg):   // handle error
 Every foreign target is expressed through an import path, a class declaration,
 and a package.
 
-| Import prefix | Strategy                             |
-|---------------|--------------------------------------|
-| `lib/`        | linked call (validated at link time)  |
-| `linux/`      | inline syscall instruction            |
-| `darwin/`     | `objc_msgSend` / selector dispatch    |
-| `windows/`    | COM vtable slot dispatch              |
-| `gpu/`        | PTX / shader kernel emission          |
+| Import prefix | Strategy |
+| --- | --- |
+| `lib/` | linked call (validated at link time) |
+| `linux/` | inline syscall instruction |
+| `darwin/` | `objc_msgSend` / selector dispatch |
+| `windows/` | COM vtable slot dispatch |
+| `gpu/` | PTX / shader kernel emission |
 
 ```vertex
 package libc
@@ -385,6 +401,7 @@ class C : c {
     func fclose(stream: *void) -> int32
     func printf(fmt: ...*const char) -> int32
 }
+
 ```
 
 Native class instances are zero-size — the backend removes them entirely. No
@@ -406,6 +423,7 @@ import "arithmetic"
 func test_add()        test -> Expected(int32, "15") { return add(a: 10, b: 5) }
 func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
 func test_no_crash()   test                          { add(a: 0, b: 0) }
+
 ```
 
 `Expected(type, string)` declares the return type and the exact stdout string
@@ -414,14 +432,14 @@ not crash.
 
 **Return value format reference:**
 
-| Type      | Format | `Expected` for value `5`        |
-|-----------|--------|---------------------------------|
-| `int32`   | `%d`   | `Expected(int32, "5")`          |
-| `int64`   | `%lld` | `Expected(int64, "5")`          |
-| `uint32`  | `%u`   | `Expected(uint32, "5")`         |
-| `float32` | `%f`   | `Expected(float32, "5.000000")` |
-| `bool`    | `%d`   | `Expected(bool, "1")` / `"0"`   |
-| `string`  | `%s`   | `Expected(string, "hello")`     |
+| Type | Format | `Expected` for value `5` |
+| --- | --- | --- |
+| `int32` | `%d` | `Expected(int32, "5")` |
+| `int64` | `%lld` | `Expected(int64, "5")` |
+| `uint32` | `%u` | `Expected(uint32, "5")` |
+| `float32` | `%f` | `Expected(float32, "5.000000")` |
+| `bool` | `%d` | `Expected(bool, "1")` / `"0"` |
+| `string` | `%s` | `Expected(string, "hello")` |
 
 ---
 
@@ -431,60 +449,77 @@ The compiler transforms `.vs` source through a four-stage pipeline:
 
 ```
 .vs source → AST → Vertex IR (.vir / .vbytes) → Machine IR (.mir) → native code
+
 ```
 
 Each intermediate form can be captured independently with an emit flag,
 which is useful for debugging, tooling, and build caches.
 
-```
+```text
 Usage:
   vertex [flags] <source.vs | package/>
 
-Emit mode (exactly one required):
-  -emit-vir         emit Vertex IR text (.vir)
-  -emit-vbytes      emit Vertex IR binary (.vbytes)
-  -emit-mir         emit Machine IR text (.mir)
-  -emit-asm         emit native assembly text (.s)
-  -emit-obj, -c     emit relocatable object file (.o / .obj)
-  -lc               compile and link to native executable
+Emit mode (default: compile and link to native executable):
+  -emit-vir             emit Vertex IR text (.vir)
+  -emit-vbytes          emit Vertex IR binary (.vbytes)
+  -emit-mir             emit Machine IR text (.mir)
+  -emit-asm             emit native assembly text (.s)
+  -emit-obj, -c         emit relocatable object file (.o / .obj)
+  -dump, -dump-all      dump all pipeline stages (.dump)
+  -test                 discover and run test functions
+
+Test options:
+  -dir  <path>     directory to search recursively (default: .)
+  -file <path>     single test file
 
 Options:
-  -o <file>         output file (default: derived from input name)
-  -target <triple>  target triple — see Platform Support (default: host)
-  -packages-dir     Vertex packages root (overrides $VERTEX_PATH)
-  -O0               disable optimisation (default)
-  -O1               light optimisation
-  -O2               full optimisation
-  -Os               optimise for size
-  -g                include debug information
-  -v, -version      print version and exit
+  -o <file>        output file (default: derived from input)
+  -target <triple> linux-amd64, linux-arm64, linux-riscv64,
+                   darwin-amd64, darwin-arm64,
+                   windows-amd64, windows-arm64,
+                   freestanding-amd64, freestanding-arm64,
+                   freestanding-riscv64  (default: host OS/Arch)
+  -sysroot <path>  sysroot for cross-compilation library search
+  -packages-dir    Vertex packages root (overrides $VERTEX_PATH)
+  -O0/-O1/-O2/-Os  optimisation level (default: -O0)
+  -g               include debug information
+  -v, -version     print version and exit
+
 ```
 
 **Examples:**
 
 ```sh
+vertex -o main        main.vs
+vertex -o main        -target darwin-arm64 -O2 main.vs
+vertex -c           -o main.o      main.vs
+vertex -emit-asm    -o main.s      main.vs
+vertex -emit-mir    -o main.mir    main.vs
 vertex -emit-vir    -o main.vir    main.vs
 vertex -emit-vbytes -o main.vbytes main.vs
-vertex -emit-mir    -o main.mir    main.vs
-vertex -emit-asm    -o main.s      main.vs
-vertex -c           -o main.o      main.vs
-vertex -lc          -o main        main.vs
-vertex -lc -target darwin-arm64 -O2 -o main main.vs
+vertex -dump        -o main.dump   main.vs
+vertex -dump        -o -           main.vs
+vertex -test
+vertex -test -dir ./tests
+vertex -test -file literals_test.vs
+
 ```
 
 Output extension and name are derived from the input automatically when `-o` is
 omitted. On Windows targets, object files use `.obj` and executables gain `.exe`.
 
-**Intermediate formats:**
+**Modes & Formats:**
 
-| Flag            | Output      | Use case                                    |
-|-----------------|-------------|---------------------------------------------|
-| `-emit-vir`     | `.vir`      | Human-readable Vertex IR; inspect lowering  |
-| `-emit-vbytes`  | `.vbytes`   | Binary Vertex IR; incremental build cache   |
-| `-emit-mir`     | `.mir`      | SSA Machine IR; inspect register allocation |
-| `-emit-asm`     | `.s`        | Native assembly; inspect code generation    |
-| `-c`/`-emit-obj`| `.o`/`.obj` | Relocatable object; link separately         |
-| `-lc`           | executable  | Fully linked native binary                  |
+| Mode | Output | Use case |
+| --- | --- | --- |
+| *(default)* | executable | Fully linked native binary |
+| `-emit-vir` | `.vir` | Human-readable Vertex IR; inspect lowering |
+| `-emit-vbytes` | `.vbytes` | Binary Vertex IR; incremental build cache |
+| `-emit-mir` | `.mir` | SSA Machine IR; inspect register allocation |
+| `-emit-asm` | `.s` | Native assembly; inspect code generation |
+| `-c` / `-emit-obj` | `.o` / `.obj` | Relocatable object; link separately |
+| `-dump` | `.dump` | Output all annotated pipeline stages to one file |
+| `-test` | *console* | Execute `test` functions directly |
 
 The `$VERTEX_PATH` environment variable sets the packages root; `-packages-dir`
 overrides it. When neither is set, the compiler defaults to
@@ -494,20 +529,20 @@ overrides it. When neither is set, the compiler defaults to
 
 ## Platform Support
 
-| Target                 | Object file | Executable | Assembly |
-|------------------------|-------------|------------|----------|
-| `linux-amd64`          | yes         | yes        | yes      |
-| `linux-arm64`          | yes         | yes        | yes      |
-| `linux-riscv64`        | yes         | yes        | yes (`-emit-asm` only — `-c`/`-lc` not yet supported) |
-| `darwin-amd64`         | yes         | yes        | yes      |
-| `darwin-arm64`         | yes         | yes        | yes      |
-| `windows-amd64`        | yes         | yes        | yes      |
-| `windows-arm64`        | yes         | yes        | yes      |
-| `freestanding-amd64`   | yes         | —          | yes      |
-| `freestanding-arm64`   | yes         | —          | yes      |
-| `freestanding-riscv64` | yes         | —          | yes (`-emit-asm` only) |
+| Target | Object file (`-c`) | Executable (default) | Assembly (`-emit-asm`) |
+| --- | --- | --- | --- |
+| `linux-amd64` | yes | yes | yes |
+| `linux-arm64` | yes | yes | yes |
+| `linux-riscv64` | yes | yes | yes (`-emit-asm` only — object/executable emission not yet supported) |
+| `darwin-amd64` | yes | yes | yes |
+| `darwin-arm64` | yes | yes | yes |
+| `windows-amd64` | yes | yes | yes |
+| `windows-arm64` | yes | yes | yes |
+| `freestanding-amd64` | yes | — | yes |
+| `freestanding-arm64` | yes | — | yes |
+| `freestanding-riscv64` | yes | — | yes (`-emit-asm` only) |
 
-Freestanding targets produce object files only; `-lc` is not supported.
+Freestanding targets produce object files only; executable linking is not supported.
 
 Upcoming targets: `browser/wasm`, `android`, `browser/js`.
 
@@ -515,10 +550,10 @@ Upcoming targets: `browser/wasm`, `android`, `browser/js`.
 
 ## Documentation
 
-- [Grammar Specification 2.2](https://github.com/vertex-language/specs/README.md)
+* [Grammar Specification 2.2](https://github.com/vertex-language/spec/README.md)
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/vertex-language/vertex/LICENSE).
