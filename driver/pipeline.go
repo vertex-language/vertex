@@ -29,6 +29,10 @@ import (
 )
 
 func emit(cfg config, stderr io.Writer) int {
+	if cfg.mode == modeDump {
+		return dumpAll(cfg, stderr)
+	}
+
 	tri, err := parseTriple(cfg.target)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)

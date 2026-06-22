@@ -21,6 +21,7 @@ const (
 	modeASM                     // -emit-asm    → native assembly text (.s)
 	modeObj                     // -c           → relocatable object   (.o / .obj)
 	modeExe                     // -lc          → native executable
+	modeDump                    // -dump        → all pipeline stages  (.dump)
 )
 
 type config struct {
@@ -47,6 +48,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fObj    bool // -emit-obj
 		fC      bool // -c (alias)
 		fLC     bool // -lc
+		fDump   bool // -dump / -dump-all
 
 		fO0, fO1, fO2, fOs bool
 		printVer            bool
@@ -60,6 +62,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fObj,    "emit-obj",    false, "emit relocatable object file (.o / .obj)")
 	fs.BoolVar(&fC,      "c",           false, "compile to object file (alias for -emit-obj)")
 	fs.BoolVar(&fLC,     "lc",          false, "compile and link to a native executable")
+	fs.BoolVar(&fDump,   "dump",        false, "dump all pipeline stages to a single annotated file (.dump)")
+	fs.BoolVar(&fDump,   "dump-all",    false, "alias for -dump")
 
 	// ── Optimisation ──────────────────────────────────────────────────────────
 	fs.BoolVar(&fO0, "O0", false, "disable optimisation (default)")
@@ -79,12 +83,13 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
 		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs | package/>\n\n")
 		fmt.Fprintf(stderr, "Emit mode (exactly one required):\n")
-		fmt.Fprintf(stderr, "  -emit-vir       emit Vertex IR text (.vir)\n")
-		fmt.Fprintf(stderr, "  -emit-vbytes    emit Vertex IR binary (.vbytes)\n")
-		fmt.Fprintf(stderr, "  -emit-mir       emit Machine IR text (.mir)\n")
-		fmt.Fprintf(stderr, "  -emit-asm       emit native assembly text (.s)\n")
-		fmt.Fprintf(stderr, "  -emit-obj, -c   emit relocatable object file (.o / .obj)\n")
-		fmt.Fprintf(stderr, "  -lc             compile and link to native executable\n\n")
+		fmt.Fprintf(stderr, "  -emit-vir             emit Vertex IR text (.vir)\n")
+		fmt.Fprintf(stderr, "  -emit-vbytes          emit Vertex IR binary (.vbytes)\n")
+		fmt.Fprintf(stderr, "  -emit-mir             emit Machine IR text (.mir)\n")
+		fmt.Fprintf(stderr, "  -emit-asm             emit native assembly text (.s)\n")
+		fmt.Fprintf(stderr, "  -emit-obj, -c         emit relocatable object file (.o / .obj)\n")
+		fmt.Fprintf(stderr, "  -lc                   compile and link to native executable\n")
+		fmt.Fprintf(stderr, "  -dump, -dump-all      dump all pipeline stages (.dump)\n\n")
 		fmt.Fprintf(stderr, "Options:\n")
 		fmt.Fprintf(stderr, "  -o <file>        output file (default: derived from input)\n")
 		fmt.Fprintf(stderr, "  -target <triple> linux-amd64, linux-arm64, linux-riscv64,\n")
@@ -104,6 +109,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  vertex -c           -o main.o      main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -lc          -o main        main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -lc -target darwin-arm64 -O2 -o main main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -dump        -o main.dump   main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -dump        -o -           main.vs\n")
 	}
 
 	if err := fs.Parse(expandShortFlag(args)); err != nil {
@@ -115,7 +122,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 
 	// Exactly one emit mode must be set.
-	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fLC}
+	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fLC, fDump}
 	count := 0
 	for _, b := range modes {
 		if b {
@@ -124,7 +131,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	switch count {
 	case 0:
-		fmt.Fprintf(stderr, "vertex: one emit mode is required (-emit-vir, -emit-vbytes, -emit-mir, -emit-asm, -c/-emit-obj, -lc)\n\n")
+		fmt.Fprintf(stderr, "vertex: one emit mode is required (-emit-vir, -emit-vbytes, -emit-mir, -emit-asm, -c/-emit-obj, -lc, -dump)\n\n")
 		fs.Usage()
 		return config{}, 2
 	case 1:
@@ -147,6 +154,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		cfg.mode = modeObj
 	case fLC:
 		cfg.mode = modeExe
+	case fDump:
+		cfg.mode = modeDump
 	}
 
 	switch {
@@ -199,6 +208,8 @@ func deriveOutput(input string, mode emitMode, target string) string {
 			return name + ".exe"
 		}
 		return name
+	case modeDump:
+		return replaceExt(base, ".dump")
 	}
 	return replaceExt(base, ".out")
 }
