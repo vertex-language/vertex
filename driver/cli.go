@@ -1,3 +1,4 @@
+// cli.go
 package driver
 
 import (
@@ -21,6 +22,7 @@ const (
 	modeObj
 	modeExe
 	modeDump
+	modeTest
 )
 
 type config struct {
@@ -32,6 +34,8 @@ type config struct {
 	mode        emitMode
 	optLevel    int
 	debugInfo   bool
+	testDir     string
+	testFile    string
 }
 
 func parseFlags(args []string, stderr io.Writer) (config, int) {
@@ -48,6 +52,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fObj    bool
 		fC      bool
 		fDump   bool
+		fTest   bool
 
 		fO0, fO1, fO2, fOs bool
 		printVer            bool
@@ -61,6 +66,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fC,      "c",           false, "compile to object file (alias for -emit-obj)")
 	fs.BoolVar(&fDump,   "dump",        false, "dump all pipeline stages to a single annotated file (.dump)")
 	fs.BoolVar(&fDump,   "dump-all",    false, "alias for -dump")
+	fs.BoolVar(&fTest,   "test",        false, "discover and run test functions")
 
 	fs.BoolVar(&fO0, "O0", false, "disable optimisation (default)")
 	fs.BoolVar(&fO1, "O1", false, "light optimisation")
@@ -71,6 +77,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.target,      "target",        defaultTarget(),      "target triple (os-arch)")
 	fs.StringVar(&cfg.packagesDir, "packages-dir",  defaultPackagesDir(), "Vertex packages root (overrides $VERTEX_PATH)")
 	fs.StringVar(&cfg.sysroot,     "sysroot",       "",                   "sysroot for cross-compilation library search")
+	fs.StringVar(&cfg.testDir,     "dir",           "",                   "directory to search for test files (recursive)")
+	fs.StringVar(&cfg.testFile,    "file",          "",                   "single test file to run")
 	fs.BoolVar(&cfg.debugInfo,     "g",             false,                "include debug information")
 	fs.BoolVar(&printVer, "version", false, "print version and exit")
 	fs.BoolVar(&printVer, "v",       false, "alias for -version")
@@ -84,7 +92,11 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  -emit-mir             emit Machine IR text (.mir)\n")
 		fmt.Fprintf(stderr, "  -emit-asm             emit native assembly text (.s)\n")
 		fmt.Fprintf(stderr, "  -emit-obj, -c         emit relocatable object file (.o / .obj)\n")
-		fmt.Fprintf(stderr, "  -dump, -dump-all      dump all pipeline stages (.dump)\n\n")
+		fmt.Fprintf(stderr, "  -dump, -dump-all      dump all pipeline stages (.dump)\n")
+		fmt.Fprintf(stderr, "  -test                 discover and run test functions\n\n")
+		fmt.Fprintf(stderr, "Test options:\n")
+		fmt.Fprintf(stderr, "  -dir  <path>     directory to search recursively (default: .)\n")
+		fmt.Fprintf(stderr, "  -file <path>     single test file\n\n")
 		fmt.Fprintf(stderr, "Options:\n")
 		fmt.Fprintf(stderr, "  -o <file>        output file (default: derived from input)\n")
 		fmt.Fprintf(stderr, "  -target <triple> linux-amd64, linux-arm64, linux-riscv64,\n")
@@ -107,6 +119,9 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  vertex -emit-vbytes -o main.vbytes main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o main.dump   main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -dump        -o -           main.vs\n")
+		fmt.Fprintf(stderr, "  vertex -test\n")
+		fmt.Fprintf(stderr, "  vertex -test -dir ./tests\n")
+		fmt.Fprintf(stderr, "  vertex -test -file literals_test.vs\n")
 	}
 
 	if err := fs.Parse(expandShortFlag(args)); err != nil {
@@ -117,6 +132,47 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		return config{}, 0
 	}
 
+	// ── test mode ────────────────────────────────────────────────────────────
+	if fTest {
+		cfg.mode = modeTest
+
+		if cfg.testFile != "" && cfg.testDir != "" {
+			fmt.Fprintf(stderr, "vertex: -test: -file and -dir are mutually exclusive\n")
+			return config{}, 2
+		}
+
+		if cfg.testFile != "" || cfg.testDir != "" {
+			if fs.NArg() != 0 {
+				fmt.Fprintf(stderr, "vertex: -test: unexpected positional argument when -file or -dir is set\n")
+				return config{}, 2
+			}
+		} else {
+			switch fs.NArg() {
+			case 0:
+				cfg.testDir = "."
+			case 1:
+				cfg.testDir = fs.Arg(0)
+			default:
+				fmt.Fprintf(stderr, "vertex: -test: expected at most one positional argument\n")
+				return config{}, 2
+			}
+		}
+
+		switch {
+		case fOs:
+			cfg.optLevel = -1
+		case fO2:
+			cfg.optLevel = 2
+		case fO1:
+			cfg.optLevel = 1
+		default:
+			cfg.optLevel = 0
+		}
+
+		return cfg, -1
+	}
+
+	// ── emit mode ─────────────────────────────────────────────────────────────
 	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fDump}
 	count := 0
 	for _, b := range modes {

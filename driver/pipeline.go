@@ -1,3 +1,4 @@
+// pipeline.go
 package driver
 
 import (
@@ -28,22 +29,29 @@ import (
 	linkerpe    "github.com/vertex-language/linker/pe"
 )
 
+// emit is the top-level pipeline entry for normal (non-test) compilation.
+// It parses the input from disk then hands off to emitPackage.
 func emit(cfg config, stderr io.Writer) int {
 	if cfg.mode == modeDump {
 		return dumpAll(cfg, stderr)
 	}
 
-	tri, err := parseTriple(cfg.target)
-	if err != nil {
-		fmt.Fprintf(stderr, "vertex: %v\n", err)
-		return 2
-	}
-
-	// ── Stage 1: Parse Vertex source (.vs) → AST ─────────────────────────────
 	pkg, err := parseInput(cfg.input)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
 		return 1
+	}
+	return emitPackage(pkg, cfg, stderr)
+}
+
+// emitPackage runs pipeline stages 2–7 against an already-parsed package.
+// It is also called by the test runner, which builds a synthetic ast.Package
+// rather than reading one from disk.
+func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
+	tri, err := parseTriple(cfg.target)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: %v\n", err)
+		return 2
 	}
 
 	// ── Stage 2: Lower AST → Vertex IR ───────────────────────────────────────
@@ -244,12 +252,6 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	return f.Serialize()
 }
 
-// linkObject links objBytes against the provided dynamic libraries and CRT
-// objects, returning the final executable bytes.
-//
-// The canonical ELF link order is: crt1.o, crti.o, <user object>, crtn.o,
-// followed by dynamic libraries. crtObjects is empty for non-Linux targets
-// where the system linker or runtime handles startup transparently.
 func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects) ([]byte, error) {
 	objName := "main.o"
 	if tri.os == "windows" {
