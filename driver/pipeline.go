@@ -200,31 +200,20 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 // the compiled object file based on the target architecture.
 func compileRuntime(cfg config, tri triple) ([]byte, error) {
 	if cfg.packagesDir == "" {
-		return nil, nil // No packages dir configured
+		return nil, nil
 	}
 
 	runtimeDir := filepath.Join(cfg.packagesDir, "runtime")
 	if !isDir(runtimeDir) {
-		return nil, nil // No runtime directory exists, skip.
+		return nil, nil
 	}
 
-	// The cached object file name includes the target so cross-compiling works safely.
-	cacheFile := filepath.Join(runtimeDir, "runtime_"+tri.virTargetString()+".o")
-
 	var files []*ast.File
-	var newestSrc time.Time
 
 	err := filepath.WalkDir(runtimeDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".vs") {
 			return nil
 		}
-		
-		// Track the latest modification time among the source files
-		info, err := d.Info()
-		if err == nil && info.ModTime().After(newestSrc) {
-			newestSrc = info.ModTime()
-		}
-
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return nil
@@ -240,24 +229,14 @@ func compileRuntime(cfg config, tri triple) ([]byte, error) {
 		return nil, fmt.Errorf("failed scanning runtime directory: %w", err)
 	}
 	if len(files) == 0 {
-		return nil, nil // No .vs files in runtime/
+		return nil, nil
 	}
 
-	// Fast path: Check if the cached object file is up-to-date
-	if cacheInfo, err := os.Stat(cacheFile); err == nil {
-		if !cacheInfo.ModTime().Before(newestSrc) {
-			// Cache hit! Return the bytes immediately.
-			return os.ReadFile(cacheFile)
-		}
-	}
-
-	// Cache miss: We need to compile the runtime package
 	pkg, err := ast.NewPackage(files)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build runtime package: %w", err)
 	}
 
-	// Sub-pipeline for runtime
 	virMod, errs := virlower.NewLower(pkg, nil, cfg.target)
 	if errs != nil {
 		return nil, fmt.Errorf("VIR lowering: %v", errs)
@@ -283,15 +262,7 @@ func compileRuntime(cfg config, tri triple) ([]byte, error) {
 		return nil, err
 	}
 	secs := buildSections(fns, mirMod)
-	objBytes, err := marshalObject(tri, objTarget, secs)
-	if err != nil {
-		return nil, err
-	}
-
-	// Save to cache for the next run (ignore errors if folder is read-only)
-	_ = os.WriteFile(cacheFile, objBytes, 0644)
-
-	return objBytes, nil
+	return marshalObject(tri, objTarget, secs)
 }
 
 func parseInput(input string) (*ast.Package, error) {
