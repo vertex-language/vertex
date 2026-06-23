@@ -234,7 +234,10 @@ func compileRuntime(cfg config, tri triple) ([]byte, error) {
 	}
 
 	// Group all runtime files into a single synthetic package
-	pkg := ast.NewPackage(files)
+	pkg, err := ast.NewPackage(files)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build runtime package: %w", err)
+	}
 
 	// Sub-pipeline for runtime
 	virMod, errs := virlower.NewLower(pkg, nil, cfg.target)
