@@ -216,13 +216,19 @@ func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 
 func buildSyntheticPackage(tc testCase) *ast.Package {
 	var decls []ast.Decl
+	hasClassC := false
 	for _, d := range tc.origFile.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.IsTest {
 			continue
 		}
+		if cd, ok := d.(*ast.ClassDecl); ok && cd.Name == "C" && cd.Parent != "" {
+			hasClassC = true
+		}
 		decls = append(decls, d)
 	}
-	decls = append(decls, syntheticClassC())
+	if !hasClassC {
+		decls = append(decls, syntheticClassC())
+	}
 	decls = append(decls, syntheticMain(tc))
 
 	f := &ast.File{
