@@ -133,7 +133,7 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 5: Build object file ────────────────────────────────────────────
+	// ── Stage 5: Build main object file ───────────────────────────────────────
 	objTarget, err := tri.objectTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
@@ -174,8 +174,15 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
+	// ── Stage 6.5: Auto-compile Runtime Packages ─────────────────────────────
+	runtimeObj, err := compileRuntime(cfg, tri)
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: runtime compilation failed: %v\n", err)
+		return 1
+	}
+
 	// ── Stage 7: Link to native executable ───────────────────────────────────
-	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt)
+	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt, runtimeObj)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
@@ -187,7 +194,77 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 	return 0
 }
 
-// parseInput reads one .vs file or all .vs files in a directory.
+// compileRuntime scans the packages directory for files with the "build runtime" tag,
+// compiles them into a single in-memory object file, and returns the bytes.
+func compileRuntime(cfg config, tri triple) ([]byte, error) {
+	if cfg.packagesDir == "" {
+		return nil, nil // No packages dir configured, skip runtime
+	}
+
+	var files []*ast.File
+	err := filepath.WalkDir(cfg.packagesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".vs") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		// Fast path check before launching the full AST parser
+		if !strings.Contains(string(src), "build runtime") {
+			return nil
+		}
+		f, err := ast.NewFile(path, src)
+		if err != nil {
+			return err
+		}
+		for _, b := range f.Build {
+			if b.Tag == "runtime" {
+				files = append(files, f)
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed scanning for runtime packages: %w", err)
+	}
+	if len(files) == 0 {
+		return nil, nil // No runtime packages found
+	}
+
+	// Group all runtime files into a single synthetic package
+	pkg := ast.NewPackage(files)
+
+	// Sub-pipeline for runtime
+	virMod, errs := virlower.NewLower(pkg, nil, cfg.target)
+	if errs != nil {
+		return nil, fmt.Errorf("VIR lowering: %v", errs)
+	}
+	virMod.SetTarget(tri.virTargetString())
+
+	mirMod, err := mirlower.NewLower(virMod)
+	if err != nil {
+		return nil, fmt.Errorf("MIR lowering: %w", err)
+	}
+	if err := machine.Verify(mirMod); err != nil {
+		return nil, fmt.Errorf("MIR verify: %w", err)
+	}
+
+	opts := codegenOptions{optLevel: cfg.optLevel, debugInfo: cfg.debugInfo}
+	fns, err := compileToFuncs(mirMod, tri, opts)
+	if err != nil {
+		return nil, fmt.Errorf("codegen: %w", err)
+	}
+
+	objTarget, err := tri.objectTarget()
+	if err != nil {
+		return nil, err
+	}
+	secs := buildSections(fns, mirMod)
+	return marshalObject(tri, objTarget, secs)
+}
+
 func parseInput(input string) (*ast.Package, error) {
 	var files []*ast.File
 	if isDir(input) {
@@ -255,7 +332,7 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	return f.Serialize()
 }
 
-func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects) ([]byte, error) {
+func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects, runtimeObj []byte) ([]byte, error) {
 	objName := "main.o"
 	if tri.os == "windows" {
 		objName = "main.obj"
@@ -273,6 +350,12 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
+		// Inject the runtime object right after the main object
+		if len(runtimeObj) > 0 {
+			if err := l.AddObject("runtime.o", runtimeObj); err != nil {
+				return nil, fmt.Errorf("add runtime.o: %w", err)
+			}
+		}
 		if err := l.AddObject("crtn.o", crt.crtn); err != nil {
 			return nil, fmt.Errorf("add crtn.o: %w", err)
 		}
@@ -288,6 +371,11 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
+		if len(runtimeObj) > 0 {
+			if err := l.AddObject("runtime.o", runtimeObj); err != nil {
+				return nil, fmt.Errorf("add runtime.o: %w", err)
+			}
+		}
 		for _, lib := range dynLibs {
 			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
 				return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
@@ -299,6 +387,11 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 		l := linkerpe.NewLinker(tri.peArch())
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
+		}
+		if len(runtimeObj) > 0 {
+			if err := l.AddObject("runtime.obj", runtimeObj); err != nil {
+				return nil, fmt.Errorf("add runtime.obj: %w", err)
+			}
 		}
 		for _, lib := range dynLibs {
 			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
