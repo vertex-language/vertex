@@ -165,6 +165,35 @@ func extractExpected(fd *ast.FuncDecl) (typeName, value string, ok bool) {
 	return typeArg.Name, raw, true
 }
 
+// testDumpBase returns the base filename (no extension) used for dump and bin
+// artifacts: e.g. "basic_test_class_reference_shared".
+func testDumpBase(tc testCase) string {
+	base := strings.TrimSuffix(filepath.Base(tc.file), ".vs")
+	return base + "_" + tc.funcName
+}
+
+// saveTestArtifacts writes a pipeline dump and optionally copies the compiled
+// binary into the dumps/ directory in the current working directory.
+func saveTestArtifacts(pkg *ast.Package, cfg config, tc testCase, binPath string, stderr io.Writer) {
+	if err := os.MkdirAll("dumps", 0o755); err != nil {
+		fmt.Fprintf(stderr, "vertex: cannot create dumps dir: %v\n", err)
+		return
+	}
+	base := testDumpBase(tc)
+	dumpPath := filepath.Join("dumps", base+".dump")
+	dumpPackage(pkg, cfg, dumpPath, stderr)
+
+	if binPath != "" {
+		data, err := os.ReadFile(binPath)
+		if err == nil {
+			binDst := filepath.Join("dumps", base+".bin")
+			if err := os.WriteFile(binDst, data, 0o755); err != nil {
+				fmt.Fprintf(stderr, "vertex: cannot write %s: %v\n", binDst, err)
+			}
+		}
+	}
+}
+
 func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 	label := fmt.Sprintf("%s::%s", filepath.Base(tc.file), tc.funcName)
 
@@ -194,12 +223,14 @@ func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 	if code := emitPackage(pkg, compileCfg, &compileErr); code != 0 {
 		fmt.Fprintf(os.Stdout, "FAIL  %s  (compile error)\n", label)
 		fmt.Fprint(os.Stdout, compileErr.String())
+		saveTestArtifacts(pkg, cfg, tc, "", stderr)
 		return false
 	}
 
 	out, err := exec.Command(binPath).Output()
 	if err != nil {
 		fmt.Fprintf(os.Stdout, "FAIL  %s  (exec: %v)\n", label, err)
+		saveTestArtifacts(pkg, cfg, tc, binPath, stderr)
 		return false
 	}
 
@@ -211,6 +242,7 @@ func execTest(tc testCase, cfg config, stderr io.Writer) bool {
 	fmt.Fprintf(os.Stdout, "FAIL  %s\n", label)
 	fmt.Fprintf(os.Stdout, "      want: %q\n", tc.expectedValue)
 	fmt.Fprintf(os.Stdout, "      got:  %q\n", got)
+	saveTestArtifacts(pkg, cfg, tc, binPath, stderr)
 	return false
 }
 
@@ -264,8 +296,6 @@ func syntheticClassC() *ast.ClassDecl {
 }
 
 func syntheticMain(tc testCase) *ast.FuncDecl {
-	// For string results, pass result.c_str() to printf instead of result
-	// directly — printf expects a null-terminated *const char for %s.
 	var printfResultArg *ast.Arg
 	if tc.expectedType == "string" {
 		printfResultArg = &ast.Arg{
