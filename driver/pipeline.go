@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vertex-language/ir/vertex/ast"
 	virlower "github.com/vertex-language/ir/vertex/lower/vir"
@@ -174,7 +175,7 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 6.5: Auto-compile Runtime Packages ─────────────────────────────
+	// ── Stage 6.5: Compile & Link Reserved Runtime Directory ─────────────────
 	runtimeObj, err := compileRuntime(cfg, tri)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: runtime compilation failed: %v\n", err)
@@ -194,46 +195,63 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 	return 0
 }
 
-// compileRuntime scans the packages directory for files with the "build runtime" tag,
-// compiles them into a single in-memory object file, and returns the bytes.
+// compileRuntime targets the reserved "runtime/" package directory.
+// To fix slow compile times, it ONLY scans this specific directory and caches
+// the compiled object file based on the target architecture.
 func compileRuntime(cfg config, tri triple) ([]byte, error) {
 	if cfg.packagesDir == "" {
-		return nil, nil // No packages dir configured, skip runtime
+		return nil, nil // No packages dir configured
 	}
 
+	runtimeDir := filepath.Join(cfg.packagesDir, "runtime")
+	if !isDir(runtimeDir) {
+		return nil, nil // No runtime directory exists, skip.
+	}
+
+	// The cached object file name includes the target so cross-compiling works safely.
+	cacheFile := filepath.Join(runtimeDir, "runtime_"+tri.virTargetString()+".o")
+
 	var files []*ast.File
-	err := filepath.WalkDir(cfg.packagesDir, func(path string, d os.DirEntry, err error) error {
+	var newestSrc time.Time
+
+	err := filepath.WalkDir(runtimeDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".vs") {
 			return nil
 		}
+		
+		// Track the latest modification time among the source files
+		info, err := d.Info()
+		if err == nil && info.ModTime().After(newestSrc) {
+			newestSrc = info.ModTime()
+		}
+
 		src, err := os.ReadFile(path)
 		if err != nil {
-			return nil
-		}
-		// Fast path check before launching the full AST parser
-		if !strings.Contains(string(src), "build runtime") {
 			return nil
 		}
 		f, err := ast.NewFile(path, src)
 		if err != nil {
 			return err
 		}
-		for _, b := range f.Build {
-			if b.Tag == "runtime" {
-				files = append(files, f)
-				break
-			}
-		}
+		files = append(files, f)
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed scanning for runtime packages: %w", err)
+		return nil, fmt.Errorf("failed scanning runtime directory: %w", err)
 	}
 	if len(files) == 0 {
-		return nil, nil // No runtime packages found
+		return nil, nil // No .vs files in runtime/
 	}
 
-	// Group all runtime files into a single synthetic package
+	// Fast path: Check if the cached object file is up-to-date
+	if cacheInfo, err := os.Stat(cacheFile); err == nil {
+		if !cacheInfo.ModTime().Before(newestSrc) {
+			// Cache hit! Return the bytes immediately.
+			return os.ReadFile(cacheFile)
+		}
+	}
+
+	// Cache miss: We need to compile the runtime package
 	pkg, err := ast.NewPackage(files)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build runtime package: %w", err)
@@ -265,7 +283,15 @@ func compileRuntime(cfg config, tri triple) ([]byte, error) {
 		return nil, err
 	}
 	secs := buildSections(fns, mirMod)
-	return marshalObject(tri, objTarget, secs)
+	objBytes, err := marshalObject(tri, objTarget, secs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Save to cache for the next run (ignore errors if folder is read-only)
+	_ = os.WriteFile(cacheFile, objBytes, 0644)
+
+	return objBytes, nil
 }
 
 func parseInput(input string) (*ast.Package, error) {
