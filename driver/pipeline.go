@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/vertex-language/ir/vertex/ast"
 	virlower "github.com/vertex-language/ir/vertex/lower/vir"
