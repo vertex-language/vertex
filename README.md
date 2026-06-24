@@ -20,6 +20,7 @@ programming.
   - [Functions and Pointers](#functions-and-pointers)
   - [Structs and Classes](#structs-and-classes)
   - [Arrays and Maps](#arrays-and-maps)
+  - [Tuples](#tuples)
   - [Concurrency](#concurrency)
   - [Error Handling](#error-handling)
   - [Native Interface](#native-interface)
@@ -35,7 +36,6 @@ Requires Go 1.23 or later.
 
 ```sh
 GOPROXY=direct go install github.com/vertex-language/vertex@latest
-
 ```
 
 Verify:
@@ -43,7 +43,6 @@ Verify:
 ```sh
 vertex -version
 # vertex 0.4.0
-
 ```
 
 ---
@@ -105,13 +104,11 @@ func main() -> int32 {
 
     return 0
 }
-
 ```
 
 ```sh
 vertex -o fib fib.vs
 ./fib
-
 ```
 
 ---
@@ -133,7 +130,6 @@ let banner: string = `
   Vertex 2.2
   systems · concurrency · zero-overhead interop
 `
-
 ```
 
 Scalar types map directly to C:
@@ -141,13 +137,34 @@ Scalar types map directly to C:
 | Vertex | C type |
 | --- | --- |
 | `int` / `int32` | `int32_t` |
+| `int8` | `int8_t` |
+| `int16` | `int16_t` |
 | `int64` | `int64_t` |
 | `uint` / `uint32` | `uint32_t` |
 | `uint8` | `uint8_t` |
+| `uint16` | `uint16_t` |
+| `uint64` | `uint64_t` |
 | `float32` | `float` |
 | `float64` | `double` |
 | `bool` | `bool` |
-| `string` | see docs |
+| `char` | `char` |
+| `string` | `let` → rodata, `var` → heap |
+
+`int` is an alias for `int32`; `uint` is an alias for `uint32`.
+
+The `as` operator performs explicit type conversion for numeric widening,
+pointer reinterpretation, and float-to-integer truncation:
+
+```vertex
+let small: int32 = 42
+let wide  = small as int64          // integer widening
+
+let f: float64 = 3.99
+let i = f as int32                  // truncates toward zero → 3
+
+var buf: [uint8; 256]
+libc.recv(fd, &buf as *char, 256, 0)  // pointer reinterpret
+```
 
 ---
 
@@ -164,11 +181,33 @@ func increment(n: *int32) {
 
 var count = 0
 increment(n: &count)   // count is now 1
-
 ```
 
 `let`/`var` and `*const` are orthogonal: `let` locks the binding; `*const` locks
 the pointed-to data. All four combinations are valid.
+
+Functions are written as ordinary synchronous functions. The caller decides how
+a call runs by prefixing it with an execution sigil at the call site — `async`,
+`thread`, or `gpu`. There are no `async` or `thread` function qualifiers.
+
+---
+
+### Generics
+
+Unconstrained generic functions and structs use angle-bracket type parameters:
+
+```vertex
+func identity<T>(value: T) -> T {
+    return value
+}
+
+struct Box<T> {
+    value: T
+}
+
+let b      = Box<T>{value: 42}
+let result = identity<T>(value: "hello")
+```
 
 ---
 
@@ -189,7 +228,6 @@ func (v: *Vec2) scale(factor: float32) {
 
 var pos = Vec2{x: 1.0, y: 2.0}
 pos.scale(factor: 2.0)
-
 ```
 
 **Classes** are heap-allocated. The programmer controls lifetime explicitly via
@@ -215,8 +253,22 @@ defer dog.delete()
 // reference counted
 let cat = Animal(name: "Luna", health: 100).new()
 weak let observer = cat    // Animal? — non-owning
-
 ```
+
+The `auto` binding modifier instructs the compiler to automatically inject
+`.delete()` at scope exit, eliminating `defer` boilerplate for the common case:
+
+```vertex
+// before
+let log = Logger(path: "job.log")
+defer log.delete()
+
+// after — identical semantics, LIFO teardown
+auto let log = Logger(path: "job.log")
+```
+
+`auto` is only valid on class bindings. Drop it when you need explicit control —
+early release, conditional cleanup, or ownership transfer.
 
 ---
 
@@ -230,7 +282,6 @@ var mask: [uint8; 64]
 mask.fill(0xFF)
 
 let coords: [int32; 3] = [10, 20, 30]
-
 ```
 
 **Dynamic arrays** are heap-allocated and growable.
@@ -244,7 +295,6 @@ items.push(20)
 
 var doubled = items.map(func(x: int32) -> int32 { return x * 2 })
 defer doubled.delete()
-
 ```
 
 **Maps** use brace literals. A type annotation is required for empty maps.
@@ -259,8 +309,34 @@ config["workers"] = 4
 config["verbose"] = nil    // removes key
 
 let w = config["workers"]  // int32? — nil if absent
-
 ```
+
+---
+
+### Tuples
+
+Tuples are stack-allocated value types for multi-value returns and paired data.
+No heap allocation, no named struct required.
+
+```vertex
+let pair  = (1, true)
+let point = (x: 10, y: 20)
+
+func divmod(a: int32, b: int32) -> (int32, int32) {
+    return (a / b, a % b)
+}
+
+let (quotient, remainder) = divmod(10, 3)
+
+func minMax(values: [int32]) -> (min: int32, max: int32) {
+    return (0, 100)
+}
+
+let (lo, hi) = minMax(values: [3, 1, 4])
+```
+
+Tuples are zero-overhead — the compiler lowers them directly to adjacent stack
+values.
 
 ---
 
@@ -268,7 +344,7 @@ let w = config["workers"]  // int32? — nil if absent
 
 Vertex decouples business logic from execution strategy. Every function is
 written as an ordinary synchronous function — the caller decides how a call runs
-by prefixing it with an execution sigil: `async`, `thread`, or `gpu`.
+by prefixing it with an execution sigil at the call site:
 
 ```vertex
 // async — cooperative virtual thread, zero OS threads spawned
@@ -282,8 +358,11 @@ let output = result.receive()
 // gpu — PTX / SPIR-V kernel
 let out = gpu(blocks: 16, threads: 256) vectorAdd(a: x, b: y)
 let ans = out.receive()
-
 ```
+
+If a function returns `-> T`, the compiler auto-channels the return value through
+a 1-capacity channel. If a function returns void, the developer passes channels
+explicitly for full stream control.
 
 **Channels** carry values across execution boundaries.
 
@@ -300,7 +379,6 @@ thread func(data: [float32], ch: chan float32) {
 while let val = stream.tryReceive() {
     print(val)
 }
-
 ```
 
 **`select`** suspends with 0% CPU until a channel is ready.
@@ -314,7 +392,6 @@ case b = task2.receive():
 default:
     print("neither ready yet")
 }
-
 ```
 
 **Reactive state** broadcasts a value to all subscribers.
@@ -336,7 +413,6 @@ async func(s: state AppState) {
 }(app)
 
 runtime.loop()
-
 ```
 
 ---
@@ -353,27 +429,47 @@ func findUser(id: int32) -> User? {
 }
 
 let u = findUser(id: -1) ?? defaultUser
-
-// (T, E?) tuple — value and error together
-func divide(a: int32, b: int32) -> (int32, string?) {
-    if b == 0 { return (0, "division by zero") }
-    return (a / b, nil)
-}
-
-let (result, err) = divide(a: 10, b: 0)
-
-// Result(T, E) — explicit Ok / Err
-func parseInt(s: string) -> Result(int32, string) {
-    if s == "" { return Result(Err, "empty string") }
-    return Result(Ok, 42)
-}
-
-switch parseInt(s: input) {
-case Ok(let value):  // use value
-case Err(let msg):   // handle error
-}
-
 ```
+
+```vertex
+// (T, E) tuple — value and error together
+func divide(a: int32, b: int32) -> (int32, string) {
+    if b == 0 { return (0, "division by zero") }
+    return (a / b, "")
+}
+
+// plain destructuring
+let (result, err) = divide(a: 10, b: 0)
+if err != "" {
+    // handle error
+}
+```
+
+```vertex
+// if let with else -> — binds the error into the else branch
+func parseInt(s: string) -> (int32, string) {
+    if s == "" { return (0, "empty string") }
+    return (42, "")
+}
+
+if let n = parseInt(s: input) {
+    // use n
+} else -> err {
+    // use err
+}
+```
+
+```vertex
+// ? — propagate the error up the call stack automatically
+func process(s: string) -> (int32, string) {
+    let n = parseInt(s: s)?   // returns early if err != ""
+    return (n * 2, "")
+}
+```
+
+The last element of a tuple return signals the outcome. The zero value for its
+type signals success — `""` for string, `false` for bool, `nil` for optionals,
+`0` for integers.
 
 ---
 
@@ -385,6 +481,7 @@ and a package.
 | Import prefix | Strategy |
 | --- | --- |
 | `lib/` | linked call (validated at link time) |
+| `dynamic/lib/` | runtime `dlopen` / `LoadLibrary` |
 | `linux/` | inline syscall instruction |
 | `darwin/` | `objc_msgSend` / selector dispatch |
 | `windows/` | COM vtable slot dispatch |
@@ -401,11 +498,27 @@ class C : c {
     func fclose(stream: *void) -> int32
     func printf(fmt: ...*const char) -> int32
 }
-
 ```
 
 Native class instances are zero-size — the backend removes them entirely. No
 allocation, no runtime overhead.
+
+For libraries that resolve at runtime, prefix the import path with `dynamic/lib/`.
+Use a nullable binding to handle absence gracefully:
+
+```vertex
+import "dynamic/lib/cuda"
+
+class Cuda : cuda {
+    func cuInit(flags: int32) -> int32
+    func cuMemAlloc(dptr: *CUdevptr, size: int32) -> int32
+}
+
+var cuda: Cuda? = Cuda()
+if let c = cuda {
+    c.cuInit(0)
+}
+```
 
 ---
 
@@ -423,7 +536,6 @@ import "arithmetic"
 func test_add()        test -> Expected(int32, "15") { return add(a: 10, b: 5) }
 func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
 func test_no_crash()   test                          { add(a: 0, b: 0) }
-
 ```
 
 `Expected(type, string)` declares the return type and the exact stdout string
@@ -449,7 +561,6 @@ The compiler transforms `.vs` source through a four-stage pipeline:
 
 ```
 .vs source → AST → Vertex IR (.vir / .vbytes) → Machine IR (.mir) → native code
-
 ```
 
 Each intermediate form can be captured independently with an emit flag,
@@ -484,7 +595,6 @@ Options:
   -O0/-O1/-O2/-Os  optimisation level (default: -O0)
   -g               include debug information
   -v, -version     print version and exit
-
 ```
 
 **Examples:**
@@ -502,11 +612,7 @@ vertex -dump        -o -           main.vs
 vertex -test
 vertex -test -dir ./tests
 vertex -test -file literals_test.vs
-
 ```
-
-Output extension and name are derived from the input automatically when `-o` is
-omitted. On Windows targets, object files use `.obj` and executables gain `.exe`.
 
 **Modes & Formats:**
 
@@ -522,8 +628,7 @@ omitted. On Windows targets, object files use `.obj` and executables gain `.exe`
 | `-test` | *console* | Execute `test` functions directly |
 
 The `$VERTEX_PATH` environment variable sets the packages root; `-packages-dir`
-overrides it. When neither is set, the compiler defaults to
-`~/.vertex/packages`.
+overrides it. When neither is set, the compiler defaults to `~/.vertex/packages`.
 
 ---
 
