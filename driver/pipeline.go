@@ -366,7 +366,7 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 
 	case "darwin":
 		l := linkermacho.NewLinker(tri.machoArch())
-		l.SetEntryPoint("main")            // required: drives LC_MAIN entryoff lookup
+		l.SetEntryPoint("_main")           // Mach-O convention: C symbols are prefixed with underscore
 		l.AddSONeeded("libSystem.B.dylib") // required: dyld rejects executables without it
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
