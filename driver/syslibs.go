@@ -63,6 +63,13 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
 	for _, name := range names {
+		// libSystem.B.dylib has no on-disk file on macOS 12+ — it lives only in
+		// the dyld shared cache. We only need the LC_LOAD_DYLIB name emitted;
+		// no symbol parsing is needed for a standard executable.
+		if tri.os == "darwin" && name == "libSystem.B.dylib" {
+			out = append(out, resolvedLib{name: name, bytes: nil})
+			continue
+		}
 		path, err := findLib(name, dirs)
 		if err != nil {
 			return nil, err

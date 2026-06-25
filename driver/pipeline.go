@@ -349,7 +349,6 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
-		// Inject the runtime object right after the main object
 		if len(runtimeObj) > 0 {
 			if err := l.AddObject("runtime.o", runtimeObj); err != nil {
 				return nil, fmt.Errorf("add runtime.o: %w", err)
@@ -367,6 +366,8 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 
 	case "darwin":
 		l := linkermacho.NewLinker(tri.machoArch())
+		l.SetEntryPoint("main")            // required: drives LC_MAIN entryoff lookup
+		l.AddSONeeded("libSystem.B.dylib") // required: dyld rejects executables without it
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
