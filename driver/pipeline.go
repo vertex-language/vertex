@@ -26,6 +26,7 @@ import (
 
 	linkerelf   "github.com/vertex-language/linker/elf"
 	linkermacho "github.com/vertex-language/linker/macho"
+	codesign    "github.com/vertex-language/linker/macho/codesign"
 	linkerpe    "github.com/vertex-language/linker/pe"
 )
 
@@ -187,6 +188,21 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
 	}
+
+	// ── Stage 8: Ad-hoc code-sign Mach-O binaries ────────────────────────────
+	// macOS requires every executable to carry a signature; on Apple Silicon
+	// the kernel hard-rejects unsigned binaries. We always apply a cheap ad-hoc
+	// signature so the output runs without any Developer Account or keychain.
+	// Pass -g (or a future -sign-identity flag) to upgrade to a real cert later.
+	if tri.os == "darwin" {
+		id := stripExt(filepath.Base(cfg.output))
+		exeBytes, err = codesign.SignImage(exeBytes, codesign.Options{Identifier: id})
+		if err != nil {
+			fmt.Fprintf(stderr, "vertex: codesign: %v\n", err)
+			return 1
+		}
+	}
+
 	if err := writeExe(cfg.output, exeBytes); err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
 		return 1
