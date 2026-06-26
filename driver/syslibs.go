@@ -56,16 +56,16 @@ func extractDynLibs(m *vertex.Module, tri triple) []string {
 // libSortKey returns a sort priority: lower = earlier LC_LOAD_DYLIB position.
 // libSystem must be first (ordinal 1), then other system dylibs, then frameworks.
 func libSortKey(lib string) int {
-	switch lib {
-	case "libSystem.B.dylib", "libSystem.dylib":
-		return 0
-	case "libobjc.dylib", "libobjc.A.dylib":
-		return 1
-	}
-	if strings.Contains(lib, ".framework/") {
-		return 3
-	}
-	return 2
+    switch lib {
+    case "libSystem.B.dylib", "libSystem.dylib":
+        return 0 // ordinal 1 — always first
+    case "libobjc.dylib", "libobjc.A.dylib":
+        return 3 // always last — after all frameworks
+    }
+    if strings.Contains(lib, ".framework/") {
+        return 2 // frameworks in the middle
+    }
+    return 1 // other system dylibs (libm, libpthread etc)
 }
 
 // splitImportModule splits a VIR import module string of the form
