@@ -63,10 +63,16 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
 	for _, name := range names {
-		// libSystem.B.dylib has no on-disk file on macOS 12+ — it lives only in
-		// the dyld shared cache. We only need the LC_LOAD_DYLIB name emitted;
-		// no symbol parsing is needed for a standard executable.
+		// libSystem.B.dylib has no on-disk file on macOS 12+ — lives only in
+		// the dyld shared cache. Only the LC_LOAD_DYLIB name needs emitting.
 		if tri.os == "darwin" && name == "libSystem.B.dylib" {
+			out = append(out, resolvedLib{name: name, bytes: nil})
+			continue
+		}
+		// ObjC frameworks also live in the dyld shared cache on macOS 12+.
+		// "Foundation.framework/Foundation", "WebKit.framework/WebKit", etc.
+		// Pass nil bytes — the linker emits LC_LOAD_DYLIB from the name alone.
+		if tri.os == "darwin" && isFrameworkPath(name) {
 			out = append(out, resolvedLib{name: name, bytes: nil})
 			continue
 		}
@@ -81,6 +87,12 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 		out = append(out, resolvedLib{name: name, bytes: data})
 	}
 	return out, nil
+}
+
+// isFrameworkPath reports whether name is an Apple framework dylib path of the
+// form "X.framework/X" injected by declareExterns for ObjC darwin bindings.
+func isFrameworkPath(name string) bool {
+	return strings.Contains(name, ".framework/")
 }
 
 // resolveCRT finds and reads the system CRT objects required for a fully
