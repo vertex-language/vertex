@@ -252,6 +252,7 @@ func extractLibFuncSymbols(m *vertex.Module, triOS string) map[string][]string {
 		if !ok || platform != triOS {
 			continue
 		}
+		lib = normalizeDarwinLib(lib) // same normalization as extractDynLibs
 		if _, ok := imp.Desc.(vertex.FuncImport); ok {
 			result[lib] = append(result[lib], imp.Name)
 		}
