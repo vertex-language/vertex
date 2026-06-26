@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
+	"sort"
 	"github.com/vertex-language/ir/vertex"
 )
 
