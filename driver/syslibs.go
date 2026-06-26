@@ -35,22 +35,28 @@ func extractDynLibs(m *vertex.Module, tri triple) []string {
 		if !ok || platform != tri.os {
 			continue
 		}
+		lib = normalizeDarwinLib(lib)
 		if !seen[lib] {
 			seen[lib] = true
 			libs = append(libs, lib)
 		}
 	}
-
-	// LC_LOAD_DYLIB ordinals are 1-based positional — the bind info opcode
-	// BIND_OPCODE_SET_DYLIB_ORDINAL_IMM(N) means "the Nth LC_LOAD_DYLIB in
-	// the file". On Darwin, libSystem.B.dylib must always be ordinal 1 because
-	// it provides printf and other C runtime symbols. Frameworks (ObjC) come
-	// after. Without this ordering, printf gets attributed to Foundation and
-	// dyld aborts with "Symbol not found: _printf ... Expected in Foundation".
 	sort.Slice(libs, func(i, j int) bool {
 		return libSortKey(libs[i]) < libSortKey(libs[j])
 	})
 	return libs
+}
+
+// normalizeDarwinLib maps known aliases to their canonical dyld name so
+// duplicate LC_LOAD_DYLIB entries are never emitted for the same library.
+func normalizeDarwinLib(lib string) string {
+	switch lib {
+	case "libSystem.dylib":
+		return "libSystem.B.dylib"
+	case "libobjc.dylib":
+		return "libobjc.A.dylib"
+	}
+	return lib
 }
 
 // libSortKey returns a sort priority: lower = earlier LC_LOAD_DYLIB position.
