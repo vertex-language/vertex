@@ -63,16 +63,9 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
 	for _, name := range names {
-		// libSystem.B.dylib has no on-disk file on macOS 12+ — lives only in
-		// the dyld shared cache. Only the LC_LOAD_DYLIB name needs emitting.
-		if tri.os == "darwin" && name == "libSystem.B.dylib" {
-			out = append(out, resolvedLib{name: name, bytes: nil})
-			continue
-		}
-		// ObjC frameworks also live in the dyld shared cache on macOS 12+.
-		// "Foundation.framework/Foundation", "WebKit.framework/WebKit", etc.
-		// Pass nil bytes — the linker emits LC_LOAD_DYLIB from the name alone.
-		if tri.os == "darwin" && isFrameworkPath(name) {
+		// These darwin libraries live only in the dyld shared cache on macOS 12+.
+		// No on-disk file exists to read — only the LC_LOAD_DYLIB name is needed.
+		if tri.os == "darwin" && isDarwinCacheOnly(name) {
 			out = append(out, resolvedLib{name: name, bytes: nil})
 			continue
 		}
@@ -87,6 +80,19 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 		out = append(out, resolvedLib{name: name, bytes: data})
 	}
 	return out, nil
+}
+
+// isDarwinCacheOnly reports whether name is a darwin library that lives only
+// in the dyld shared cache and has no on-disk file to read.
+func isDarwinCacheOnly(name string) bool {
+	switch name {
+	case "libSystem.B.dylib", "libobjc.dylib", "libobjc.A.dylib",
+		"libSystem.dylib", "libc.dylib", "libpthread.dylib",
+		"libm.dylib", "libdyld.dylib", "libc++.1.dylib":
+		return true
+	}
+	// ObjC frameworks: "Foundation.framework/Foundation" etc.
+	return strings.Contains(name, ".framework/")
 }
 
 // isFrameworkPath reports whether name is an Apple framework dylib path of the
