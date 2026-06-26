@@ -183,17 +183,14 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 	}
 
 	// ── Stage 7: Link to native executable ───────────────────────────────────
-	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt, runtimeObj)
+	libSymbols := extractLibFuncSymbols(virMod, tri.os)
+	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt, runtimeObj, libSymbols)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: link: %v\n", err)
 		return 1
 	}
 
 	// ── Stage 8: Ad-hoc code-sign Mach-O binaries ────────────────────────────
-	// macOS requires every executable to carry a signature; on Apple Silicon
-	// the kernel hard-rejects unsigned binaries. We always apply a cheap ad-hoc
-	// signature so the output runs without any Developer Account or keychain.
-	// Pass -g (or a future -sign-identity flag) to upgrade to a real cert later.
 	if tri.os == "darwin" {
 		id := stripExt(filepath.Base(cfg.output))
 		exeBytes, err = codesign.SignImage(exeBytes, codesign.Options{Identifier: id})
@@ -347,7 +344,7 @@ func marshalObject(tri triple, tgt object.Target, sections []object.Section) ([]
 	return f.Serialize()
 }
 
-func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects, runtimeObj []byte) ([]byte, error) {
+func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjects, runtimeObj []byte, libSymbols map[string][]string) ([]byte, error) {
 	objName := "main.o"
 	if tri.os == "windows" {
 		objName = "main.obj"
@@ -382,8 +379,8 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 
 	case "darwin":
 		l := linkermacho.NewLinker(tri.machoArch())
-		l.SetEntryPoint("_main")           // Mach-O convention: C symbols are prefixed with underscore
-		l.AddSONeeded("libSystem.B.dylib") // required: dyld rejects executables without it
+		l.SetEntryPoint("_main")
+		l.AddSONeeded("libSystem.B.dylib")
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
@@ -393,8 +390,12 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 			}
 		}
 		for _, lib := range dynLibs {
-			if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
-				return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
+			if lib.bytes == nil {
+				l.AddCachedDylib(lib.name, libSymbols[lib.name])
+			} else {
+				if err := l.AddDynamicLibrary(lib.name, lib.bytes); err != nil {
+					return nil, fmt.Errorf("add dynamic library %s: %w", lib.name, err)
+				}
 			}
 		}
 		return l.Link()

@@ -213,3 +213,17 @@ func libSearchDirs(tri triple, sysroot string) []string {
 	}
 	return rooted
 }
+
+func extractLibFuncSymbols(m *vertex.Module, triOS string) map[string][]string {
+	result := make(map[string][]string)
+	for _, imp := range m.Imports.Imports {
+		platform, lib, ok := splitImportModule(imp.Module)
+		if !ok || platform != triOS {
+			continue
+		}
+		if _, ok := imp.Desc.(vertex.FuncImport); ok {
+			result[lib] = append(result[lib], imp.Name)
+		}
+	}
+	return result
+}
