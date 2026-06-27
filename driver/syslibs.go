@@ -94,10 +94,13 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
 	for _, name := range names {
-		// These darwin libraries live only in the dyld shared cache on macOS 12+.
-		// No on-disk file exists to read — only the LC_LOAD_DYLIB name is needed.
+		// Darwin libraries that live only in the dyld shared cache.
 		if tri.os == "darwin" && isDarwinCacheOnly(name) {
 			out = append(out, resolvedLib{name: name, bytes: nil})
+			continue
+		}
+		// Windows API Set virtual DLLs have no real file on disk.
+		if tri.os == "windows" && isWindowsAPISet(name) {
 			continue
 		}
 		path, err := findLib(name, dirs)
@@ -111,6 +114,14 @@ func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, err
 		out = append(out, resolvedLib{name: name, bytes: data})
 	}
 	return out, nil
+}
+
+// isWindowsAPISet reports whether name is a Windows API Set virtual DLL
+// (api-ms-win-* or ext-ms-win-*) that has no real file on disk.
+func isWindowsAPISet(name string) bool {
+	s := strings.ToLower(name)
+	return strings.HasPrefix(s, "api-ms-win-") ||
+		strings.HasPrefix(s, "ext-ms-win-")
 }
 
 // isDarwinCacheOnly reports whether name is a darwin library that lives only
