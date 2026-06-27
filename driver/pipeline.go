@@ -452,6 +452,7 @@ func linkObject(tri triple, objBytes []byte, dynLibs []resolvedLib, crt crtObjec
 
 	case "windows":
 		l := linkerpe.NewLinker(tri.peArch())
+		l.SetEntryPoint("main")
 		if err := l.AddObject(objName, objBytes); err != nil {
 			return nil, err
 		}
