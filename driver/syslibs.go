@@ -232,7 +232,12 @@ func libSearchDirs(tri triple, sysroot string) []string {
 			"/opt/homebrew/lib",
 		}
 
-	// Windows: no native host paths; requires explicit -sysroot.
+	case "windows":
+		dirs = []string{
+			`C:\Windows\System32`,
+			`C:\Windows\SysWOW64`,
+			`C:\Windows\System`,
+		}
 	}
 
 	if sysroot == "" {
