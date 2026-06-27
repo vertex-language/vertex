@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -52,6 +53,13 @@ func emit(cfg config, stderr io.Writer) int {
 // It is also called by the test runner, which builds a synthetic ast.Package
 // rather than reading one from disk.
 func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
+	// ── Auto-run: compile to a temp binary and execute it ────────────────────
+	// Triggered by `vertex main.vs` (no -o, no emit flag). The temp directory
+	// is cleaned up automatically after the child process exits.
+	if cfg.mode == modeRun {
+		return runExe(pkg, cfg, stderr)
+	}
+
 	tri, err := parseTriple(cfg.target)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
@@ -202,6 +210,48 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 
 	if err := writeExe(cfg.output, exeBytes); err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runExe compiles pkg to a temporary executable, runs it with the process's
+// own stdin/stdout/stderr attached, cleans up the temp directory, and returns
+// the child's exit code. It is the implementation of modeRun.
+func runExe(pkg *ast.Package, cfg config, stderr io.Writer) int {
+	tmpDir, err := os.MkdirTemp("", "vertex-run-*")
+	if err != nil {
+		fmt.Fprintf(stderr, "vertex: cannot create temp dir: %v\n", err)
+		return 1
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Derive a sensible binary name from the source input.
+	baseName := stripExt(filepath.Base(cfg.input))
+	binPath := filepath.Join(tmpDir, baseName)
+	if isWindowsTarget(cfg.target) {
+		binPath += ".exe"
+	}
+
+	// Reuse the normal exe pipeline via a synthetic modeExe config.
+	runCfg := cfg
+	runCfg.mode = modeExe
+	runCfg.output = binPath
+
+	if code := emitPackage(pkg, runCfg, stderr); code != 0 {
+		return code
+	}
+
+	cmd := exec.Command(binPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintf(stderr, "vertex: run: %v\n", err)
 		return 1
 	}
 	return 0

@@ -23,6 +23,7 @@ const (
 	modeExe
 	modeDump
 	modeTest
+	modeRun // compile to temp binary and execute; triggered when no -o and no emit flag
 )
 
 type config struct {
@@ -56,6 +57,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 
 		fO0, fO1, fO2, fOs bool
 		printVer            bool
+
+		outputExplicit bool // true when the user passed -o
 	)
 
 	fs.BoolVar(&fVIR,    "emit-vir",    false, "emit Vertex IR text (.vir)")
@@ -73,7 +76,12 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fO2, "O2", false, "full optimisation")
 	fs.BoolVar(&fOs, "Os", false, "optimise for size")
 
-	fs.StringVar(&cfg.output,      "o",            "",                   "write output to `file`")
+	// Wrap -o so we can detect whether it was explicitly supplied.
+	fs.Func("o", "write output to `file`", func(s string) error {
+		cfg.output = s
+		outputExplicit = true
+		return nil
+	})
 	fs.StringVar(&cfg.target,      "target",        defaultTarget(),      "target triple (os-arch)")
 	fs.StringVar(&cfg.packagesDir, "packages-dir",  defaultPackagesDir(), "Vertex packages root (overrides $VERTEX_PATH)")
 	fs.StringVar(&cfg.sysroot,     "sysroot",       "",                   "sysroot for cross-compilation library search")
@@ -86,7 +94,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Vertex compiler %s\n\n", version)
 		fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs | package/>\n\n")
-		fmt.Fprintf(stderr, "Emit mode (default: compile and link to native executable):\n")
+		fmt.Fprintf(stderr, "Emit mode (default: compile, link, and run as a temporary executable):\n")
 		fmt.Fprintf(stderr, "  -emit-vir             emit Vertex IR text (.vir)\n")
 		fmt.Fprintf(stderr, "  -emit-vbytes          emit Vertex IR binary (.vbytes)\n")
 		fmt.Fprintf(stderr, "  -emit-mir             emit Machine IR text (.mir)\n")
@@ -98,7 +106,7 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  -dir  <path>     directory to search recursively (default: .)\n")
 		fmt.Fprintf(stderr, "  -file <path>     single test file\n\n")
 		fmt.Fprintf(stderr, "Options:\n")
-		fmt.Fprintf(stderr, "  -o <file>        output file (default: derived from input)\n")
+		fmt.Fprintf(stderr, "  -o <file>        output file; when given, writes a permanent binary (no auto-run)\n")
 		fmt.Fprintf(stderr, "  -target <triple> linux-amd64, linux-arm64, linux-riscv64,\n")
 		fmt.Fprintf(stderr, "                   darwin-amd64, darwin-arm64,\n")
 		fmt.Fprintf(stderr, "                   windows-amd64, windows-arm64,\n")
@@ -110,7 +118,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  -g               include debug information\n")
 		fmt.Fprintf(stderr, "  -v, -version     print version and exit\n\n")
 		fmt.Fprintf(stderr, "Examples:\n")
-		fmt.Fprintf(stderr, "  vertex -o main        main.vs\n")
+		fmt.Fprintf(stderr, "  vertex                main.vs                        (compile + run)\n")
+		fmt.Fprintf(stderr, "  vertex -o main        main.vs                        (compile to binary)\n")
 		fmt.Fprintf(stderr, "  vertex -o main        -target darwin-arm64 -O2 main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -c           -o main.o      main.vs\n")
 		fmt.Fprintf(stderr, "  vertex -emit-asm    -o main.s      main.vs\n")
@@ -182,9 +191,15 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	switch count {
 	case 0:
-		cfg.mode = modeExe
+		// No emit flag. If the user also omitted -o, auto-run the result;
+		// otherwise produce a named executable as before.
+		if outputExplicit {
+			cfg.mode = modeExe
+		} else {
+			cfg.mode = modeRun
+		}
 	case 1:
-		// good
+		// good — specific emit flag was set
 	default:
 		fmt.Fprintf(stderr, "vertex: emit modes are mutually exclusive\n")
 		return config{}, 2
@@ -223,7 +238,8 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	cfg.input = fs.Arg(0)
 
-	if cfg.output == "" {
+	// modeRun derives its own temp output path at execution time; skip here.
+	if cfg.mode != modeRun && cfg.output == "" {
 		cfg.output = deriveOutput(cfg.input, cfg.mode, cfg.target)
 	}
 
