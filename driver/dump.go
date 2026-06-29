@@ -118,7 +118,6 @@ func dumpPackage(pkg *ast.Package, cfg config, path string, stderr io.Writer) {
 		fmt.Fprintf(&sb, "; ════ Stage %d: %-36s%s\n\n", n, name, line)
 	}
 
-	// ── Stage 2: Vertex IR ────────────────────────────────────────────────────
 	banner(2, "Vertex IR (.vir)")
 	virMod, virErr := virlower.NewLower(pkg, nil, cfg.target)
 	if virErr != nil {
@@ -133,7 +132,6 @@ func dumpPackage(pkg *ast.Package, cfg config, path string, stderr io.Writer) {
 	sb.WriteString(virtext.Format(virMod))
 	sb.WriteString("\n\n")
 
-	// ── Stage 3: Machine IR ───────────────────────────────────────────────────
 	banner(3, "Machine IR (.mir)")
 	mirMod, err := mirlower.NewLower(virMod)
 	if err != nil {
@@ -142,6 +140,7 @@ func dumpPackage(pkg *ast.Package, cfg config, path string, stderr io.Writer) {
 		_ = writeOutput(path, []byte(sb.String()))
 		return
 	}
+	mirMod.OS = tri.os
 	if err := machine.Verify(mirMod); err != nil {
 		fmt.Fprintf(&sb, "; ERROR: MIR verification: %v\n", err)
 		sb.WriteString("; (pipeline stopped)\n")
@@ -151,7 +150,6 @@ func dumpPackage(pkg *ast.Package, cfg config, path string, stderr io.Writer) {
 	sb.WriteString(mirtext.PrintModule(mirMod))
 	sb.WriteString("\n\n")
 
-	// ── Stage 4: Assembly ─────────────────────────────────────────────────────
 	banner(4, "Assembly (.s)")
 	opts := codegenOptions{optLevel: cfg.optLevel, debugInfo: cfg.debugInfo}
 	asmText, err := compileToASM(mirMod, tri, opts)

@@ -53,9 +53,6 @@ func emit(cfg config, stderr io.Writer) int {
 // It is also called by the test runner, which builds a synthetic ast.Package
 // rather than reading one from disk.
 func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
-	// ── Auto-run: compile to a temp binary and execute it ────────────────────
-	// Triggered by `vertex main.vs` (no -o, no emit flag). The temp directory
-	// is cleaned up automatically after the child process exits.
 	if cfg.mode == modeRun {
 		return runExe(pkg, cfg, stderr)
 	}
@@ -66,7 +63,6 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 2
 	}
 
-	// ── Stage 2: Lower AST → Vertex IR ───────────────────────────────────────
 	virMod, virErr := virlower.NewLower(pkg, nil, cfg.target)
 	if virErr != nil {
 		fmt.Fprintln(stderr, virErr)
@@ -101,12 +97,12 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 3: Lower Vertex IR → Machine IR ────────────────────────────────
 	mirMod, err := mirlower.NewLower(virMod)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: MIR lowering: %v\n", err)
 		return 1
 	}
+	mirMod.OS = tri.os
 	if err := machine.Verify(mirMod); err != nil {
 		fmt.Fprintf(stderr, "vertex: MIR verification: %v\n", err)
 		return 1
@@ -120,7 +116,6 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── Stage 4: Instruction selection, register allocation, assembly ─────────
 	opts := codegenOptions{optLevel: cfg.optLevel, debugInfo: cfg.debugInfo}
 
 	if cfg.mode == modeASM {
@@ -142,7 +137,6 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 5: Build main object file ───────────────────────────────────────
 	objTarget, err := tri.objectTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: %v\n", err)
@@ -164,7 +158,6 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 0
 	}
 
-	// ── Stage 6: Resolve shared libraries and CRT objects ────────────────────
 	if tri.os == "freestanding" {
 		fmt.Fprintf(stderr, "vertex: cannot link a freestanding target; use -c/-emit-obj instead\n")
 		return 2
@@ -183,14 +176,12 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 6.5: Compile & Link Reserved Runtime Directory ─────────────────
 	runtimeObj, err := compileRuntime(cfg, tri)
 	if err != nil {
 		fmt.Fprintf(stderr, "vertex: runtime compilation failed: %v\n", err)
 		return 1
 	}
 
-	// ── Stage 7: Link to native executable ───────────────────────────────────
 	libSymbols := extractLibFuncSymbols(virMod, tri.os)
 	exeBytes, err := linkObject(tri, objBytes, dynLibs, crt, runtimeObj, libSymbols)
 	if err != nil {
@@ -198,7 +189,6 @@ func emitPackage(pkg *ast.Package, cfg config, stderr io.Writer) int {
 		return 1
 	}
 
-	// ── Stage 8: Ad-hoc code-sign Mach-O binaries ────────────────────────────
 	if tri.os == "darwin" {
 		id := stripExt(filepath.Base(cfg.output))
 		exeBytes, err = codesign.SignImage(exeBytes, codesign.Options{Identifier: id})
@@ -309,6 +299,7 @@ func compileRuntime(cfg config, tri triple) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("MIR lowering: %w", err)
 	}
+	mirMod.OS = tri.os
 	if err := machine.Verify(mirMod); err != nil {
 		return nil, fmt.Errorf("MIR verify: %w", err)
 	}
