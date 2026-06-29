@@ -57,8 +57,10 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 
 		fO0, fO1, fO2, fOs bool
 		printVer            bool
+		listTargets         bool
+		printTarget         bool
 
-		outputExplicit bool // true when the user passed -o
+		outputExplicit bool
 	)
 
 	fs.BoolVar(&fVIR,    "emit-vir",    false, "emit Vertex IR text (.vir)")
@@ -70,13 +72,14 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	fs.BoolVar(&fDump,   "dump",        false, "dump all pipeline stages to a single annotated file (.dump)")
 	fs.BoolVar(&fDump,   "dump-all",    false, "alias for -dump")
 	fs.BoolVar(&fTest,   "test",        false, "discover and run test functions")
+	fs.BoolVar(&listTargets, "list-targets", false, "list all supported targets and exit")
+	fs.BoolVar(&printTarget, "print-target", false, "print the effective target triple and exit")
 
 	fs.BoolVar(&fO0, "O0", false, "disable optimisation (default)")
 	fs.BoolVar(&fO1, "O1", false, "light optimisation")
 	fs.BoolVar(&fO2, "O2", false, "full optimisation")
 	fs.BoolVar(&fOs, "Os", false, "optimise for size")
 
-	// Wrap -o so we can detect whether it was explicitly supplied.
 	fs.Func("o", "write output to `file`", func(s string) error {
 		cfg.output = s
 		outputExplicit = true
@@ -107,11 +110,9 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 		fmt.Fprintf(stderr, "  -file <path>     single test file\n\n")
 		fmt.Fprintf(stderr, "Options:\n")
 		fmt.Fprintf(stderr, "  -o <file>        output file; when given, writes a permanent binary (no auto-run)\n")
-		fmt.Fprintf(stderr, "  -target <triple> linux-amd64, linux-arm64, linux-riscv64,\n")
-		fmt.Fprintf(stderr, "                   darwin-amd64, darwin-arm64,\n")
-		fmt.Fprintf(stderr, "                   windows-amd64, windows-arm64,\n")
-		fmt.Fprintf(stderr, "                   freestanding-amd64, freestanding-arm64,\n")
-		fmt.Fprintf(stderr, "                   freestanding-riscv64  (default: %s)\n", defaultTarget())
+		fmt.Fprintf(stderr, "  -target <triple> target triple (default: %s)\n", defaultTarget())
+		fmt.Fprintf(stderr, "  -list-targets    list all supported targets and exit\n")
+		fmt.Fprintf(stderr, "  -print-target    print the effective target triple and exit\n")
 		fmt.Fprintf(stderr, "  -sysroot <path>  sysroot for cross-compilation library search\n")
 		fmt.Fprintf(stderr, "  -packages-dir    Vertex packages root (overrides $VERTEX_PATH)\n")
 		fmt.Fprintf(stderr, "  -O0/-O1/-O2/-Os  optimisation level (default: -O0)\n")
@@ -136,8 +137,26 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	if err := fs.Parse(expandShortFlag(args)); err != nil {
 		return config{}, 2
 	}
+
 	if printVer {
 		fmt.Fprintf(os.Stdout, "vertex %s\n", version)
+		return config{}, 0
+	}
+
+	if listTargets {
+		fmt.Fprintf(os.Stdout, "Supported targets:\n")
+		for _, t := range supportedTargets() {
+			marker := ""
+			if t == defaultTarget() {
+				marker = "  (default)"
+			}
+			fmt.Fprintf(os.Stdout, "  %s%s\n", t, marker)
+		}
+		return config{}, 0
+	}
+
+	if printTarget {
+		fmt.Fprintf(os.Stdout, "%s\n", cfg.target)
 		return config{}, 0
 	}
 
@@ -191,15 +210,12 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	switch count {
 	case 0:
-		// No emit flag. If the user also omitted -o, auto-run the result;
-		// otherwise produce a named executable as before.
 		if outputExplicit {
 			cfg.mode = modeExe
 		} else {
 			cfg.mode = modeRun
 		}
 	case 1:
-		// good — specific emit flag was set
 	default:
 		fmt.Fprintf(stderr, "vertex: emit modes are mutually exclusive\n")
 		return config{}, 2
@@ -238,7 +254,6 @@ func parseFlags(args []string, stderr io.Writer) (config, int) {
 	}
 	cfg.input = fs.Arg(0)
 
-	// modeRun derives its own temp output path at execution time; skip here.
 	if cfg.mode != modeRun && cfg.output == "" {
 		cfg.output = deriveOutput(cfg.input, cfg.mode, cfg.target)
 	}
@@ -314,4 +329,19 @@ func defaultPackagesDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".vertex", "packages")
+}
+
+func supportedTargets() []string {
+	return []string{
+		"linux-amd64",
+		"linux-arm64",
+		"linux-riscv64",
+		"darwin-amd64",
+		"darwin-arm64",
+		"windows-amd64",
+		"windows-arm64",
+		"freestanding-amd64",
+		"freestanding-arm64",
+		"freestanding-riscv64",
+	}
 }

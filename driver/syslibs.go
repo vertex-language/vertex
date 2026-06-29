@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sort"
 	"github.com/vertex-language/ir/vertex"
+	"runtime"
 )
 
 type resolvedLib struct {
@@ -85,21 +86,69 @@ func splitImportModule(module string) (platform, lib string, ok bool) {
 	return module[:i], module[i+1:], true
 }
 
-// resolveLibs locates each named shared library on the filesystem, reads it,
-// and returns a slice of resolvedLib ready for the linker.
-//
-// If sysroot is non-empty every search directory is prefixed with it, which
-// supports cross-compilation.
+// autoSysroot probes well-known cross-compilation toolchain roots when the
+// user has not specified -sysroot explicitly. On native builds (target OS
+// matches host OS) it returns "" so that the absolute system paths are used
+// directly. For Linux → Windows cross-compilation it probes MinGW-w64.
+func autoSysroot(tri triple) string {
+	nativeOS := runtime.GOOS
+	// Native build: no sysroot needed; absolute paths work directly.
+	if tri.os == nativeOS {
+		return ""
+	}
+	// Darwin always uses the system SDK at the absolute paths; no sysroot.
+	if tri.os == "darwin" {
+		return ""
+	}
+	// Linux host → Windows target: probe MinGW-w64 sysroots.
+	if nativeOS == "linux" && tri.os == "windows" {
+		var candidates []string
+		switch tri.arch {
+		case "arm64":
+			candidates = []string{
+				"/usr/aarch64-w64-mingw32",
+				"/opt/aarch64-w64-mingw32",
+			}
+		default: // amd64
+			candidates = []string{
+				"/usr/x86_64-w64-mingw32",
+				"/opt/x86_64-w64-mingw32",
+				"/usr/mingw64",
+			}
+		}
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	// Linux host → Linux target (different arch): probe multiarch paths.
+	if nativeOS == "linux" && tri.os == "linux" {
+		switch tri.arch {
+		case "arm64":
+			if _, err := os.Stat("/usr/aarch64-linux-gnu"); err == nil {
+				return "/"
+			}
+		case "riscv64":
+			if _, err := os.Stat("/usr/riscv64-linux-gnu"); err == nil {
+				return "/"
+			}
+		}
+	}
+	return ""
+}
+
 func resolveLibs(names []string, tri triple, sysroot string) ([]resolvedLib, error) {
+	if sysroot == "" {
+		sysroot = autoSysroot(tri)
+	}
 	dirs := libSearchDirs(tri, sysroot)
 	out := make([]resolvedLib, 0, len(names))
 	for _, name := range names {
-		// Darwin libraries that live only in the dyld shared cache.
 		if tri.os == "darwin" && isDarwinCacheOnly(name) {
 			out = append(out, resolvedLib{name: name, bytes: nil})
 			continue
 		}
-		// Windows API Set virtual DLLs have no real file on disk.
 		if tri.os == "windows" && isWindowsAPISet(name) {
 			continue
 		}
@@ -159,7 +208,9 @@ func resolveCRT(tri triple, sysroot string) (crtObjects, error) {
 	if tri.os != "linux" {
 		return crtObjects{}, nil
 	}
-
+	if sysroot == "" {
+		sysroot = autoSysroot(tri)
+	}
 	dirs := libSearchDirs(tri, sysroot)
 
 	read := func(name string) ([]byte, error) {

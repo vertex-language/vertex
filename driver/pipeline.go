@@ -357,9 +357,23 @@ func parseFile(path string) (*ast.File, error) {
 }
 
 func buildSections(fns []objbridge.AssembledFunc, m *machine.Module) []object.Section {
-	secs := make([]object.Section, 0, 2)
-	secs = append(secs, objbridge.BuildText(fns))
+	secs := make([]object.Section, 0, 4)
+	textSec := objbridge.BuildText(fns)
+	secs = append(secs, textSec)
 	secs = append(secs, objbridge.DataSections(m)...)
+
+	// Windows x64 requires a .pdata exception directory for the loader to
+	// accept the binary and for stack unwinding to work. ARM64 uses a
+	// different packed format and will be added separately.
+	if m.OS == "windows" && m.Arch == machine.AMD64 {
+		pdata, xdata := objbridge.BuildUnwind(fns)
+		if len(pdata.Code) > 0 {
+			secs = append(secs, pdata)
+		}
+		if len(xdata.Code) > 0 {
+			secs = append(secs, xdata)
+		}
+	}
 	return secs
 }
 
