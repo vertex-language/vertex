@@ -109,6 +109,10 @@ func main() -> int32 {
 ```
 
 ```sh
+vertex fib.vs
+
+or compile
+
 vertex -o fib fib.vs
 ./fib
 ```
