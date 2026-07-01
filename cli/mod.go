@@ -9,7 +9,7 @@ import (
 
 	"github.com/vertex-language/pkg"
 	"github.com/vertex-language/pkg/importer"
-	"github.com/vertex-language/pkg/mod"
+	"github.com/vertex-language/pkg/parser/mod"
 )
 
 func runMod(args []string, stderr io.Writer) int {
