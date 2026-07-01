@@ -11,17 +11,24 @@ import (
 	"github.com/vertex-language/vertex/pipeline"
 )
 
-// findModuleRoot walks upward from input (a file or directory) looking
-// for vs.mod, the same way `go build` locates a module root from any file
-// inside it. Returns "" (not an error) if no vs.mod is found anywhere up
-// the tree — the caller decides whether that's fine (no non-stdlib
-// imports) or a hard error (see Compile).
-func findModuleRoot(input string) (string, error) {
+// sourceDir returns the absolute directory containing input, whether
+// input is itself a directory or a single file.
+func sourceDir(input string) (string, error) {
 	dir := input
 	if !isDir(dir) {
 		dir = filepath.Dir(dir)
 	}
-	dir, err := filepath.Abs(dir)
+	return filepath.Abs(dir)
+}
+
+// findModuleRoot walks upward from input (a file or directory) looking
+// for vs.mod, the same way `go build` locates a module root from any file
+// inside it. Returns "" (not an error) if no vs.mod is found anywhere up
+// the tree — the caller decides what that means: no non-stdlib imports
+// makes it a non-issue, a real import makes it a case for resolving a
+// graph some other way (see driver.Compile's use of loadGraphFromImports).
+func findModuleRoot(input string) (string, error) {
+	dir, err := sourceDir(input)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s: %w", input, err)
 	}
@@ -37,27 +44,33 @@ func findModuleRoot(input string) (string, error) {
 	}
 }
 
-// firstNonStdlibImport reports the first import in p whose path looks
-// like a module path rather than a standard-library package — i.e. its
-// first path segment contains a ".", the same convention vs.mod's own
-// module paths use throughout this toolchain (e.g. "github.com/...",
-// "example.com/...").
-//
-// Each file's Imports is a list of *ast.ImportDecl, and each ImportDecl
-// carries one or more Paths (more than one for the grouped `import ( ... )`
-// form), so this walks both levels.
-func firstNonStdlibImport(p *ast.Package) (string, bool) {
+// collectNonStdlibImports returns the distinct set of import paths in p
+// that look like module paths rather than standard-library packages —
+// i.e. whose first path segment contains a ".", the same convention
+// vs.mod's own module paths use throughout this toolchain — in the
+// order they're first seen. Each file's Imports is a list of
+// *ast.ImportDecl, and each ImportDecl carries one or more Paths (more
+// than one for the grouped `import ( ... )` form), so this walks both
+// levels.
+func collectNonStdlibImports(p *ast.Package) []string {
+	seen := make(map[string]bool)
+	var out []string
 	for _, f := range p.Files {
 		for _, imp := range f.Imports {
 			for _, path := range imp.Paths {
 				seg, _, _ := strings.Cut(path.Path, "/")
-				if strings.Contains(seg, ".") {
-					return path.Path, true
+				if !strings.Contains(seg, ".") {
+					continue
 				}
+				if seen[path.Path] {
+					continue
+				}
+				seen[path.Path] = true
+				out = append(out, path.Path)
 			}
 		}
 	}
-	return "", false
+	return out
 }
 
 func isDir(path string) bool {
