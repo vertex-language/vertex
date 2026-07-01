@@ -43,14 +43,17 @@ func findModuleRoot(input string) (string, error) {
 // module paths use throughout this toolchain (e.g. "github.com/...",
 // "example.com/...").
 //
-// This assumes ast.File exposes its raw import paths as Imports
-// []string; adjust here if the frontend's actual field name differs.
+// Each file's Imports is a list of *ast.ImportDecl, and each ImportDecl
+// carries one or more Paths (more than one for the grouped `import ( ... )`
+// form), so this walks both levels.
 func firstNonStdlibImport(p *ast.Package) (string, bool) {
 	for _, f := range p.Files {
 		for _, imp := range f.Imports {
-			seg, _, _ := strings.Cut(imp, "/")
-			if strings.Contains(seg, ".") {
-				return imp, true
+			for _, path := range imp.Paths {
+				seg, _, _ := strings.Cut(path.Path, "/")
+				if strings.Contains(seg, ".") {
+					return path.Path, true
+				}
 			}
 		}
 	}
