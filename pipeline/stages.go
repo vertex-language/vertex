@@ -36,10 +36,14 @@ var Stages = []Stage{
 }
 
 // runVIR lowers every unit to Vertex IR, in build order, threading each
-// already-lowered dependency's *vertex.Module into the next unit's
-// virlower.NewLower call so cross-module references resolve — this is the
-// per-module loop driver.go's original doc comment predicted once a real
-// dependency graph existed.
+// already-lowered dependency's *vertex.Module — and, alongside it, its own
+// virlower.PackageExports (the name-preserving symbol table declarePackage*
+// consumes for pkg.Struct{}, pkg.Enum.Variant, and pkg.Global — anything
+// that needs a name rather than just a call target, since *vertex.Module
+// alone never retained those names) — into the next unit's virlower.NewLower
+// call so cross-package references resolve. This is the per-module loop
+// driver.go's original doc comment predicted once a real dependency graph
+// existed.
 //
 // A dependency unit must lower cleanly; there's no partial output to fall
 // back to for a module nothing asked to see directly. The root unit is
@@ -49,8 +53,9 @@ var Stages = []Stage{
 // much of the pipeline as possible); otherwise it's fatal.
 func runVIR(st *State) error {
 	deps := make(map[string]*vertex.Module, len(st.Units))
+	exports := make(map[string]*virlower.PackageExports, len(st.Units))
 	for _, u := range st.Units {
-		vmod, virErr := virlower.NewLower(u.Pkg, deps, st.Triple.VirTargetString())
+		vmod, pkgExports, virErr := virlower.NewLower(u.Pkg, deps, exports, st.Triple.VirTargetString())
 
 		tolerate := st.Sink != nil
 		if virErr != nil && !u.IsRoot && !tolerate {
@@ -70,6 +75,9 @@ func runVIR(st *State) error {
 		u.VIR = vmod
 		if u.ModulePath != "" {
 			deps[u.ModulePath] = vmod
+			if pkgExports != nil {
+				exports[u.ModulePath] = pkgExports
+			}
 		}
 	}
 	return nil
