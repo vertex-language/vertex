@@ -55,7 +55,10 @@ func runVIR(st *State) error {
 	deps := make(map[string]*vertex.Module, len(st.Units))
 	exports := make(map[string]*virlower.PackageExports, len(st.Units))
 	for _, u := range st.Units {
-		vmod, pkgExports, virErr := virlower.NewLower(u.Pkg, deps, exports, st.Triple.VirTargetString())
+		// customLibs is nil until vs.lib parsing/resolution is threaded
+		// through here (per-module, likely off pkg.Graph) — see
+		// resolveImportLib's doc comment for what plugs in.
+		vmod, pkgExports, virErr := virlower.NewLower(u.Pkg, deps, exports, st.Triple.VirTargetString(), nil)
 
 		tolerate := st.Sink != nil
 		if virErr != nil && !u.IsRoot && !tolerate {
