@@ -5,7 +5,7 @@
 Vertex is a statically-typed systems and application programming language built
 for explicit control, zero-overhead C interop, and first-class concurrency.
 Its syntax draws from Swift and Go, while its call-site execution sigils and
-unified pointer system make it uniquely suited to systems work — from GPU
+layered ownership model make it uniquely suited to systems work — from GPU
 kernels and AI inference to networking, file I/O, and low-level kernel
 programming.
 
@@ -17,9 +17,10 @@ programming.
 - [Quick Start](#quick-start)
 - [Language Tour](#language-tour)
   - [Variables and Types](#variables-and-types)
-  - [Functions and Pointers](#functions-and-pointers)
+  - [Ownership and Functions](#ownership-and-functions)
   - [Generics](#generics)
   - [Structs and Classes](#structs-and-classes)
+  - [Raw Pointers](#raw-pointers)
   - [Arrays and Maps](#arrays-and-maps)
   - [Tuples](#tuples)
   - [Enums](#enums)
@@ -55,10 +56,10 @@ vertex -version
 package main
 build linux
 
-import "linux/lib/c"
+import "lib/c"
 
 class C : c {
-    func printf(fmt: ...*const char) -> int32
+    func printf(fmt: ...string) -> int32
 }
 
 func fibRecursive(n: int32) -> int32 {
@@ -86,27 +87,29 @@ func fibIterative(n: int32) -> int32 {
 }
 
 func main() -> int32 {
-    var libc = C()
-
-    libc.printf("--- Recursive ---\n")
+    C.printf("--- Recursive ---\n")
     var i: int32 = 0
     while true {
         if i >= 10 { break }
-        libc.printf("fib(%d) = %d\n", i, fibRecursive(i))
+        C.printf("fib(%d) = %d\n", i, fibRecursive(i))
         i = i + 1
     }
 
-    libc.printf("--- Iterative ---\n")
+    C.printf("--- Iterative ---\n")
     var j: int32 = 0
     while true {
         if j >= 10 { break }
-        libc.printf("fib(%d) = %d\n", j, fibIterative(j))
+        C.printf("fib(%d) = %d\n", j, fibIterative(j))
         j = j + 1
     }
 
     return 0
 }
 ```
+
+`C` declares no `init func`, so it's a flat namespace — its functions are
+called directly on the type (`C.printf(...)`), and `C()` would be a compile
+error. See [Native Interface](#native-interface).
 
 ```sh
 vertex fib.vs
@@ -149,16 +152,18 @@ Scalar types map directly to C:
 | `int16` | `int16_t` |
 | `int64` | `int64_t` |
 | `uint` / `uint32` | `uint32_t` |
-| `uint8` | `uint8_t` |
+| `uint8` / `byte` | `uint8_t` |
 | `uint16` | `uint16_t` |
 | `uint64` | `uint64_t` |
 | `float32` | `float` |
 | `float64` | `double` |
 | `bool` | `bool` |
-| `char` | `char` |
 | `string` | `let` → rodata, `var` → heap |
 
-`int` is an alias for `int32`; `uint` is an alias for `uint32`.
+`int` is an alias for `int32`; `uint` is an alias for `uint32`; `byte` is the
+preferred spelling of `uint8`. Vertex's `char` is a 4-byte Unicode scalar, not
+a C byte — C strings cross the FFI boundary as `*const char` and marshal to
+`string` (see [Native Interface](#native-interface)).
 
 The `as` operator performs explicit type conversion for numeric widening,
 pointer reinterpretation, and float-to-integer truncation:
@@ -170,9 +175,6 @@ let big   = small as uint64         // zero-extended
 
 let f: float64 = 3.99
 let i = f as int32                  // truncates toward zero → 3
-
-var buf: [uint8; 256]
-libc.recv(fd, &buf as *char, 256, 0)  // pointer reinterpret
 
 // chaining — left-associative
 let x = value as int32 as int64
@@ -189,7 +191,7 @@ let i2: int   = int(3.99)    // truncates toward zero → 3
 
 ---
 
-### Functions and Pointers
+### Ownership and Functions
 
 ```vertex
 func add(a: int32, b: int32) -> int32 {
@@ -201,57 +203,114 @@ add(1, 2)
 add(a: 1, b: 2)
 ```
 
-Pointer parameters let a function mutate the caller's value. Reads and writes
-through a pointer parameter are auto-dereferenced by the compiler:
+A parameter's convention is picked in the signature. The caller writes at
+most one thing at the call site, and only for the owning case:
 
 ```vertex
-func increment(n: *int32) {
-    n += 1    // auto-dereferenced — lowers to *n += 1
+func inspect(w: Widget)      // shared — read-only view, bare, always
+func rename(w: mut Widget)   // exclusive — mutates the caller's binding
+func archive(w: var Widget)  // owning — transfer or copy, chosen by the caller
+```
+
+```vertex
+func increment(n: mut int32) {
+    n += 1
 }
 
 var count = 0
-increment(n: &count)   // count is now 1
+increment(count)      // bare — never a keyword at the call site
 ```
 
-`let`/`var` and `*const` are orthogonal. `let` locks the binding; `*const` locks
-the pointed-to data. All four combinations are valid:
+`mut` is a pointer under the hood — `increment(count)` lowers to
+`increment(&count)` — but the address is never written by the caller; the
+callee's signature is the only thing that decides.
 
-| Vertex               | C                | Binding   | Data      |
-|----------------------|------------------|-----------|-----------|
-| `let name: *const T` | `const T* const` | fixed     | read-only |
-| `let name: *T`       | `T* const`       | fixed     | mutable   |
-| `var name: *const T` | `const T*`       | rebind OK | read-only |
-| `var name: *T`       | `T*`             | rebind OK | mutable   |
+An owning (`var`) parameter is where the caller's choice becomes visible.
+Writing `.transfer()` moves the value — the source dies, the move costs
+O(1). Leaving it off copies — the source survives, the copy costs O(data):
 
-Every function is written as an ordinary synchronous function. The caller decides
-how a call runs by prefixing it with an execution sigil at the call site —
-`async`, `thread`, or `gpu`. There are no `async` or `thread` function qualifiers.
+```vertex
+func archive(w: var Widget) {
+    storage.push(w)
+}
+
+var w = Widget(1)
+archive(w.transfer())   // TRANSFER — w is dead after this line
+```
+
+```vertex
+var w = Widget(1)
+archive(w)               // COPY — w survives, archive gets an independent copy
+inspect(w)                // ok
+```
+
+The same bare-copy / `.transfer()`-move pair governs ordinary bindings, not
+just function arguments:
+
+```vertex
+let a = w              // COPY
+let b = w.transfer()   // TRANSFER
+```
+
+Two heap doors extend the same rules onto the heap — `unique(...)` for sole
+ownership, `shared(...)` for a reference-counted, cheaply cloneable handle.
+Both are covered in [Structs and Classes](#structs-and-classes).
 
 ---
 
 ### Generics
 
-Unconstrained generic functions and structs use angle-bracket type parameters:
+Type parameters use square brackets, matching type-argument position:
 
 ```vertex
-func identity<T>(value: T) -> T {
+func identity[T](value: T) -> T {
     return value
 }
 
-struct Box<T> {
+struct Box[T] {
     value: T
 }
 
-let b      = Box<T>{value: 42}
-let result = identity<T>(value: "hello")
+let b      = Box[int32]{value: 42}
+let result = identity(value: "hello")   // T inferred from the argument
 ```
+
+A bare name is constraint `any` — `[T]` means `[T: any]`. Under `any`, only
+assignment and argument passing are available; no `<`, no `+`, no `==`.
+
+**Constraints** are their own declaration — a compile-time type set,
+optionally paired with required methods:
+
+```vertex
+constraint Ordered {
+    ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~float32 | ~float64 | ~string
+}
+
+func min[T: Ordered](a: T, b: T) -> T {
+    if a < b { return a }
+    return b
+}
+
+let m = min[float64](3.14, 2.71)
+```
+
+`~T` admits `T` and every type whose underlying type is `T`; a bare `T`
+(no tilde) admits only `T` exactly. `constraints.Number`,
+`constraints.Integer`, `constraints.Ordered`, and friends are predeclared in
+`builtins/constraints`, alongside `any` and `comparable`.
+
+Every instantiation is compiled as a separate concrete body with type
+arguments substituted in — no runtime type information, no vtable. A
+method-constraint call lowers to a direct call on the concrete type.
 
 ---
 
 ### Structs and Classes
 
-**Structs** are value types — stack-allocated, always copied on assignment.
-Mutability is determined entirely by the binding at the declaration site.
+**Structs** and **classes** are both stack-resident value types by default —
+copied by value under the same rules as any other binding. A `class`
+differs from a `struct` only in its member/method model; declaring
+something a `class` does not, by itself, put it on the heap.
 
 ```vertex
 struct Vec2 {
@@ -259,19 +318,19 @@ struct Vec2 {
     y: float32
 }
 
-// value receiver — copy; mutations do not affect the caller
+// shared receiver — read-only view
 func (v: Vec2) describe() {
     // ...
 }
 
-// pointer receiver — mutations affect the caller's binding
-func (v: *Vec2) scale(factor: float32) {
-    v.x *= factor   // auto-dereferenced — lowers to v->x
+// exclusive receiver — mutations affect the caller's binding
+func (v: mut Vec2) scale(factor: float32) {
+    v.x *= factor
     v.y *= factor
 }
 
 var pos = Vec2{x: 1.0, y: 2.0}
-pos.scale(factor: 2.0)   // compiler inserts & automatically
+pos.scale(factor: 2.0)   // bare — no & needed, mut is a signature fact
 ```
 
 Struct literals require all field labels; positional initialization is not
@@ -284,8 +343,8 @@ let p = Vec2{
 }
 ```
 
-**Classes** are heap-allocated references. The programmer controls lifetime
-explicitly via `.delete()`, or opts into reference counting with `.new()`.
+**Classes** add `init`/`deinit` and identity (`===`), but share a struct's
+layout and lifetime rules exactly — no header, no vtable, no inheritance:
 
 ```vertex
 class Animal {
@@ -299,123 +358,140 @@ func (a: Animal) init(name: string, health: int32) {
 }
 
 func (a: Animal) deinit() {
-    // runs before memory is freed
+    // runs automatically when `a`'s liveness ends
 }
 
-// manual lifetime
 let dog = Animal(name: "Rex", health: 100)
-defer dog.delete()
-
-// reference counted
-let cat = Animal(name: "Luna", health: 100).new()
-weak let observer = cat    // Animal? — non-owning, count stays 1
-
-if let animal = observer {
-    // safe — animal is Animal within this scope
-}
+// dog.deinit() runs at the end of this scope — no defer needed
 ```
 
-`.new()` and `.delete()` are mutually exclusive. After all owning references
-reach zero, all `weak` references become `nil`.
-
-The `auto` binding modifier instructs the compiler to automatically inject
-`.delete()` at scope exit, eliminating `defer` boilerplate for the common case.
-Cleanup order follows LIFO — identical to explicit `defer`:
+Because every binding's liveness is tracked statically, teardown (`deinit`)
+is emitted wherever that liveness ends — no garbage collector, no manual
+delete call for a stack value. The only way onto the heap is through one of
+two doors:
 
 ```vertex
-// before
-let log = Logger(path: "job.log")
-defer log.delete()
-let buf = Buffer(capacity: 4096)
-defer buf.delete()
+// sole ownership — no refcount
+var u = unique(Animal(name: "Rex", health: 100))
 
-// after — identical semantics, same LIFO teardown
-auto let log = Logger(path: "job.log")
-auto let buf = Buffer(capacity: 4096)
+// reference counted — cloneable handle
+var s  = shared(Animal(name: "Luna", health: 100))
+var s2 = s                    // cheap refcount bump, not a deep copy
+
+// weak — observes a shared value without keeping it alive
+var w = weak(s)
+
+let observer, err = w.upgrade()
+if err != "" {
+    // the shared value is gone
+}
 ```
 
-`auto` is only valid on class bindings. Drop it when you need explicit control —
-early release, conditional cleanup, or ownership transfer.
+`unique(...)` and `shared(...)` still tear down automatically — `unique`
+frees at the end of its owner's liveness, `shared` frees once its strong
+count reaches zero. Neither needs an explicit delete call.
 
-| Binding | Lifetime |
-|---|---|
-| `let` / `var` | manual — you call `.delete()` |
-| `auto let` / `auto var` | automatic — compiler injects `.delete()` at scope exit |
-| `weak let` | non-owning — no cleanup, never owned |
+`===` / `!==` (classes only) compare storage addresses — "same allocation?",
+never "same bytes?"; that's `==`'s job.
+
+---
+
+### Raw Pointers
+
+`typed_ptr T` is the raw, last-resort pointer — no ownership tracking, no
+refcount, none of the discipline above. Reach for it only when `mut T` /
+`[]T` genuinely can't express what's needed.
+
+```vertex
+var x: int32 = 42
+let p = &x           // address-of — int32 -> typed_ptr int32
+let v = &p            // dereference — typed_ptr int32 -> int32
+&p = 99               // write through p
+
+let p2 = p.add(1)     // arithmetic is a method, scaled by sizeof(T)
+let n: int64 = p2.diff(p)
+
+let buf, err = new[uint8](1024)     // zeroed by default
+if err != "" { panic("allocation failed: " + err) }
+defer delete(buf)
+
+buf.setAt(0, 0xFF)
+let b = buf.at(0)
+```
+
+`nil` is the one general value in the language, and it exists solely for
+`typed_ptr T`:
+
+```vertex
+var p: typed_ptr int32 = nil
+if p == nil { }
+```
 
 ---
 
 ### Arrays and Maps
 
-**Fixed arrays** are stack-allocated; the size is part of the type.
-`push`, `pop`, `shift`, `unshift`, `.reserve()`, and `.delete()` are compile
-errors on any fixed array.
+**Fixed arrays** are stack-allocated; the size comes first in the brackets
+and is part of the type.
 
 ```vertex
-var buf:  [uint8; 1024]           // zero-filled, no initializer needed
-var mask: [uint8; 64]
+var buf:  [1024]uint8             // zero-filled, no initializer needed
+var mask: [64]uint8
 mask.fill(0xFF)
 
-var coords: [int32; 3] = [10, 20, 30]
-let flags:  [uint8; 3] = [0xFF, 0x00, 0xAB]
+var coords: [3]int32 = [10, 20, 30]
+let flags:  [3]uint8 = [0xFF, 0x00, 0xAB]
 
 // nested (multidimensional)
-let matrix: [[float32; 2]; 2] = [
+let matrix: [2][2]float32 = [
     [0.0, 1.0],
     [1.0, 0.0],
 ]
 ```
 
-**Dynamic arrays** are heap-allocated and growable. `var` with no size annotation
-(`[T]`) always produces a dynamic array.
+**Dynamic arrays** are heap-allocated and growable — empty brackets before
+the element type. This is the container exception: the backing storage is
+implicitly heap-allocated, but it's still owned and torn down the normal way
+through whatever binding holds the array.
 
 ```vertex
-var items: [int32] = []
-defer items.delete()
+var items: []int32 = []
 
-items.push(42)           // add to end
-items.unshift(0)         // add to front
-let last  = items.pop()  // remove from end  — returns T?
-let first = items.shift()// remove from front — returns T?
+items.push(42)            // add to end
+items.unshift(0)          // add to front
+let last  = items.pop()   // remove from end
+let first = items.shift() // remove from front
 
-items.reserve(64)        // pre-allocate capacity
+items.reserve(64)         // pre-allocate capacity
 ```
 
-Methods that return a new array allocate on the heap — call `.delete()` on the
-result:
+Methods that return a new array allocate on the heap, torn down
+automatically like anything else once their binding's liveness ends:
 
 ```vertex
-var doubled = items.map(func(x: int32) -> int32 { return x * 2 })
-defer doubled.delete()
-
-var evens = items.filter(func(x: int32) -> bool { return x % 2 == 0 })
-defer evens.delete()
-
-var sub = items.slice(1, 3)
-defer sub.delete()
+let doubled = items.map(func(x: int32) -> int32 { return x * 2 })
+let evens   = items.filter(func(x: int32) -> bool { return x % 2 == 0 })
+let sub     = items.slice(1, 3)
 ```
-
-In-place mutation methods (`sort`, `reverse`, `fill`, `reserve`) do not
-allocate — no `.delete()` needed on the result.
 
 The rule at a glance:
 
 | Form | Storage | Growable |
 |------|---------|----------|
-| `var buf: [T; N]` | stack | no |
+| `var buf: [N]T` | stack | no |
 | `let arr = [...]` | stack / rodata | no |
-| `var x: [T] = []` | heap | yes |
+| `var x: []T = []` | heap | yes |
 | `var x = [...]` | heap | yes |
 
 **Maps** use brace literals. A type annotation is required for empty maps.
-Key access always returns an optional (`T?`). Assigning `nil` to a key removes it.
+Assigning `nil` to a key removes it — the one other place besides
+`typed_ptr T` where the grammar admits the literal.
 
 ```vertex
 let scores = {"alice": 42, "bob": 7}
-let val = scores["alice"]          // int32?
+let val = scores["alice"]
 
 var config: map[string]int32 = {}
-defer config.delete()
 
 config["workers"] = 4
 config["verbose"] = nil    // removes key
@@ -425,38 +501,40 @@ config["verbose"] = nil    // removes key
 
 ### Tuples
 
-Tuples are stack-allocated value types for multi-value returns and paired data —
-zero overhead, no heap allocation, no named struct required.
+**Rule of thumb: parens build, bare commas unbuild.** Parens appear when a
+tuple is *constructed* — a literal or a type annotation. The moment a tuple
+is being *pulled apart* — a `let` destructure, or a `return` handing
+multiple values back — it is written bare, with no wrapping parens.
 
 ```vertex
 let pair  = (1, true)
 let point = (x: 10, y: 20)
 
-// unlabeled return
 func divmod(a: int32, b: int32) -> (int32, int32) {
-    return (a / b, a % b)
+    return a / b, a % b
 }
-let (quotient, remainder) = divmod(10, 3)
+let quotient, remainder = divmod(10, 3)
 
-// labeled return
-func minMax(values: [int32]) -> (min: int32, max: int32) {
-    return (0, 100)
+func minMax(values: []int32) -> (min: int32, max: int32) {
+    return 0, 100
 }
-let (lo, hi) = minMax(values: [3, 1, 4])
+let lo, hi = minMax(values: [3, 1, 4])
 ```
 
 `()` is the empty tuple and is an alias for `void`. Tuples are value types —
-assignment copies all elements. `==`, `!=`, `<`, `>`, `<=`, `>=` work on tuples
-whose elements are all comparable, up to 6 elements.
+assignment copies all elements. `==`, `!=`, `<`, `>`, `<=`, `>=` work on
+tuples whose elements are all comparable, up to 6 elements.
 
 Channels can carry tuples for paired data:
 
 ```vertex
-let stream: chan (int32, bool) = {cap: 64}
+let stream = chan[(int32, bool)](64)
 
 select {
-case (val, ok) = stream.receive():
+case msg = stream.receive():
+    let val, ok = msg
     if ok { print(val) }
+default:
 }
 ```
 
@@ -464,9 +542,9 @@ case (val, ok) = stream.receive():
 
 ### Enums
 
-Vertex enums support unit variants, tuple variants (positional associated data),
-or a mix of both. The `case` keyword is used only inside `switch` statements —
-not in enum declarations.
+Vertex enums support unit variants, tuple variants (positional associated
+data), or a mix of both. The `case` keyword is used only inside `switch`
+statements — not in enum declarations.
 
 **Unit variants:**
 
@@ -533,8 +611,8 @@ enum Event {
 }
 ```
 
-**Explicit discriminants** require a backing integer type and are only valid on
-all-unit enums. Auto-increment applies to unspecified variants:
+**Explicit discriminants** require a backing integer type and are only
+valid on all-unit enums. Auto-increment applies to unspecified variants:
 
 ```vertex
 enum Status : int32 {
@@ -553,15 +631,16 @@ enum HttpMethod : uint8 {
 let raw = Status.Active as int32   // cast to backing type with `as`
 ```
 
-Integer-to-enum conversion requires an explicit `switch` returning `EnumType?`:
+Integer-to-enum conversion is an ordinary `switch` with a fallback case —
+there's no optional type to lean on:
 
 ```vertex
-func statusFromInt(n: int32) -> Status? {
+func statusFromInt(n: int32) -> Status {
     switch n {
     case 0: return .Inactive
     case 1: return .Active
     case 2: return .Pending
-    default: return nil
+    default: return .Inactive
     }
 }
 ```
@@ -573,129 +652,130 @@ expressed via `switch`. Enums are value types; assignment copies.
 
 ### Error Handling
 
-Vertex error handling is built on plain tuples and `?` propagation. A function
-that can fail returns a tuple where the last element signals the outcome. The
-zero value for its type signals success — `""` for string, `false` for bool,
-`nil` for optionals, `0` for integers.
+There is no optional type and no propagation operator. Every fallible or
+possibly-absent value is returned as a plain tuple: the value, and a string
+that is empty (`""`) on success.
 
 ```vertex
-// T? — value may simply not exist
-func findUser(id: int32) -> User? {
-    if id < 0 { return nil }
-    return User(id)
+func parseInt(s: string) -> (int32, string) {
+    if s == "" { return 0, "empty string" }
+    return 42, ""
 }
 
-let u = findUser(id: -1) ?? defaultUser
-```
-
-```vertex
-// (T, E) tuple — value and error together
-func divide(a: int32, b: int32) -> (int32, string) {
-    if b == 0 { return (0, "division by zero") }
-    return (a / b, "")
-}
-
-// 1 — plain destructuring
-let (result, err) = divide(a: 10, b: 0)
-if err != "" { /* handle */ }
-```
-
-```vertex
-// 2 — ? propagation (only valid inside a function that itself returns a tuple)
-func process(s: string) -> (int32, string) {
-    let n = parseInt(s: s)?   // returns early if err != ""
-    return (n * 2, "")
+func findUser(id: int32) -> (User, string) {
+    if id < 0 { return User{}, "invalid id" }
+    return User(id), ""
 }
 ```
 
+Checking the error is the only pattern — the happy path continues directly
+below it:
+
 ```vertex
-// 3 — happy path only
-if let n = parseInt(s: "42") { /* use n */ }
-
-// 4 — both paths with else ->
-if let n = parseInt(s: input) {
-    // use n
-} else -> err {
-    // use err
+let n, err = parseInt(s: "42")
+if err != "" {
+    log.printf("failed: %s\n", err)
+    return
 }
+// n is usable past this point
+```
 
-// 5 — full control via switch
-let (n, err) = parseInt(s: "42")
-switch err {
-case "":      // use n
-default:      // use err
+Chained calls repeat the same shape at every step — it does not get shorter
+as call depth grows, and every branch stays visible in the text:
+
+```vertex
+func loadModel(path: string) -> (Model, string) {
+    let text, err = readFile(path)
+    if err != "" {
+        return Model{}, err
+    }
+
+    let config, err2 = parseConfig(text)
+    if err2 != "" {
+        return Model{}, err2
+    }
+
+    return Model(config), ""
 }
 ```
 
-| Situation | Use |
-|---|---|
-| Value may simply not exist | `T?` |
-| Handle it yourself | `let (val, err) = f()` |
-| Bubble the error up | `?` |
-| Happy path only | `if let` |
-| Inspect both paths | `else ->` on `if let` |
-| Full destructuring | `switch` |
+A function that may simply find nothing uses the exact same shape as one
+that can fail outright — absence is not a special case. On the error path
+the paired value is always the type's zero value (`0`, `""`, a zeroed
+struct/class); the compiler doesn't enforce checking `err` first, matching
+the convention's explicit-over-automatic philosophy.
 
 ---
 
 ### Concurrency
 
-Vertex completely decouples business logic from execution strategy. Every
-function is written as an ordinary synchronous function — the caller decides how
-a call runs by prefixing it with an execution sigil at the call site:
+Every function is written as an ordinary synchronous function. The caller
+decides how a call runs by prefixing it with an execution sigil at the call
+site — there are no `async` or `thread` function qualifiers.
 
 | Sigil | Reality | Best for |
 |---|---|---|
-| `async` | Virtual thread — kilobyte-scale stack, userspace context-switch | Millions of idle connections, massive fan-out |
-| `thread` | Real OS thread — full 2 MB+ stack | Heavy CPU work, blocking C calls |
-| `gpu` | PTX / SPIR-V kernel | Matrix math, AI inference |
+| `async` | Virtual thread — state machine, scheduler-driven | Millions of idle connections, massive fan-out |
+| `thread` | Real OS thread — shared-memory concurrency | Heavy CPU work, blocking calls |
+| `gpu` | PTX / SPIR-V kernel | Matrix math, parallel workloads |
+| `tpu` | Tensor-typed kernel | AI inference |
 
 ```vertex
-// async — cooperative virtual thread
-let pending = async fetchUser(id: 1)
-let user    = pending.receive()
-
-// thread — real OS thread
-let result = thread crunch(data: input)
-let output = result.receive()
-
-// gpu — hardware kernel
-let out = gpu(blocks: 16, threads: 256) vectorAdd(a: x, b: y)
-let ans = out.receive()
+let a = async fetch_network(id: 1)
+let b = thread heavy_compute(data: x)
 ```
 
-If a function returns `-> T`, the compiler auto-channels the result through a
-1-capacity channel (Path A). If a function returns void, the developer passes
-channels explicitly for full stream control (Path B):
+A `thread`/`async` call whose function returns `T` evaluates to a
+receive-only channel of `T` carrying exactly one value (Path A):
 
 ```vertex
-// Path B — explicit stream
-let stream: chan float32 = {cap: 64}
+let worker = thread func(seed: int32) -> float32 {
+    return crunch_numbers(seed)
+}(105)
 
-thread func(data: [float32], ch: chan float32) {
+let final_data = worker.receive()
+```
+
+For many values, construct a channel explicitly and hand it to the worker
+as an ordinary argument (Path B):
+
+```vertex
+let out_stream = chan[float32](64)
+
+thread func(data: []float32, ch: chan float32) {
     for chunk in data {
         ch.send(process(chunk))
     }
     ch.close()
-}(dataset, stream)
+}(dataset, out_stream)
 
-while let val = stream.tryReceive() {
-    print(val)
+while true {
+    let chunk, err = out_stream.tryReceive()
+    if err != "" { break }
+    print(chunk)
 }
 ```
 
-**Channel API:**
+**Channels** are a built-in generic type, constructed like any other
+instantiable type — type argument in `[...]`, capacity as an ordinary
+constructor argument:
 
-| Method | Blocking | Returns | Behaviour |
-|---|---|---|---|
-| `.send(value)` | yes | `void` | waits until value is accepted |
-| `.receive()` | yes | `T` | waits until value is available |
-| `.trySend(v)` | no | `bool` | false if full or no receiver ready |
-| `.tryReceive()` | no | `T?` | nil if channel is empty |
-| `.close()` | no | `void` | always completes immediately |
+```vertex
+let ch1 = chan[float32]()          // unbuffered
+let ch2 = chan[int32](64)          // buffered
+let ch3: chan float32 = chan[float32]()
+```
 
-**`select`** multiplexes channels, suspending with 0% CPU until a case is ready.
-Adding a `default` case makes it non-blocking:
+| Method | Blocking | Returns |
+| --- | --- | --- |
+| `.send(value)` | yes | `void` |
+| `.receive()` | yes | `T` |
+| `.trySend(v)` | no | `bool` |
+| `.tryReceive()` | no | `(T, string)` |
+| `.close()` | no | `void` |
+
+**`select`** multiplexes channels, suspending with 0% CPU until a case is
+ready. Adding a `default` case makes it non-blocking:
 
 ```vertex
 select {
@@ -708,107 +788,162 @@ default:
 }
 ```
 
-**Reactive state** broadcasts a value to all subscribers. `state T` wraps any
-value type in a pub/sub primitive — unlike channels, delivery is lossy-latest
-and many subscribers may receive each update:
+#### GPU and TPU
 
 ```vertex
-struct AppState { count: int32; done: bool }
-
-let app: state AppState = { AppState{count: 0, done: false} }
-
-// thread broadcasts state changes
-thread func(st: state AppState) {
-    st.set(AppState{count: 1, done: true})
-}(app)
-
-// async effect — wakes on every broadcast
-async func(s: state AppState) {
-    if s.get().done { runtime.exit(0) }
-}(app)
-
-runtime.loop()
+let d = gpu(blocks: 16, threads: 256) matrix_mult(x, y)
 ```
 
-When an `async` function declares a `state T` parameter, the compiler
-automatically generates the subscriber endpoint, the loop, and the receive
-machinery. Multiple `state T` parameters subscribe to all of them simultaneously.
+The `gpu` sigil, with an optional `(blocks: n, threads: n)` config, compiles
+the call to a PTX/SPIR-V kernel. Function bodies are ordinary Vertex — no
+restricted types or constructs.
 
+```vertex
+func vecAdd(a: tensor[float32, 1024], b: tensor[float32, 1024]) -> tensor[float32, 1024] {
+    return a + b
+}
+
+var ha: [1024]float32
+var hb: [1024]float32
+
+let sum = tpu vecAdd(ha, hb)   // sum: [1024]float32
 ```
-chan T    →  point-to-point, FIFO, one consumer per message
-state T  →  broadcast (pub/sub), lossy-latest, many subscribers
-```
+
+`tpu` channels a host array call into a `tensor`-typed function body, and
+channels the `tensor` result back to a plain host array — same
+return-type-channeling rule as `gpu`. `tensor[ElementType, Shape...]` is
+valid only inside a `tpu`-sigil function body — no subscripting, only
+elementwise ops and the `tpu.` builtin namespace (`Abs`, `Dot`, `Reshape`,
+`Sum`, and friends).
 
 ---
 
 ### Native Interface
 
-Every foreign target is expressed through an import path, a class declaration,
-and a package:
+Foreign interop is a structural contract: you describe the shape of the
+external library using native Vertex types, and the backend emits the
+correct calling convention for the target — C ABI, Objective-C message
+passing, or a JS bundle's call/property-access shape.
 
-| Import prefix | Strategy |
+```vertex
+import "lib/sdl2"
+import "darwin/framework/AppKit"
+import "wasm/wasi_snapshot_preview1"
+import "js/websocket"
+```
+
+A foreign resource is declared as an opaque handle:
+
+```vertex
+type SDL_Window = abstract
+type NSView     = abstract
+```
+
+`abstract` says "structure exists, but Vertex declines to model it" — no
+arithmetic, no dereference, no stride. Its zero value is legal only as an
+error-path value paired with a non-empty error string; there's no
+comparable `nil` for it.
+
+A `class` bound to an import path (`class Name : path`) is a **flat
+namespace** if it declares no `init func` — its functions are called
+directly on the type, and it cannot be instantiated:
+
+```vertex
+class SDL2_API : sdl2 {
+    func SDL_CreateWindow(title: string, x: int32, y: int32, w: int32, h: int32, flags: uint32) -> (SDL_Window, string)
+    func SDL_DestroyWindow(window: SDL_Window)
+}
+
+let window, err = SDL2_API.SDL_CreateWindow("game", 0, 0, 800, 600, 2)
+```
+
+Declaring one or more `init func` instead makes it an **instantiable
+object** — at most one unnamed constructor (`init func() -> Self`, resolved
+by bare `Type(...)`) and any number of named ones (`init func someName(...)
+-> Self`, resolved by `Type.someName(...)`):
+
+```vertex
+class NSWindow : AppKit {
+    init func() -> NSWindow
+    init func initWithContentRect(
+        contentRect: Rect, styleMask: uint64, backing: uint64, defer: bool
+    ) -> NSWindow
+
+    func center()
+}
+```
+
+A parameter label is matched positionally, never looked up as an
+identifier — so a Vertex keyword (`defer` above) is a perfectly legal
+label. Foreign calls that can fail map to the standard error tuple; a call
+that doesn't synchronously fail (like a JS constructor whose errors surface
+later as an event) is declared as an ordinary bare return.
+
+| Foreign Shape | Vertex form |
 | --- | --- |
-| `lib/` | linked call (validated at link time) |
-| `dynamic/lib/` | runtime `dlopen` / `LoadLibrary` |
-| `linux/` | inline syscall instruction |
-| `darwin/` | `objc_msgSend` / selector dispatch |
-| `windows/` | COM vtable slot dispatch |
-| `gpu/` | PTX / shader kernel emission |
+| `const char*` | `string` — marshalled NUL-terminated at the boundary |
+| `T*` (writable scalar out-param) | `mut T` |
+| `T*` + length | `[]T` (read) / `mut []T` (write) |
+| pointer strided manually | `typed_ptr T` — last resort |
+
+An abstract interface is declaration-only — no bodies, no visibility
+modifiers, no ownership keywords. Ownership lives in the **wrapper**
+written on top of it, whose `deinit` releases the resource:
 
 ```vertex
-package libc
-build linux
-import "lib/c"
+class Window {
+    handle: SDL_Window
+}
 
-class C : c {
-    func fopen(path: *const char, mode: *const char) -> *void?
-    func fwrite(ptr: *const void, size: uint64, count: uint64, stream: *void) -> uint64
-    func fclose(stream: *void) -> int32
-    func printf(fmt: ...*const char) -> int32
+func (w: Window) init(title: string) {
+    let handle, err = SDL2_API.SDL_CreateWindow(title, 0, 0, 800, 600, 2)
+    if err != "" {
+        panic("Failed to create window: " + err)
+    }
+    w.handle = handle
+}
+
+func (w: Window) deinit() {
+    SDL2_API.SDL_DestroyWindow(w.handle)
+}
+
+func (w: Window) size() -> (int32, int32) {
+    var width:  int32 = 0
+    var height: int32 = 0
+    SDL2_API.SDL_GetWindowSize(w.handle, width, height)
+    return width, height
 }
 ```
 
-Native class instances are zero-size — the backend removes them entirely. No
-allocation, no runtime overhead.
-
-For libraries that resolve at runtime, prefix the import with `dynamic/lib/`.
-All declared symbols are resolved eagerly at construction. Use a nullable binding
-to handle absence gracefully:
+Only a **non-capturing** function converts across an abstract boundary —
+one word, no environment:
 
 ```vertex
-import "dynamic/lib/cuda"
+func on_event(code: int32) -> int32 { return 0 }
 
-class Cuda : cuda {
-    func cuInit(flags: int32) -> int32
-    func cuMemAlloc(dptr: *CUdevptr, size: int32) -> int32
-    func cuMemFree(dptr: CUdevptr) -> int32
-}
-
-// nil if library not found or any symbol missing
-var cuda: Cuda? = Cuda()
-if let c = cuda {
-    c.cuInit(0)
-}
+SDL2_API.SDL_SetEventFilter(on_event)   // legal
 ```
-
-Individual functions resolve to `nil` when a symbol is absent from the loaded
-library — useful for version compatibility:
 
 ```vertex
-if cuda.cuMemAllocAsync != nil {
-    cuda.cuMemAllocAsync(&ptr, size, stream)
-} else {
-    cuda.cuMemAlloc(&ptr, size)
-}
+var count = 0
+
+SDL2_API.SDL_SetEventFilter(func(code: int32) -> int32 {
+    count += 1        // error: capturing closure cannot cross the abstract boundary
+    return 0
+})
 ```
+
+Native class instances are zero-size — the backend removes them entirely.
+No allocation, no runtime overhead.
 
 ---
 
 ### Testing
 
-Test functions carry the `test` qualifier and are auto-discovered by the test
-runner. Declare them in files tagged `build test`. The `test` qualifier sits
-between the parameter list and `->`. Test functions may declare no parameters.
+Test functions carry the `test` qualifier and are auto-discovered by the
+test runner. Declare them in files tagged `build test`. The `test`
+qualifier sits between the parameter list and `->`. Test functions may
+declare no parameters.
 
 ```vertex
 package arithmetic_test
@@ -821,9 +956,9 @@ func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
 func test_no_crash()   test                          { add(a: 0, b: 0) }
 ```
 
-`Expected(type, string)` declares the return type and the exact stdout string
-the runner checks. Omitting `Expected` means the test passes as long as it does
-not crash.
+`Expected(type, string)` declares the return type and the exact stdout
+string the runner checks. Omitting `Expected` means the test passes as
+long as it does not crash.
 
 **Return value format reference:**
 
@@ -835,6 +970,18 @@ not crash.
 | `float32` | `%f` | `Expected(float32, "5.000000")` |
 | `bool` | `%d` | `Expected(bool, "1")` / `"0"` |
 | `string` | `%s` | `Expected(string, "hello")` |
+
+A test can also assert that a line fails to compile:
+
+```vertex
+func test_bad_add() test -> Expected(error) {
+    return add(a: 10, b: "5")
+}
+
+func test_bad_cast() test -> Expected(error, "cannot convert string to int32") {
+    let x: int32 = "hello" as int32
+}
+```
 
 ---
 
@@ -853,7 +1000,7 @@ Usage:
 Emit mode (default: compile and link to native executable):
   -emit-vir             emit Vertex IR text (.vir)
   -emit-vbytes          emit Vertex IR binary (.vbytes)
-  -emit-mir             emit Machine IR text (.mir)
+  -emit-mir              emit Machine IR text (.mir)
   -emit-asm             emit native assembly text (.s)
   -emit-obj, -c         emit relocatable object file (.o / .obj)
   -dump, -dump-all      dump all pipeline stages (.dump)
@@ -936,7 +1083,13 @@ Upcoming targets: `browser/wasm`, `android`, `browser/js`.
 
 ## Documentation
 
-- [Grammar Specification 2.2](https://github.com/vertex-language/spec/README.md)
+- [Foundation](https://github.com/vertex-language/spec/foundation.md) — literals, control flow, functions, structs, enums, tuples, error handling
+- [Ownership](https://github.com/vertex-language/spec/ownership.md) — shared/`mut`/`var` conventions, `unique`/`shared`/`weak`
+- [Generics](https://github.com/vertex-language/spec/generics.md) — type parameters, constraints, monomorphization
+- [Memory](https://github.com/vertex-language/spec/memory.md) — `typed_ptr`, manual allocation
+- [Concurrency](https://github.com/vertex-language/spec/concurrency.md) — `thread`/`async`, channels, `select`
+- [Hardware Acceleration](https://github.com/vertex-language/spec/accel.md) — `gpu`/`tpu`, tensors
+- [Abstract Interfaces](https://github.com/vertex-language/spec/abstract_interfaces.md) — native interop
 
 ---
 
