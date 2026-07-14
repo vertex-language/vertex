@@ -13,10 +13,10 @@ func buildSyntheticPackage(tc TestCase) *ast.Package {
 	var decls []ast.Decl
 	hasClassC := false
 	for _, d := range tc.OrigFile.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.IsTest {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Test != nil {
 			continue
 		}
-		if cd, ok := d.(*ast.ClassDecl); ok && cd.Name == "C" && cd.Parent != "" {
+		if cd, ok := d.(*ast.ClassDecl); ok && cd.Name.Name == "C" && cd.ABI != nil {
 			hasClassC = true
 		}
 		decls = append(decls, d)
@@ -27,32 +27,30 @@ func buildSyntheticPackage(tc TestCase) *ast.Package {
 	decls = append(decls, syntheticMain(tc))
 
 	f := &ast.File{
-		Filename: tc.File,
-		Package:  &ast.PackageClause{Name: "main"},
-		Decls:    decls,
+		Path:    tc.File,
+		Package: &ast.Ident{Name: "main"},
+		Decls:   decls,
 	}
 	return &ast.Package{
 		Name:  "main",
 		Files: []*ast.File{f},
-		Decls: decls,
 	}
 }
 
 func syntheticClassC() *ast.ClassDecl {
-	charPtr := &ast.PointerType{
-		Const: true,
-		Elem:  &ast.NamedType{Name: "char"},
+	charPtr := &ast.PtrType{
+		Elem: &ast.NamedType{Name: []*ast.Ident{{Name: "char"}}},
 	}
 	return &ast.ClassDecl{
-		Name:   "C",
-		Parent: "c",
-		Methods: []*ast.MethodSig{
+		Name: &ast.Ident{Name: "C"},
+		ABI:  &ast.NamedType{Name: []*ast.Ident{{Name: "c"}}},
+		Methods: []*ast.MethodDecl{
 			{
-				Name: "printf",
+				Name: &ast.Ident{Name: "printf"},
 				Params: []*ast.Param{
-					{Name: "fmt", Variadic: true, Type: charPtr},
+					{Label: "fmt", Variadic: true, Type: charPtr},
 				},
-				Return: &ast.NamedType{Name: "int32"},
+				Result: &ast.NamedType{Name: []*ast.Ident{{Name: "int32"}}},
 			},
 		},
 	}
@@ -65,7 +63,7 @@ func syntheticMain(tc TestCase) *ast.FuncDecl {
 			Value: &ast.CallExpr{
 				Fun: &ast.SelectorExpr{
 					X:   &ast.Ident{Name: "result"},
-					Sel: "c_str",
+					Sel: &ast.Ident{Name: "c_str"},
 				},
 			},
 		}
@@ -74,29 +72,33 @@ func syntheticMain(tc TestCase) *ast.FuncDecl {
 	}
 
 	return &ast.FuncDecl{
-		Name:   "main",
-		Return: &ast.NamedType{Name: "int32"},
-		Body: &ast.Block{
+		Name:   &ast.Ident{Name: "main"},
+		Result: &ast.NamedType{Name: []*ast.Ident{{Name: "int32"}}},
+		Body: &ast.BlockStmt{
 			Stmts: []ast.Stmt{
-				&ast.VarDecl{
-					Kind:  ast.BindLet,
-					Names: []string{"result"},
-					Value: &ast.CallExpr{
-						Fun: &ast.Ident{Name: tc.FuncName},
+				&ast.BindingDecl{
+					Let:   true,
+					Names: []*ast.Ident{{Name: "result"}},
+					Values: []ast.Expr{
+						&ast.CallExpr{
+							Fun: &ast.Ident{Name: tc.FuncName},
+						},
 					},
 				},
-				&ast.VarDecl{
-					Kind:  ast.BindLet,
-					Names: []string{"libc"},
-					Value: &ast.CallExpr{
-						Fun: &ast.Ident{Name: "C"},
+				&ast.BindingDecl{
+					Let:   true,
+					Names: []*ast.Ident{{Name: "libc"}},
+					Values: []ast.Expr{
+						&ast.CallExpr{
+							Fun: &ast.Ident{Name: "C"},
+						},
 					},
 				},
 				&ast.ExprStmt{
 					X: &ast.CallExpr{
 						Fun: &ast.SelectorExpr{
 							X:   &ast.Ident{Name: "libc"},
-							Sel: "printf",
+							Sel: &ast.Ident{Name: "printf"},
 						},
 						Args: []*ast.Arg{
 							{Value: &ast.BasicLit{
@@ -108,7 +110,9 @@ func syntheticMain(tc TestCase) *ast.FuncDecl {
 					},
 				},
 				&ast.ReturnStmt{
-					Value: &ast.BasicLit{Kind: ast.LitIntDec, Value: "0"},
+					Results: []ast.Expr{
+						&ast.BasicLit{Kind: ast.LitInt, Value: "0"},
+					},
 				},
 			},
 		},

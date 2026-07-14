@@ -71,22 +71,24 @@ func parseTestCases(path string) ([]TestCase, error) {
 	var cases []TestCase
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
-		if !ok || !fd.IsTest {
+		if !ok || fd.Test == nil {
 			continue
 		}
 		typeName, value, ok := extractExpected(fd)
 		if !ok {
 			return nil, fmt.Errorf(
 				"test function %q: return type must be Expected(Type, \"value\")",
-				fd.Name,
+				fd.Name.Name,
 			)
 		}
-		fd.IsTest = false
-		fd.Return = &ast.NamedType{Name: typeName}
+		// Turn the test function into an ordinary function with a
+		// concrete return type so it compiles as normal code.
+		fd.Test = nil
+		fd.Result = &ast.NamedType{Name: []*ast.Ident{{Name: typeName}}}
 
 		cases = append(cases, TestCase{
 			File:          path,
-			FuncName:      fd.Name,
+			FuncName:      fd.Name.Name,
 			ExpectedType:  typeName,
 			ExpectedValue: value,
 			Decl:          fd,
@@ -97,28 +99,41 @@ func parseTestCases(path string) ([]TestCase, error) {
 }
 
 func hasBuildTest(f *ast.File) bool {
-	for _, b := range f.Build {
-		if b.Tag == "test" {
+	for _, b := range f.Builds {
+		if b.Name == "test" {
 			return true
 		}
 	}
 	return false
 }
 
+// extractExpected pulls the type name and expected string value out of
+// a test function's `test -> Expected(Type, "value")` clause. The
+// clause's Expect field is an ordinary expression: a call to Expected
+// with the type name spelled as a bare identifier and the value as a
+// string literal.
 func extractExpected(fd *ast.FuncDecl) (typeName, value string, ok bool) {
-	nt, ok := fd.Return.(*ast.NamedType)
-	if !ok || nt.Name != "Expected" || len(nt.CtorArgs) != 2 {
+	if fd.Test == nil || fd.Test.Expect == nil {
 		return "", "", false
 	}
-	typeArg, ok := nt.CtorArgs[0].Type.(*ast.NamedType)
+	call, ok := fd.Test.Expect.(*ast.CallExpr)
 	if !ok {
 		return "", "", false
 	}
-	if !nt.CtorArgs[1].IsString {
+	fun, ok := call.Fun.(*ast.Ident)
+	if !ok || fun.Name != "Expected" || len(call.Args) != 2 {
 		return "", "", false
 	}
-	raw := strings.Trim(nt.CtorArgs[1].String, `"`)
-	return typeArg.Name, raw, true
+	typeIdent, ok := call.Args[0].Value.(*ast.Ident)
+	if !ok {
+		return "", "", false
+	}
+	lit, ok := call.Args[1].Value.(*ast.BasicLit)
+	if !ok || lit.Kind != ast.LitString {
+		return "", "", false
+	}
+	raw := strings.Trim(lit.Value, `"`)
+	return typeIdent.Name, raw, true
 }
 
 func testDumpBase(tc TestCase) string {
