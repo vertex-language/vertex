@@ -10,7 +10,6 @@ import (
 
 	"github.com/vertex-language/ir/vertex/ast"
 
-	virbinary "github.com/vertex-language/ir/vertex/encoding/binary"
 	virtext "github.com/vertex-language/ir/vertex/encoding/text"
 
 	mirtext "github.com/vertex-language/ir/machine/encoding/text/mir"
@@ -284,18 +283,6 @@ func compileUnits(cfg Config, tri target.Triple, units []*pipeline.Unit, libDirs
 		}
 		return boolToCode(root.VIRErr != nil)
 
-	case ModeVBytes:
-		data, err := virbinary.Marshal(root.VIR)
-		if err != nil {
-			fmt.Fprintf(stderr, "vertex: vbytes encoding: %v\n", err)
-			return 1
-		}
-		if err := writeOutput(cfg.Output, data); err != nil {
-			fmt.Fprintf(stderr, "vertex: %v\n", err)
-			return 1
-		}
-		return boolToCode(root.VIRErr != nil)
-
 	case ModeMIR:
 		if err := writeOutput(cfg.Output, []byte(mirtext.PrintModule(root.MIR))); err != nil {
 			fmt.Fprintf(stderr, "vertex: %v\n", err)
@@ -341,7 +328,7 @@ func compileUnits(cfg Config, tri target.Triple, units []*pipeline.Unit, libDirs
 
 func stageFor(mode EmitMode) string {
 	switch mode {
-	case ModeVIR, ModeVBytes:
+	case ModeVIR:
 		return pipeline.StageVIR
 	case ModeMIR:
 		return pipeline.StageMIR

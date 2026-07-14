@@ -34,16 +34,15 @@ func runBuildOrTest(args []string, stderr io.Writer) int {
 		sysroot        string
 		debugInfo      bool
 
-		fVIR, fVBytes, fMIR, fASM, fObj, fC, fDump bool
-		fO0, fO1, fO2, fOs                         bool
-		printVer                                   bool
+		fVIR, fMIR, fASM, fObj, fC, fDump bool
+		fO0, fO1, fO2, fOs                bool
+		printVer                         bool
 	)
 
 	registerTargetFlags(fs, &tf)
 	registerTestFlags(fs, &xf)
 
 	fs.BoolVar(&fVIR, "emit-vir", false, "emit Vertex IR text (.vir)")
-	fs.BoolVar(&fVBytes, "emit-vbytes", false, "emit Vertex IR binary (.vbytes)")
 	fs.BoolVar(&fMIR, "emit-mir", false, "emit Machine IR text (.mir)")
 	fs.BoolVar(&fASM, "emit-asm", false, "emit native assembly text (.s)")
 	fs.BoolVar(&fObj, "emit-obj", false, "emit relocatable object file (.o / .obj)")
@@ -104,7 +103,7 @@ func runBuildOrTest(args []string, stderr io.Writer) int {
 		return runTestMode(fs, xf, common, stderr)
 	}
 
-	modes := []bool{fVIR, fVBytes, fMIR, fASM, fObj || fC, fDump}
+	modes := []bool{fVIR, fMIR, fASM, fObj || fC, fDump}
 	count := 0
 	for _, b := range modes {
 		if b {
@@ -120,8 +119,6 @@ func runBuildOrTest(args []string, stderr io.Writer) int {
 	switch {
 	case fVIR:
 		mode = driver.ModeVIR
-	case fVBytes:
-		mode = driver.ModeVBytes
 	case fMIR:
 		mode = driver.ModeMIR
 	case fASM:
@@ -187,8 +184,6 @@ func deriveOutput(input string, mode driver.EmitMode, tri string) string {
 	switch mode {
 	case driver.ModeVIR:
 		return replaceExt(base, ".vir")
-	case driver.ModeVBytes:
-		return replaceExt(base, ".vbytes")
 	case driver.ModeMIR:
 		return replaceExt(base, ".mir")
 	case driver.ModeASM:
@@ -234,7 +229,6 @@ func printUsage(stderr io.Writer) {
 	fmt.Fprintf(stderr, "Usage:\n  vertex [flags] <source.vs | package/>\n  vertex mod init|get <module-path>[@version]\n\n")
 	fmt.Fprintf(stderr, "Emit mode (default: compile, link, and run as a temporary executable):\n")
 	fmt.Fprintf(stderr, "  -emit-vir             emit Vertex IR text (.vir)\n")
-	fmt.Fprintf(stderr, "  -emit-vbytes          emit Vertex IR binary (.vbytes)\n")
 	fmt.Fprintf(stderr, "  -emit-mir             emit Machine IR text (.mir)\n")
 	fmt.Fprintf(stderr, "  -emit-asm             emit native assembly text (.s)\n")
 	fmt.Fprintf(stderr, "  -emit-obj, -c         emit relocatable object file (.o / .obj)\n")
@@ -262,7 +256,6 @@ func printUsage(stderr io.Writer) {
 	fmt.Fprintf(stderr, "  vertex -emit-asm    -o main.s      main.vs\n")
 	fmt.Fprintf(stderr, "  vertex -emit-mir    -o main.mir    main.vs\n")
 	fmt.Fprintf(stderr, "  vertex -emit-vir    -o main.vir    main.vs\n")
-	fmt.Fprintf(stderr, "  vertex -emit-vbytes -o main.vbytes main.vs\n")
 	fmt.Fprintf(stderr, "  vertex -dump        -o main.dump   main.vs\n")
 	fmt.Fprintf(stderr, "  vertex -dump        -o -           main.vs\n")
 	fmt.Fprintf(stderr, "  vertex -test\n")

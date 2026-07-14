@@ -6,7 +6,6 @@ type EmitMode uint8
 
 const (
 	ModeVIR EmitMode = iota
-	ModeVBytes
 	ModeMIR
 	ModeASM
 	ModeObj
