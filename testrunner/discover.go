@@ -10,12 +10,13 @@ import (
 )
 
 type TestCase struct {
-	File          string
-	FuncName      string
-	ExpectedType  string
-	ExpectedValue string
-	Decl          *ast.FuncDecl
-	OrigFile      *ast.File
+	File           string
+	FuncName       string
+	ExpectedType   string
+	ExpectedValue  string
+	WantCompileErr bool // true for `test -> Expected(error)`
+	Decl           *ast.FuncDecl
+	OrigFile       *ast.File
 }
 
 func collectTestFiles(dir, file string) ([]string, error) {
@@ -74,25 +75,31 @@ func parseTestCases(path string) ([]TestCase, error) {
 		if !ok || fd.Test == nil {
 			continue
 		}
-		typeName, value, ok := extractExpected(fd)
+		typeName, value, wantErr, ok := extractExpected(fd)
 		if !ok {
 			return nil, fmt.Errorf(
-				"test function %q: return type must be Expected(Type, \"value\")",
+				"test function %q: return type must be Expected(Type, \"value\") or Expected(error)",
 				fd.Name.Name,
 			)
 		}
-		// Turn the test function into an ordinary function with a
-		// concrete return type so it compiles as normal code.
+		// Turn the test function into an ordinary function so it
+		// compiles as normal code. A compile-error test keeps its
+		// declared (possibly absent) result as-is — there's no
+		// synthetic return value to compare, since the point is that
+		// this function shouldn't type-check at all.
 		fd.Test = nil
-		fd.Result = &ast.NamedType{Name: []*ast.Ident{{Name: typeName}}}
+		if !wantErr {
+			fd.Result = &ast.NamedType{Name: []*ast.Ident{{Name: typeName}}}
+		}
 
 		cases = append(cases, TestCase{
-			File:          path,
-			FuncName:      fd.Name.Name,
-			ExpectedType:  typeName,
-			ExpectedValue: value,
-			Decl:          fd,
-			OrigFile:      f,
+			File:           path,
+			FuncName:       fd.Name.Name,
+			ExpectedType:   typeName,
+			ExpectedValue:  value,
+			WantCompileErr: wantErr,
+			Decl:           fd,
+			OrigFile:       f,
 		})
 	}
 	return cases, nil
@@ -107,33 +114,46 @@ func hasBuildTest(f *ast.File) bool {
 	return false
 }
 
-// extractExpected pulls the type name and expected string value out of
-// a test function's `test -> Expected(Type, "value")` clause. The
-// clause's Expect field is an ordinary expression: a call to Expected
-// with the type name spelled as a bare identifier and the value as a
-// string literal.
-func extractExpected(fd *ast.FuncDecl) (typeName, value string, ok bool) {
+// extractExpected pulls the expectation out of a test function's
+// `test -> Expected(...)` clause. Two forms are recognized:
+//
+//   - Expected(Type, "value")  — run the function, compare stdout.
+//   - Expected(error)          — the function's body must fail to
+//     compile; wantErr is true and typeName/value are unused.
+func extractExpected(fd *ast.FuncDecl) (typeName, value string, wantErr bool, ok bool) {
 	if fd.Test == nil || fd.Test.Expect == nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	call, ok := fd.Test.Expect.(*ast.CallExpr)
 	if !ok {
-		return "", "", false
+		return "", "", false, false
 	}
 	fun, ok := call.Fun.(*ast.Ident)
-	if !ok || fun.Name != "Expected" || len(call.Args) != 2 {
-		return "", "", false
+	if !ok || fun.Name != "Expected" {
+		return "", "", false, false
+	}
+
+	if len(call.Args) == 1 {
+		id, ok := call.Args[0].Value.(*ast.Ident)
+		if !ok || id.Name != "error" {
+			return "", "", false, false
+		}
+		return "", "", true, true
+	}
+
+	if len(call.Args) != 2 {
+		return "", "", false, false
 	}
 	typeIdent, ok := call.Args[0].Value.(*ast.Ident)
 	if !ok {
-		return "", "", false
+		return "", "", false, false
 	}
 	lit, ok := call.Args[1].Value.(*ast.BasicLit)
 	if !ok || lit.Kind != ast.LitString {
-		return "", "", false
+		return "", "", false, false
 	}
 	raw := strings.Trim(lit.Value, `"`)
-	return typeIdent.Name, raw, true
+	return typeIdent.Name, raw, false, true
 }
 
 func testDumpBase(tc TestCase) string {

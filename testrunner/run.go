@@ -1,143 +1,154 @@
-// Package testrunner discovers `build test`-tagged functions and runs each
-// as its own tiny compiled program.
-//
-// It depends only on driver's public entry points (via the Compiler
-// interface below), never on driver's internals — driver.Test supplies an
-// implementation as a closure. This keeps driver -> testrunner strictly
-// one-way: testrunner has no import of driver at all, so there's no
-// import cycle even though driver is the only caller of Run.
 package testrunner
 
 import (
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-
 	"github.com/vertex-language/ir/vertex/ast"
 )
 
-type Options struct {
-	Target    string
-	Sysroot   string
-	OptLevel  int
-	DebugInfo bool
-	TestDir   string
-	TestFile  string
-}
-
-// Compiler is the subset of driver's public surface testrunner needs:
-// compile a synthetic package to an executable at output, or dump its
-// full pipeline to path for a failed test's post-mortem.
-type Compiler interface {
-	Compile(pkg *ast.Package, output string, stderr io.Writer) int
-	Dump(pkg *ast.Package, path string, stderr io.Writer)
-}
-
-func Run(opts Options, compiler Compiler, stderr io.Writer) int {
-	files, err := collectTestFiles(opts.TestDir, opts.TestFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "vertex: %v\n", err)
-		return 1
-	}
-	if len(files) == 0 {
-		fmt.Fprintf(stderr, "vertex: no test files found\n")
-		return 1
-	}
-
-	var cases []TestCase
-	for _, path := range files {
-		tc, err := parseTestCases(path)
-		if err != nil {
-			fmt.Fprintf(stderr, "vertex: %s: %v\n", path, err)
-			return 1
+// buildSyntheticPackage wraps tc's test function in a tiny standalone
+// "main" package: the original file's non-test declarations, a
+// synthesized `class C` libc binding if the file doesn't already define
+// one, and a synthesized main() that either calls the test function and
+// prints its result for execTest to compare (the Expected(Type, "value")
+// form), or does nothing beyond returning 0 (the Expected(error) form,
+// where the analyzer walking the declared function's body is the whole
+// point — main never needs to call it).
+func buildSyntheticPackage(tc TestCase) *ast.Package {
+	var decls []ast.Decl
+	hasClassC := false
+	for _, d := range tc.OrigFile.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Test != nil {
+			continue
 		}
-		cases = append(cases, tc...)
+		if cd, ok := d.(*ast.ClassDecl); ok && cd.Name.Name == "C" && cd.ABI != nil {
+			hasClassC = true
+		}
+		decls = append(decls, d)
 	}
-	if len(cases) == 0 {
-		fmt.Fprintf(stderr, "vertex: no test functions found\n")
-		return 1
+	if !hasClassC {
+		decls = append(decls, syntheticClassC())
 	}
+	decls = append(decls, syntheticMain(tc))
 
-	pass, fail := 0, 0
-	for _, tc := range cases {
-		if execTest(tc, opts, compiler, stderr) {
-			pass++
-		} else {
-			fail++
+	f := &ast.File{
+		Path:    tc.File,
+		Package: &ast.Ident{Name: "main"},
+		Decls:   decls,
+	}
+	return &ast.Package{
+		Name:  "main",
+		Files: []*ast.File{f},
+	}
+}
+
+func syntheticClassC() *ast.ClassDecl {
+	charPtr := &ast.PtrType{
+		Elem: &ast.NamedType{Name: []*ast.Ident{{Name: "char"}}},
+	}
+	return &ast.ClassDecl{
+		Name: &ast.Ident{Name: "C"},
+		ABI:  &ast.NamedType{Name: []*ast.Ident{{Name: "c"}}},
+		Methods: []*ast.MethodDecl{
+			{
+				Name: &ast.Ident{Name: "printf"},
+				Params: []*ast.Param{
+					{Label: "fmt", Variadic: true, Type: charPtr},
+				},
+				Result: &ast.NamedType{Name: []*ast.Ident{{Name: "int32"}}},
+			},
+		},
+	}
+}
+
+func syntheticMain(tc TestCase) *ast.FuncDecl {
+	if tc.WantCompileErr {
+		return &ast.FuncDecl{
+			Name:   &ast.Ident{Name: "main"},
+			Result: &ast.NamedType{Name: []*ast.Ident{{Name: "int32"}}},
+			Body: &ast.BlockStmt{
+				Stmts: []ast.Stmt{
+					&ast.ReturnStmt{
+						Results: []ast.Expr{
+							&ast.BasicLit{Kind: ast.LitInt, Value: "0"},
+						},
+					},
+				},
+			},
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "\n%d passed, %d failed\n", pass, fail)
-	if fail > 0 {
-		return 1
-	}
-	return 0
-}
-
-func execTest(tc TestCase, opts Options, compiler Compiler, stderr io.Writer) bool {
-	label := fmt.Sprintf("%s::%s", filepath.Base(tc.File), tc.FuncName)
-
-	tmpDir, err := os.MkdirTemp("", "vertex-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stdout, "FAIL  %s  (tmpdir: %v)\n", label, err)
-		return false
-	}
-	defer os.RemoveAll(tmpDir)
-
-	binPath := filepath.Join(tmpDir, tc.FuncName)
-	if strings.HasPrefix(strings.ToLower(opts.Target), "windows-") {
-		binPath += ".exe"
-	}
-
-	pkg := buildSyntheticPackage(tc)
-
-	var compileErr strings.Builder
-	if code := compiler.Compile(pkg, binPath, &compileErr); code != 0 {
-		fmt.Fprintf(os.Stdout, "FAIL  %s  (compile error)\n", label)
-		fmt.Fprint(os.Stdout, compileErr.String())
-		saveTestArtifacts(pkg, compiler, tc, "", stderr)
-		return false
-	}
-
-	out, err := exec.Command(binPath).Output()
-	if err != nil {
-		fmt.Fprintf(os.Stdout, "FAIL  %s  (exec: %v)\n", label, err)
-		saveTestArtifacts(pkg, compiler, tc, binPath, stderr)
-		return false
-	}
-
-	got := strings.TrimRight(string(out), "\r\n")
-	if got == tc.ExpectedValue {
-		fmt.Fprintf(os.Stdout, "ok    %s\n", label)
-		return true
-	}
-	fmt.Fprintf(os.Stdout, "FAIL  %s\n", label)
-	fmt.Fprintf(os.Stdout, "      want: %q\n", tc.ExpectedValue)
-	fmt.Fprintf(os.Stdout, "      got:  %q\n", got)
-	saveTestArtifacts(pkg, compiler, tc, binPath, stderr)
-	return false
-}
-
-// saveTestArtifacts writes a pipeline dump and, if the binary was built
-// successfully, copies it into ./dumps for a failed test's post-mortem.
-func saveTestArtifacts(pkg *ast.Package, compiler Compiler, tc TestCase, binPath string, stderr io.Writer) {
-	if err := os.MkdirAll("dumps", 0o755); err != nil {
-		fmt.Fprintf(stderr, "vertex: cannot create dumps dir: %v\n", err)
-		return
-	}
-	base := testDumpBase(tc)
-	compiler.Dump(pkg, filepath.Join("dumps", base+".dump"), stderr)
-
-	if binPath != "" {
-		data, err := os.ReadFile(binPath)
-		if err == nil {
-			binDst := filepath.Join("dumps", base+".bin")
-			if err := os.WriteFile(binDst, data, 0o755); err != nil {
-				fmt.Fprintf(stderr, "vertex: cannot write %s: %v\n", binDst, err)
-			}
+	var printfResultArg *ast.Arg
+	if tc.ExpectedType == "string" {
+		printfResultArg = &ast.Arg{
+			Value: &ast.CallExpr{
+				Fun: &ast.SelectorExpr{
+					X:   &ast.Ident{Name: "result"},
+					Sel: &ast.Ident{Name: "c_str"},
+				},
+			},
 		}
+	} else {
+		printfResultArg = &ast.Arg{Value: &ast.Ident{Name: "result"}}
+	}
+
+	return &ast.FuncDecl{
+		Name:   &ast.Ident{Name: "main"},
+		Result: &ast.NamedType{Name: []*ast.Ident{{Name: "int32"}}},
+		Body: &ast.BlockStmt{
+			Stmts: []ast.Stmt{
+				&ast.BindingDecl{
+					Let:   true,
+					Names: []*ast.Ident{{Name: "result"}},
+					Values: []ast.Expr{
+						&ast.CallExpr{
+							Fun: &ast.Ident{Name: tc.FuncName},
+						},
+					},
+				},
+				&ast.BindingDecl{
+					Let:   true,
+					Names: []*ast.Ident{{Name: "libc"}},
+					Values: []ast.Expr{
+						&ast.CallExpr{
+							Fun: &ast.Ident{Name: "C"},
+						},
+					},
+				},
+				&ast.ExprStmt{
+					X: &ast.CallExpr{
+						Fun: &ast.SelectorExpr{
+							X:   &ast.Ident{Name: "libc"},
+							Sel: &ast.Ident{Name: "printf"},
+						},
+						Args: []*ast.Arg{
+							{Value: &ast.BasicLit{
+								Kind:  ast.LitString,
+								Value: printfFmt(tc.ExpectedType),
+							}},
+							printfResultArg,
+						},
+					},
+				},
+				&ast.ReturnStmt{
+					Results: []ast.Expr{
+						&ast.BasicLit{Kind: ast.LitInt, Value: "0"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func printfFmt(typeName string) string {
+	switch typeName {
+	case "float32", "float64":
+		return `"%f\n"`
+	case "int64", "uint64":
+		return `"%lld\n"`
+	case "string":
+		return `"%s\n"`
+	case "char":
+		return `"%c\n"`
+	default:
+		return `"%d\n"`
 	}
 }
