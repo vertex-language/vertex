@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/vertex-language/ir/machine"
-	"github.com/vertex-language/ir/vertex"
 	"github.com/vertex-language/ir/vertex/analyzer"
 	mirlower "github.com/vertex-language/ir/vertex/lower/mir"
 	virlower "github.com/vertex-language/ir/vertex/lower/vir"
