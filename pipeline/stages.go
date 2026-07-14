@@ -6,6 +6,7 @@ import (
 
 	"github.com/vertex-language/ir/machine"
 	"github.com/vertex-language/ir/vertex"
+	"github.com/vertex-language/ir/vertex/analyzer"
 	mirlower "github.com/vertex-language/ir/vertex/lower/mir"
 	virlower "github.com/vertex-language/ir/vertex/lower/vir"
 
@@ -35,15 +36,14 @@ var Stages = []Stage{
 	{StageLink, runLink},
 }
 
-// runVIR lowers every unit to Vertex IR, in build order, threading each
-// already-lowered dependency's *vertex.Module — and, alongside it, its own
-// virlower.PackageExports (the name-preserving symbol table declarePackage*
-// consumes for pkg.Struct{}, pkg.Enum.Variant, and pkg.Global — anything
-// that needs a name rather than just a call target, since *vertex.Module
-// alone never retained those names) — into the next unit's virlower.NewLower
-// call so cross-package references resolve. This is the per-module loop
-// driver.go's original doc comment predicted once a real dependency graph
-// existed.
+// runVIR analyzes and lowers every unit to Vertex IR, in build order.
+//
+// virlower.NewLower takes the analyzer.Info for a single package plus a
+// flat list of host Imports (ir/vertex/lower/vir.Import) — it has no
+// notion of threading a dependency's already-lowered *vertex.Module or its
+// exported names into a dependent unit's lowering. Cross-package symbol
+// resolution therefore isn't something this stage can do yet; each unit is
+// analyzed and lowered independently.
 //
 // A dependency unit must lower cleanly; there's no partial output to fall
 // back to for a module nothing asked to see directly. The root unit is
@@ -52,13 +52,16 @@ var Stages = []Stage{
 // StageVIR) or is in dump mode (st.Sink != nil, which wants to show as
 // much of the pipeline as possible); otherwise it's fatal.
 func runVIR(st *State) error {
-	deps := make(map[string]*vertex.Module, len(st.Units))
-	exports := make(map[string]*virlower.PackageExports, len(st.Units))
 	for _, u := range st.Units {
-		// customLibs is nil until vs.lib parsing/resolution is threaded
-		// through here (per-module, likely off pkg.Graph) — see
-		// resolveImportLib's doc comment for what plugs in.
-		vmod, pkgExports, virErr := virlower.NewLower(u.Pkg, deps, exports, st.Triple.VirTargetString(), nil)
+		info, err := analyzer.Analyze(u.Pkg)
+		if err != nil {
+			return fmt.Errorf("analyzing %s: %w", unitLabel(u), err)
+		}
+
+		// customLibs (host Imports) is nil until vs.lib parsing/resolution
+		// is threaded through here (per-module, likely off pkg.Graph) —
+		// see resolveImportLib's doc comment for what plugs in.
+		vmod, virErr := virlower.NewLower(u.Pkg, info, nil)
 
 		tolerate := st.Sink != nil
 		if virErr != nil && !u.IsRoot && !tolerate {
@@ -76,12 +79,6 @@ func runVIR(st *State) error {
 
 		vmod.SetTarget(st.Triple.VirTargetString())
 		u.VIR = vmod
-		if u.ModulePath != "" {
-			deps[u.ModulePath] = vmod
-			if pkgExports != nil {
-				exports[u.ModulePath] = pkgExports
-			}
-		}
 	}
 	return nil
 }
