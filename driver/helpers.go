@@ -48,26 +48,24 @@ func findModuleRoot(input string) (string, error) {
 // that look like module paths rather than standard-library packages —
 // i.e. whose first path segment contains a ".", the same convention
 // vs.mod's own module paths use throughout this toolchain — in the
-// order they're first seen. Each file's Imports is a list of
-// *ast.ImportDecl, and each ImportDecl carries one or more Paths (more
-// than one for the grouped `import ( ... )` form), so this walks both
-// levels.
+// order they're first seen. Each file's Imports is a flat list of
+// *ast.ImportSpec, one per import path (grouped `import ( ... )` forms
+// are already flattened to individual ImportSpecs by the builder), so
+// this only needs to walk that one level.
 func collectNonStdlibImports(p *ast.Package) []string {
 	seen := make(map[string]bool)
 	var out []string
 	for _, f := range p.Files {
 		for _, imp := range f.Imports {
-			for _, path := range imp.Paths {
-				seg, _, _ := strings.Cut(path.Path, "/")
-				if !strings.Contains(seg, ".") {
-					continue
-				}
-				if seen[path.Path] {
-					continue
-				}
-				seen[path.Path] = true
-				out = append(out, path.Path)
+			seg, _, _ := strings.Cut(imp.Path, "/")
+			if !strings.Contains(seg, ".") {
+				continue
 			}
+			if seen[imp.Path] {
+				continue
+			}
+			seen[imp.Path] = true
+			out = append(out, imp.Path)
 		}
 	}
 	return out
