@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vertex-language/ir/vertex/ast"
+	"github.com/vertex-language/ir/vertex/parser"
 
 	"github.com/vertex-language/vertex/pipeline"
 )
@@ -111,7 +112,7 @@ func parseFile(path string) (*ast.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %w", path, err)
 	}
-	return ast.NewFile(path, src)
+	return parser.ParseFile(path, src)
 }
 
 // appendSourceFiles writes the raw source of every .vs file under u's
