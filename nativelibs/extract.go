@@ -19,7 +19,7 @@ import (
 func ExtractDynLibs(m *vertex.Module, tri target.Triple) []string {
 	seen := make(map[string]bool)
 	var libs []string
-	for _, imp := range m.Imports.Imports {
+	for _, imp := range m.Imports.List {
 		platform, lib, ok := splitImportModule(imp.Module)
 		if !ok || platform != tri.OS {
 			continue
@@ -43,13 +43,13 @@ func ExtractDynLibs(m *vertex.Module, tri target.Triple) []string {
 // synthesize lazy-bind stubs.
 func ExtractLibFuncSymbols(m *vertex.Module, triOS string) map[string][]string {
 	result := make(map[string][]string)
-	for _, imp := range m.Imports.Imports {
+	for _, imp := range m.Imports.List {
 		platform, lib, ok := splitImportModule(imp.Module)
 		if !ok || platform != triOS {
 			continue
 		}
 		lib = normalizeDarwinLib(lib)
-		if _, ok := imp.Desc.(vertex.FuncImport); ok {
+		if imp.Kind == vertex.ExternFunc {
 			result[lib] = append(result[lib], imp.Name)
 		}
 	}
