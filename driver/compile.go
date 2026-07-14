@@ -45,7 +45,7 @@ func Compile(cfg Config, stderr io.Writer) int {
 	}
 
 	if root == "" {
-		p, err := parseInput(cfg.Input)
+		p, err := parseInput(cfg.Input, tri.OS)
 		if err != nil {
 			fmt.Fprintf(stderr, "vertex: %v\n", err)
 			return 1
@@ -116,7 +116,7 @@ func Compile(cfg Config, stderr io.Writer) int {
 // the compile was never asked to include; rootUnitDir is that unit's Dir
 // in that case. Both are ignored when rootPkg is nil (the normal,
 // vs.mod-rooted case), where every unit — root included — is parsed from
-// its own graph.Module.Dir.
+// its own graph.Module.Dir, filtered by tri.OS's build tags.
 func compileGraph(cfg Config, tri target.Triple, graph *pkg.Graph, cache *pkg.Cache, rootUnitDir string, rootPkg *ast.Package, stderr io.Writer) int {
 	units := make([]*pipeline.Unit, 0, len(graph.Modules))
 	for _, m := range graph.Modules {
@@ -124,7 +124,7 @@ func compileGraph(cfg Config, tri target.Triple, graph *pkg.Graph, cache *pkg.Ca
 			units = append(units, &pipeline.Unit{Dir: rootUnitDir, IsRoot: true, Pkg: rootPkg})
 			continue
 		}
-		p, err := parseInput(m.Dir)
+		p, err := parseInput(m.Dir, tri.OS)
 		if err != nil {
 			fmt.Fprintf(stderr, "vertex: %s: %v\n", m.Path, err)
 			return 1

@@ -77,7 +77,16 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func parseInput(input string) (*ast.Package, error) {
+// parseInput parses input (a file or directory) into a package for
+// target OS goos. When input is a directory, only files whose `build`
+// tags admit goos are included — a file with no build line has no
+// constraint and is always included; a file tagged e.g. `build test`
+// (see testrunner's own discovery path, which filters the same way) is
+// excluded from every ordinary OS build as a natural consequence of
+// "test" never equaling a real goos value. When input is a single file,
+// it's parsed and included unconditionally — the caller named it
+// explicitly, so there's nothing to filter.
+func parseInput(input string, goos string) (*ast.Package, error) {
 	var files []*ast.File
 	if isDir(input) {
 		entries, err := os.ReadDir(input)
@@ -92,10 +101,13 @@ func parseInput(input string) (*ast.Package, error) {
 			if err != nil {
 				return nil, err
 			}
+			if !matchesBuildTag(f, goos) {
+				continue
+			}
 			files = append(files, f)
 		}
 		if len(files) == 0 {
-			return nil, fmt.Errorf("no .vs files found in %s", input)
+			return nil, fmt.Errorf("no .vs files found in %s for OS %s", input, goos)
 		}
 	} else {
 		f, err := parseFile(input)
@@ -105,6 +117,23 @@ func parseInput(input string) (*ast.Package, error) {
 		files = append(files, f)
 	}
 	return ast.NewPackage(files)
+}
+
+// matchesBuildTag reports whether f should be included in a build for
+// goos. A file with no `build` line (f.Builds empty) has no constraint
+// and always matches. Otherwise f matches only if one of its build tags
+// names goos exactly — mirrors discover.go's hasBuildTest, which does
+// the identical check against the literal "test" tag.
+func matchesBuildTag(f *ast.File, goos string) bool {
+	if len(f.Builds) == 0 {
+		return true
+	}
+	for _, id := range f.Builds {
+		if id.Name == goos {
+			return true
+		}
+	}
+	return false
 }
 
 func parseFile(path string) (*ast.File, error) {
