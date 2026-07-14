@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vertex-language/ir/vertex/ast"
+	"github.com/vertex-language/ir/vertex/parser"
 )
 
 type TestCase struct {
@@ -61,7 +62,7 @@ func parseTestCases(path string) ([]TestCase, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := ast.NewFile(path, src)
+	f, err := parser.ParseFile(path, src)
 	if err != nil {
 		return nil, err
 	}
