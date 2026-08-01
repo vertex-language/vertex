@@ -155,6 +155,19 @@ func (e *emitter) suffix(in *hir.Instr) ir.Type {
 // call routes the three callee shapes. A qualified call is emitted as
 // `module.symbol` and erased by vvm's importer Rewrite before cpu/lower
 // ever sees it.
+//
+// This builds the ir.Instruction directly rather than going through
+// builder.go's Call/CallImported/CallIndirect convenience wrappers, which
+// all hardcode Suffix to nil. That was invisible for a locally-resolved
+// call — cpu/lower/<arch> derived the result type from its own function
+// table instead — but a rewritten cross-module call (importer.Rewrite
+// erases the qualified ident into a bare mangled symbol, per its own
+// per-kind summary) has no local declaration for a backend to consult, and
+// needs Suffix to carry the checked result type hir already computed
+// (hir's builder.go: `Instr{..., Type: f.Result, ...}`) — the same
+// contract every other ruleSuffix opcode already relies on. Setting it
+// unconditionally, for every call shape, keeps this one rule instead of a
+// special case for the cross-module path alone.
 func (e *emitter) call(in *hir.Instr) {
 	c := in.Call
 	if c == nil {
@@ -162,17 +175,28 @@ func (e *emitter) call(in *hir.Instr) {
 		return
 	}
 	args := e.operands(in.Args)
+	suffix := e.suffix(in)
+
 	switch {
 	case c.Indirect != nil:
 		if c.Sig == "" {
 			e.l.todo(in.Pos, "indirect call with no fnsig — vir types call.<fnsig> against a declared signature, and nothing declares one yet")
 			return
 		}
-		e.fb.CallIndirect(in.Name, c.Sig, e.l.value(e.hm, *c.Indirect), args...)
+		e.fb.EmitInstruction(ir.Instruction{
+			Result: in.Name, Op: ir.OpCall, Suffix: suffix, Sig: c.Sig,
+			Args: append([]ir.Operand{e.l.value(e.hm, *c.Indirect)}, args...),
+		})
 	case c.Module != "":
-		e.fb.CallImported(in.Name, c.Module, c.Name, args...)
+		e.fb.EmitInstruction(ir.Instruction{
+			Result: in.Name, Op: ir.OpCall, Suffix: suffix,
+			Args: append([]ir.Operand{ir.QualifiedIdent(c.Module, c.Name)}, args...),
+		})
 	default:
-		e.fb.Call(in.Name, c.Name, args...)
+		e.fb.EmitInstruction(ir.Instruction{
+			Result: in.Name, Op: ir.OpCall, Suffix: suffix,
+			Args: append([]ir.Operand{ir.Ident(c.Name)}, args...),
+		})
 	}
 }
 
