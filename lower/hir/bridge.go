@@ -186,6 +186,9 @@ type fieldInfo struct {
 	Type types.Type
 }
 
+// structParts reads types.Field's exported fields directly. types gives
+// Field and Variant plain fields rather than accessors — they are records,
+// not objects — so this is the one place hir spells that out.
 func (l *lowerer) structParts(t types.Type) (string, []fieldInfo) {
 	name := "anon"
 	if n, ok := l.subst(t).(*types.Named); ok {
@@ -198,7 +201,7 @@ func (l *lowerer) structParts(t types.Type) (string, []fieldInfo) {
 	out := make([]fieldInfo, 0, s.NumFields())
 	for i := 0; i < s.NumFields(); i++ {
 		f := s.Field(i)
-		out = append(out, fieldInfo{Name: f.Name(), Type: f.Type()})
+		out = append(out, fieldInfo{Name: f.Name, Type: f.Type})
 	}
 	return name, out
 }
@@ -208,6 +211,8 @@ type tupleElem struct {
 	Type types.Type
 }
 
+// A Tuple holds *Var, which is an Object and does carry accessors — unlike
+// Field and Variant above.
 func (l *lowerer) tupleElems(t types.Type) []tupleElem {
 	tp, ok := l.underlying(t).(*types.Tuple)
 	if !ok {
@@ -227,6 +232,10 @@ type variantInfo struct {
 	Types []types.Type
 }
 
+// enumParts flattens types.Variant. The discriminant is Variant.Value,
+// already resolved at construction (A.6.5 continues it from the previous
+// variant when unwritten), and the payload is a plain []Type — a unit
+// variant is one of length zero.
 func (l *lowerer) enumParts(t types.Type) (disc types.Type, unitOnly bool, variants []variantInfo) {
 	e, ok := l.underlying(t).(*types.Enum)
 	if !ok {
@@ -234,11 +243,11 @@ func (l *lowerer) enumParts(t types.Type) (disc types.Type, unitOnly bool, varia
 	}
 	for i := 0; i < e.NumVariants(); i++ {
 		v := e.Variant(i)
-		vi := variantInfo{Name: v.Name(), Tag: v.Tag()}
-		for j := 0; j < v.NumTypes(); j++ {
-			vi.Types = append(vi.Types, v.Type(j))
-		}
-		variants = append(variants, vi)
+		variants = append(variants, variantInfo{
+			Name:  v.Name,
+			Tag:   v.Value,
+			Types: v.Payload,
+		})
 	}
 	return e.Discriminant(), e.UnitOnly(), variants
 }
