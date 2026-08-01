@@ -566,10 +566,18 @@ func (b *funcBuilder) externArgType(a ast.Expr) types.Type {
 // declare boundary. The buffer is temporary: externCallExpr frees it
 // immediately after the call it was built for, so nothing here needs an
 // owning binding or a deinit routine of its own.
+//
+// Reads the operand's type through externArgType rather than TypeOf
+// directly, for the same reason externCallExpr's call-site check does: a
+// bare literal argument with no let/var binding in between has no
+// analyzer-recorded Types[e] entry (resolve.go's checkBodies "computes no
+// types for expressions"), so TypeOf alone would return nil here and this
+// would report a false "non-string operand" on exactly the argument shape
+// it exists to handle.
 func (b *funcBuilder) cStringArg(x ast.Expr) Value {
 	pos := x.Pos()
 	sv := b.expr(x)
-	st, ok := b.l.hirType(b.info().TypeOf(x)).(StructType)
+	st, ok := b.l.hirType(b.externArgType(x)).(StructType)
 	if !ok {
 		b.l.errorf(pos, "internal: cStringArg on a non-string operand")
 		return Value{}
