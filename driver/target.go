@@ -48,6 +48,16 @@ type targetSpec struct {
 // list: a triple only appears here if vvm has a cpu/lower, an object, and
 // a registered linker (or a flat writer) for it.
 //
+// ABI note: darwin cells use vir §7.1's canonical "macho" ABI token — the
+// row the spec provides for exactly this case ("Apple convention for
+// targets without an OS-specific ABI above") — rather than the English
+// word "none", which is not a member of vir.CanonicalABI and fails
+// ir/verify's checkTarget with "unknown abi \"none\" (§7.1)". An empty
+// string would also pass verification (ABI is optional in the grammar),
+// but "macho" is the literal, named answer the spec already gives for
+// this exact case, so it's used instead of relying on emptiness meaning
+// the same thing by accident.
+//
 // Deliberately absent, and why:
 //
 //   - linux-riscv64, and every powerpc/mips/loongarch/s390x spelling:
@@ -62,8 +72,8 @@ type targetSpec struct {
 var targetTable = map[string]targetSpec{
 	"linux-amd64":   {"x86_64", "linux", "gnu", token.TagLinux, false, true, "ELF, fully linked"},
 	"linux-arm64":   {"aarch64", "linux", "gnu", token.TagLinux, false, true, "ELF, fully linked"},
-	"darwin-amd64":  {"x86_64", "macos", "none", token.TagDarwin, false, true, "Mach-O, ad-hoc signed"},
-	"darwin-arm64":  {"aarch64", "macos", "none", token.TagDarwin, false, true, "Mach-O, ad-hoc signed"},
+	"darwin-amd64":  {"x86_64", "macos", "macho", token.TagDarwin, false, true, "Mach-O, ad-hoc signed"},
+	"darwin-arm64":  {"aarch64", "macos", "macho", token.TagDarwin, false, true, "Mach-O, ad-hoc signed"},
 	"windows-amd64": {"x86_64", "windows", "msvc", token.TagWindows, false, true, "PE; cross-building needs the target DLLs on disk"},
 	"windows-arm64": {"aarch64", "windows", "msvc", token.TagWindows, false, true, "PE; cross-building needs the target DLLs on disk"},
 
@@ -71,7 +81,12 @@ var targetTable = map[string]targetSpec{
 	// vvm refuses a synthesized crt stub against flat, so a freestanding
 	// program must name its entry function _start rather than main, and
 	// must be a single package (flat forbids the relocations a
-	// cross-module call needs).
+	// cross-module call needs). ABI stays "none" here, unlike the darwin
+	// rows above: os is also "none" (bare metal), there's no Mach-O
+	// convention in play, and this hasn't been confirmed against
+	// vir.CanonicalABI's actual contents — if it hits the same "unknown
+	// abi" error, it needs the same kind of fix, but with whatever token
+	// the spec actually names for a bare-metal target, not a guess.
 	"freestanding-amd64": {"x86_64", "none", "none", token.TagNone, true, true, "flat image; single package, entry must be _start"},
 	"freestanding-arm64": {"aarch64", "none", "none", token.TagNone, true, true, "flat image; single package, entry must be _start"},
 }
