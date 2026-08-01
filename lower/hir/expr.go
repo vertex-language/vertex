@@ -72,13 +72,14 @@ func (b *funcBuilder) basicLit(x *ast.BasicLit) Value {
 	ht := b.l.hirType(t)
 	tv, ok := b.info().Types[x]
 
-	// --- FALLBACK IF TYPECHECK PASS IS MISSING ---
-	if !ok || tv.Value == nil {
+	// Fallback: If the upstream expression typechecker is missing or bypassed,
+	// we evaluate the raw AST literal locally so HIR lowering can proceed.
+	if (!ok || tv.Value == nil) && x.Kind.String() != "nil" {
 		switch x.Kind.String() {
 		case "INT":
 			if val, err := strconv.ParseInt(x.Value, 0, 64); err == nil {
 				if t == nil {
-					return IntVal(I32, val) // Default to I32 if type is missing
+					return IntVal(I32, val)
 				}
 				return IntVal(ht, val)
 			}
@@ -93,15 +94,20 @@ func (b *funcBuilder) basicLit(x *ast.BasicLit) Value {
 			return BoolVal(true)
 		case "FALSE":
 			return BoolVal(false)
-		case "STRING":
+		case "STRING", "CHAR":
 			s := x.Value
-			if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+			if len(s) >= 2 && (s[0] == '"' || s[0] == '\'' || s[0] == '`') {
 				s = s[1 : len(s)-1]
+			}
+			if x.Kind.String() == "CHAR" {
+				if len(s) > 0 {
+					return IntVal(I32, int64(s[0]))
+				}
+				return IntVal(I32, 0)
 			}
 			return b.stringConstant(x.Pos(), s)
 		}
 	}
-	// ---------------------------------------------
 
 	if ok && tv.Value != nil {
 		if s, isStr := types.StringVal_(tv.Value); isStr {
@@ -749,14 +755,14 @@ func (b *funcBuilder) addressOf(x ast.Expr) Value {
 		if st, ok := b.l.hirType(b.info().TypeOf(x.X)).(StructType); ok && x.Index < len(st.Def.Fields) {
 			return b.fieldPtr(x.Pos(), st.Def, b.addressOf(x.X), st.Def.Fields[x.Index].Name)
 		}
-	case *IndexExpr:
+	case *ast.IndexExpr:
 		src := b.info().TypeOf(x.X)
 		elem := b.l.hirType(b.l.elem(src))
 		base, length := b.sequenceParts(x.X, src)
 		idx := b.expr(x.Indices[0])
 		b.boundsCheck(x.Pos(), idx, length)
 		return b.indexPtr(x.Pos(), elem, base, idx)
-	case *UnaryExpr:
+	case *ast.UnaryExpr:
 		if x.Op.String() == "&" {
 			return b.expr(x.X) // &p = v writes through p
 		}
