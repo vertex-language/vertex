@@ -39,19 +39,27 @@ const (
 	UntypedNil
 )
 
+// BasicInfo is the property bit set of a *Basic.
+//
+// The flags are named Info* rather than Is* because predicates.go exports
+// IsInteger, IsFloat, IsNumeric, IsString, IsOrdered, and IsUntyped as
+// functions over Type, and Go gives constants and functions one namespace per
+// package. The functions are the API analyzer and lower call; these flags are
+// the internal representation those functions read, so the flags are what
+// carries the distinguishing prefix.
 type BasicInfo uint
 
 const (
-	IsBoolean BasicInfo = 1 << iota
-	IsInteger
-	IsUnsigned
-	IsFloat
-	IsChar
-	IsString
-	IsUntyped
+	InfoBoolean BasicInfo = 1 << iota
+	InfoInteger
+	InfoUnsigned
+	InfoFloat
+	InfoChar
+	InfoString
+	InfoUntyped
 
-	IsNumeric = IsInteger | IsFloat
-	IsOrdered = IsInteger | IsFloat | IsString | IsChar
+	InfoNumeric = InfoInteger | InfoFloat
+	InfoOrdered = InfoInteger | InfoFloat | InfoString | InfoChar
 )
 
 type Basic struct {
@@ -82,32 +90,32 @@ func (b *Basic) is(i BasicInfo) bool { return b != nil && b.info&i != 0 }
 var Typ = []*Basic{
 	Invalid: {Invalid, 0, "invalid type"},
 
-	Bool:    {Bool, IsBoolean, "bool"},
-	Int:     {Int, IsInteger, "int"},
-	Int8:    {Int8, IsInteger, "int8"},
-	Int16:   {Int16, IsInteger, "int16"},
-	Int32:   {Int32, IsInteger, "int32"},
-	Int64:   {Int64, IsInteger, "int64"},
-	Uint:    {Uint, IsInteger | IsUnsigned, "uint"},
-	Uint8:   {Uint8, IsInteger | IsUnsigned, "uint8"},
-	Uint16:  {Uint16, IsInteger | IsUnsigned, "uint16"},
-	Uint32:  {Uint32, IsInteger | IsUnsigned, "uint32"},
-	Uint64:  {Uint64, IsInteger | IsUnsigned, "uint64"},
-	Float32: {Float32, IsFloat, "float32"},
-	Float64: {Float64, IsFloat, "float64"},
+	Bool:    {Bool, InfoBoolean, "bool"},
+	Int:     {Int, InfoInteger, "int"},
+	Int8:    {Int8, InfoInteger, "int8"},
+	Int16:   {Int16, InfoInteger, "int16"},
+	Int32:   {Int32, InfoInteger, "int32"},
+	Int64:   {Int64, InfoInteger, "int64"},
+	Uint:    {Uint, InfoInteger | InfoUnsigned, "uint"},
+	Uint8:   {Uint8, InfoInteger | InfoUnsigned, "uint8"},
+	Uint16:  {Uint16, InfoInteger | InfoUnsigned, "uint16"},
+	Uint32:  {Uint32, InfoInteger | InfoUnsigned, "uint32"},
+	Uint64:  {Uint64, InfoInteger | InfoUnsigned, "uint64"},
+	Float32: {Float32, InfoFloat, "float32"},
+	Float64: {Float64, InfoFloat, "float64"},
 
 	// A.1.5.2 ⊢ a CharLiteral "denotes exactly one Unicode scalar value, held
 	// in 4 bytes. 'A' and "A" are different types and never interconvert
 	// implicitly." Char is therefore its own kind, not an alias for int32.
-	Char:   {Char, IsChar, "char"},
-	String: {String, IsString, "string"},
+	Char:   {Char, InfoChar, "char"},
+	String: {String, InfoString, "string"},
 
-	UntypedBool:   {UntypedBool, IsBoolean | IsUntyped, "untyped bool"},
-	UntypedInt:    {UntypedInt, IsInteger | IsUntyped, "untyped int"},
-	UntypedFloat:  {UntypedFloat, IsFloat | IsUntyped, "untyped float"},
-	UntypedChar:   {UntypedChar, IsChar | IsUntyped, "untyped char"},
-	UntypedString: {UntypedString, IsString | IsUntyped, "untyped string"},
-	UntypedNil:    {UntypedNil, IsUntyped, "untyped nil"},
+	UntypedBool:   {UntypedBool, InfoBoolean | InfoUntyped, "untyped bool"},
+	UntypedInt:    {UntypedInt, InfoInteger | InfoUntyped, "untyped int"},
+	UntypedFloat:  {UntypedFloat, InfoFloat | InfoUntyped, "untyped float"},
+	UntypedChar:   {UntypedChar, InfoChar | InfoUntyped, "untyped char"},
+	UntypedString: {UntypedString, InfoString | InfoUntyped, "untyped string"},
+	UntypedNil:    {UntypedNil, InfoUntyped, "untyped nil"},
 }
 
 // Predeclared names, in the order A.1.4 lists them. `byte` and `uint8` share an

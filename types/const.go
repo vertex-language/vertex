@@ -323,7 +323,7 @@ func Representable(v Value, b *Basic) bool {
 		return false
 	}
 	switch {
-	case b.is(IsInteger):
+	case b.is(InfoInteger):
 		i, ok := toInt(v)
 		if !ok {
 			return false
@@ -334,7 +334,7 @@ func Representable(v Value, b *Basic) bool {
 		}
 		return i.Cmp(r.lo) >= 0 && i.Cmp(r.hi) <= 0
 
-	case b.is(IsFloat):
+	case b.is(InfoFloat):
 		r, ok := toRat(v)
 		if !ok {
 			return false
@@ -348,7 +348,7 @@ func Representable(v Value, b *Basic) bool {
 		}
 		return true
 
-	case b.is(IsChar):
+	case b.is(InfoChar):
 		// A.1.5.2 ⊢ a CharLiteral denotes exactly one Unicode scalar value. A
 		// surrogate is a code point but not a scalar, so it is excluded here
 		// for the same reason the scanner excludes it in an escape.
@@ -358,10 +358,10 @@ func Representable(v Value, b *Basic) bool {
 		}
 		return i >= 0 && i <= 0x10FFFF && !(i >= 0xD800 && i < 0xE000)
 
-	case b.is(IsBoolean):
+	case b.is(InfoBoolean):
 		return v.Kind() == BoolVal
 
-	case b.is(IsString):
+	case b.is(InfoString):
 		return v.Kind() == StringVal
 	}
 	return false

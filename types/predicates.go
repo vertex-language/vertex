@@ -40,17 +40,20 @@ func IsInvalid(t Type) bool {
 	return b != nil && b.kind == Invalid
 }
 
+// IsUntyped reports whether t is one of basic.go's untyped kinds. It does not
+// go through Underlying: an untyped constant never reaches a Named, so a
+// non-*Basic answers false via is()'s nil guard.
 func IsUntyped(t Type) bool {
 	b, _ := t.(*Basic)
-	return b.is(IsUntyped)
+	return b.is(InfoUntyped)
 }
 
-func IsBool(t Type) bool    { return AsBasic(t).is(IsBoolean) }
-func IsInteger(t Type) bool { return AsBasic(t).is(IsInteger) }
-func IsFloat(t Type) bool   { return AsBasic(t).is(IsFloat) }
-func IsNumeric(t Type) bool { return AsBasic(t).is(IsNumeric) }
-func IsString(t Type) bool  { return AsBasic(t).is(IsString) }
-func IsOrdered(t Type) bool { return AsBasic(t).is(IsOrdered) }
+func IsBool(t Type) bool    { return AsBasic(t).is(InfoBoolean) }
+func IsInteger(t Type) bool { return AsBasic(t).is(InfoInteger) }
+func IsFloat(t Type) bool   { return AsBasic(t).is(InfoFloat) }
+func IsNumeric(t Type) bool { return AsBasic(t).is(InfoNumeric) }
+func IsString(t Type) bool  { return AsBasic(t).is(InfoString) }
+func IsOrdered(t Type) bool { return AsBasic(t).is(InfoOrdered) }
 
 // --------------------------------------------------------------- identity
 
@@ -318,17 +321,17 @@ func untypedAssignable(v, t Type) bool {
 	}
 	switch src.kind {
 	case UntypedBool:
-		return dst.is(IsBoolean)
+		return dst.is(InfoBoolean)
 	case UntypedInt:
 		// An untyped integer reaches a float destination; the representability
 		// check is the caller's, since it needs the Value and not just the type.
-		return dst.is(IsNumeric)
+		return dst.is(InfoNumeric)
 	case UntypedFloat:
-		return dst.is(IsFloat)
+		return dst.is(InfoFloat)
 	case UntypedChar:
-		return dst.is(IsChar)
+		return dst.is(InfoChar)
 	case UntypedString:
-		return dst.is(IsString)
+		return dst.is(InfoString)
 	}
 	return false
 }
@@ -369,19 +372,19 @@ func ConvertibleTo(v, t Type) bool {
 	bv, bt := AsBasic(v), AsBasic(t)
 	if bv != nil && bt != nil {
 		switch {
-		case bv.is(IsNumeric) && bt.is(IsNumeric):
+		case bv.is(InfoNumeric) && bt.is(InfoNumeric):
 			return true
-		case bv.is(IsChar) && bt.is(IsInteger), bv.is(IsInteger) && bt.is(IsChar):
+		case bv.is(InfoChar) && bt.is(InfoInteger), bv.is(InfoInteger) && bt.is(InfoChar):
 			return true
 		}
 	}
 
 	// A.6.5 ⊢ a unit-only enum *is* its discriminant integer, so the cast is a
 	// tag read. A payload enum has no such reading.
-	if e, ok := uv.(*Enum); ok && e.UnitOnly() && bt.is(IsInteger) {
+	if e, ok := uv.(*Enum); ok && e.UnitOnly() && bt.is(InfoInteger) {
 		return true
 	}
-	if e, ok := ut.(*Enum); ok && e.UnitOnly() && bv.is(IsInteger) {
+	if e, ok := ut.(*Enum); ok && e.UnitOnly() && bv.is(InfoInteger) {
 		return true
 	}
 
