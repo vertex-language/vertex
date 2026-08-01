@@ -54,19 +54,25 @@ func Memory(t vir.Target) *vir.Module {
 		}
 		m.DeclareLink(vir.LinkShared, libName)
 		lib := m.DeclareExternGroup(libName)
-		lib.DeclareFunction("libc_malloc",
+		// The declared name here is what ends up on the wire as the real
+		// ABI symbol (an extern's symbol is always its declared name,
+		// bare/verbatim — see cpu/lower/<arch>'s own comment to that
+		// effect). It must therefore be the real libc symbol, not an
+		// internal alias: libSystem/glibc/musl all export "malloc" and
+		// "free" under those exact names, never "libc_malloc"/"libc_free".
+		lib.DeclareFunction("malloc",
 			[]vir.Param{{Name: "size", Type: vir.I64}}, vir.Ptr)
-		lib.DeclareFunction("libc_free",
+		lib.DeclareFunction("free",
 			[]vir.Param{{Name: "p", Type: vir.Ptr}}, vir.Void)
 
 		alloc := m.DeclareFunction(MemAllocate.Func,
 			[]vir.Param{{Name: "size", Type: vir.I64}}, vir.Ptr, true)
-		p := alloc.Call("p", "libc_malloc", vir.Ident("size"))
+		p := alloc.Call("p", "malloc", vir.Ident("size"))
 		alloc.Return(p)
 
 		free := m.DeclareFunction(MemFree.Func,
 			[]vir.Param{{Name: "p", Type: vir.Ptr}}, vir.Void, true)
-		free.Call("", "libc_free", vir.Ident("p"))
+		free.Call("", "free", vir.Ident("p"))
 		free.Return()
 	}
 
