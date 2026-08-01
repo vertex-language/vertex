@@ -494,7 +494,16 @@ func (b *funcBuilder) externCallExpr(x *ast.CallExpr, ef *ExternFunc) Value {
 		// parameter and one reaching the `...` tail alike, since a
 		// variadic position has no declared Param for foreignParam to
 		// have marked in the first place.
-		if b.l.classify(b.info().TypeOf(a)) == kString {
+		//
+		// b.externArgType, not b.info().TypeOf, decides this: the
+		// analyzer's phase 3 (resolve.go's checkBodies) resolves
+		// identifiers only and "computes no types for expressions", so a
+		// literal argument reaching a call directly — never bound to a
+		// name, never assigned — has no Types[e] entry to read. TypeOf's
+		// own fallback recovers a bare identifier through ObjectOf, but
+		// nothing recovers a bare literal; externArgType is that recovery,
+		// scoped to exactly the classification this call needs.
+		if b.l.classify(b.externArgType(a)) == kString {
 			buf := b.cStringArg(a)
 			args = append(args, buf)
 			temps = append(temps, buf)
@@ -510,6 +519,44 @@ func (b *funcBuilder) externCallExpr(x *ast.CallExpr, ef *ExternFunc) Value {
 		b.callBuiltin(pos, symMemFree, Void, t)
 	}
 	return res
+}
+
+// externArgType is TypeOf with one extra fallback, needed only at an
+// extern call boundary: b.info().TypeOf falls back through ObjectOf for a
+// bare identifier, but has nothing to fall back to for a bare literal
+// argument — analyzer's phase 3 never records a Types[e] entry for one,
+// since resolving identifiers is that phase's whole job (resolve.go's
+// checkBodies doc comment is explicit that it "computes no types for
+// expressions"). A literal reached directly as a call argument, with no
+// let/var binding in between, is exactly that case, and cStringArg's
+// caller needs to know it's looking at a string before it can marshal one.
+//
+// This mirrors basicLit's own recovery for the identical gap, deliberately
+// narrow: it classifies a literal for this one decision and is not a
+// general type-inference fallback. An arbitrary non-literal expression
+// with no recorded type (e.g. one produced by a construct the checker
+// doesn't yet type) still returns nil here, exactly as TypeOf would.
+func (b *funcBuilder) externArgType(a ast.Expr) types.Type {
+	if t := b.info().TypeOf(a); t != nil {
+		return t
+	}
+	lit, ok := unparen(a).(*ast.BasicLit)
+	if !ok {
+		return nil
+	}
+	switch lit.Kind.String() {
+	case "STRING":
+		return types.Typ[types.String]
+	case "CHAR":
+		return types.Typ[types.Char]
+	case "TRUE", "FALSE":
+		return types.Typ[types.Bool]
+	case "INT":
+		return types.Typ[types.Int]
+	case "FLOAT":
+		return types.Typ[types.Float64]
+	}
+	return nil
 }
 
 // cStringArg marshals a Vertex string argument into a heap buffer holding
