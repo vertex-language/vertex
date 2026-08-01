@@ -1,6 +1,10 @@
 package builtins
 
-import "sort"
+import (
+	"sort"
+
+	vir "github.com/vertex-language/vvm/ir/vir"
+)
 
 // Feature names one language capability a program either uses or does not.
 // lower/hir already knows whether a program contains a map, a chan, an async
@@ -107,4 +111,35 @@ func FeatureFor(s Symbol) (Feature, bool) {
 		}
 	}
 	return 0, false
+}
+
+// moduleBuilders maps a builtin module name to its Go constructor. Only
+// modules actually implemented in Go so far are registered; a Feature
+// whose module has no entry here is silently skipped by BuildModules
+// rather than panicking, since most of tier 0/1 (§5.1) is still todo — see
+// lower/hir's own todo: convention for the same reason.
+var moduleBuilders = map[string]func(vir.Target) *vir.Module{
+	ModuleMemory: Memory,
+	ModulePanic:  PanicModule,
+}
+
+// BuildModules resolves s's closure into the concrete *vir.Module values a
+// build must link in, for target t. Only names.go's Symbol/Module
+// constants are read here — never hir internals — matching this
+// package's invariant 10 (lower/hir sees only names.go's ABI constants,
+// never how a callee module is actually built).
+//
+// Order follows s.Modules()'s own sort, so a build's module list — and
+// therefore any diagnostic naming a module index — doesn't depend on map
+// iteration.
+func (s FeatureSet) BuildModules(t vir.Target) []*vir.Module {
+	var out []*vir.Module
+	for _, name := range s.Modules() {
+		build, ok := moduleBuilders[name]
+		if !ok {
+			continue
+		}
+		out = append(out, build(t))
+	}
+	return out
 }

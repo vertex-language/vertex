@@ -3,17 +3,22 @@ package builtins
 
 import vir "github.com/vertex-language/vvm/ir/vir"
 
-// Panic returns the "panic" builtins module for t: currently just oom,
-// which hir/builtin.go's builtinNew/builtinBox call on an allocation
+// PanicModule returns the "panic" builtins module for t: currently just
+// oom, which hir/builtin.go's builtinNew/builtinBox call on an allocation
 // failure this package made on the program's behalf (A.10.1's split
 // between new/resize failing politely and unique/shared panicking).
+//
+// Named PanicModule rather than Panic because names.go already declares
+// Panic as a Symbol (ModulePanic, "panic") — the entry point a call site
+// names, as distinct from the *vir.Module constructor building the module
+// that entry point lives in.
 //
 // oom writes a fixed message to stderr via libc write(2)/WriteFile, then
 // traps — vir's own §5.3 trap terminator, not a returning call, so a
 // caller never needs an unreachable check beyond what hir already emits.
-func Panic(t vir.Target) *vir.Module {
-	m := vir.NewModule("panic")
-	m.SetNamespace("builtins")
+func PanicModule(t vir.Target) *vir.Module {
+	m := vir.NewModule(ModulePanic)
+	m.SetNamespace(Namespace)
 	m.SetTarget(t.Arch, t.OS, t.ABI, t.Tiers...)
 
 	msg := "vertex: out of memory\n"
@@ -32,12 +37,11 @@ func Panic(t vir.Target) *vir.Module {
 			{Name: "lpOverlapped", Type: vir.Ptr},
 		}, vir.I32)
 
-		g := m.DeclareGlobal("oom_msg",
-			vir.ArrayType{Elem: vir.I8, Len: int(len(msg))},
+		m.DeclareGlobal("oom_msg",
+			vir.ArrayType{Elem: vir.I8, Len: len(msg)},
 			vir.InitByteString{Data: []byte(msg)})
-		_ = g
 
-		fb := m.DeclareFunction("oom", nil, vir.Void, true)
+		fb := m.DeclareFunction(PanicOOM.Func, nil, vir.Void, true)
 		// STD_ERROR_HANDLE = -12 (0xFFFFFFF4 as i32)
 		h := fb.Call("h", "GetStdHandle", vir.IntLiteral(-12))
 		written := fb.Alloca("written", vir.IntLiteral(4), 4)
@@ -63,7 +67,7 @@ func Panic(t vir.Target) *vir.Module {
 			vir.ArrayType{Elem: vir.I8, Len: len(msg)},
 			vir.InitByteString{Data: []byte(msg)})
 
-		fb := m.DeclareFunction("oom", nil, vir.Void, true)
+		fb := m.DeclareFunction(PanicOOM.Func, nil, vir.Void, true)
 		fb.Call("n", "write", vir.IntLiteral(2), vir.Ident("oom_msg"),
 			vir.IntLiteral(int64(len(msg))))
 		fb.Trap()

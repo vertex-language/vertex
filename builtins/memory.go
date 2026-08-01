@@ -10,8 +10,8 @@ import vir "github.com/vertex-language/vvm/ir/vir"
 // in lockstep, and a compiled branch can't drift the way three text files
 // edited independently can.
 func Memory(t vir.Target) *vir.Module {
-	m := vir.NewModule("memory")
-	m.SetNamespace("builtins")
+	m := vir.NewModule(ModuleMemory)
+	m.SetNamespace(Namespace)
 	m.SetTarget(t.Arch, t.OS, t.ABI, t.Tiers...)
 
 	switch t.OS {
@@ -30,13 +30,13 @@ func Memory(t vir.Target) *vir.Module {
 			{Name: "lpMem", Type: vir.Ptr},
 		}, vir.I32)
 
-		alloc := m.DeclareFunction("allocate",
+		alloc := m.DeclareFunction(MemAllocate.Func,
 			[]vir.Param{{Name: "size", Type: vir.I64}}, vir.Ptr, true)
 		heap := alloc.Call("heap", "GetProcessHeap")
 		p := alloc.Call("p", "HeapAlloc", heap, vir.IntLiteral(0), vir.Ident("size"))
 		alloc.Return(p)
 
-		free := m.DeclareFunction("free",
+		free := m.DeclareFunction(MemFree.Func,
 			[]vir.Param{{Name: "p", Type: vir.Ptr}}, vir.Void, true)
 		heap2 := free.Call("heap", "GetProcessHeap")
 		free.Call("ok", "HeapFree", heap2, vir.IntLiteral(0), vir.Ident("p"))
@@ -59,12 +59,12 @@ func Memory(t vir.Target) *vir.Module {
 		lib.DeclareFunction("libc_free",
 			[]vir.Param{{Name: "p", Type: vir.Ptr}}, vir.Void)
 
-		alloc := m.DeclareFunction("allocate",
+		alloc := m.DeclareFunction(MemAllocate.Func,
 			[]vir.Param{{Name: "size", Type: vir.I64}}, vir.Ptr, true)
 		p := alloc.Call("p", "libc_malloc", vir.Ident("size"))
 		alloc.Return(p)
 
-		free := m.DeclareFunction("free",
+		free := m.DeclareFunction(MemFree.Func,
 			[]vir.Param{{Name: "p", Type: vir.Ptr}}, vir.Void, true)
 		free.Call("", "libc_free", vir.Ident("p"))
 		free.Return()
