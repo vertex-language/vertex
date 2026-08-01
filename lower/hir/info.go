@@ -40,6 +40,22 @@ func (l *lowerer) markerOf(f *Func) string {
 	return sig.Marker().String()
 }
 
+// suspends reports whether fn's own signature carries A.6.1's suspend
+// marker. It answers the same question as markerOf, but against a checked
+// *types.Func directly rather than a lowered *hir.Func with an Origin —
+// which is what buildEntry has in hand for main/the test function before
+// any *hir.Func shell exists for it.
+func (l *lowerer) suspends(fn *types.Func) bool {
+	if fn == nil {
+		return false
+	}
+	sig := fn.Signature()
+	if sig == nil {
+		return false
+	}
+	return sig.Marker().String() == "async"
+}
+
 // isMutParam reports A.3.2's `mut` convention: exclusive, non-owning,
 // mutating. It lowers to a pointer parameter the callee writes through.
 func (l *lowerer) isMutParam(obj types.Object) bool {

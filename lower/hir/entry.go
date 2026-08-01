@@ -10,12 +10,17 @@ import (
 // Vertex's main takes no parameters and returns nothing (A.6.1) but sets
 // [+Await], so it may suspend. vir's entry is `export fn main() i32 entry`,
 // and vvm's crt synthesizes the process-entry stub around it. So the thing
-// in between — start the reactor, drive user main to completion, tear down,
-// return a status — is synthesized here.
+// in between — start the reactor, drive user main to completion, tear
+// down, return a status — is synthesized here, and only when main's own
+// marker says it can actually suspend. A program whose main never awaits
+// gets no reactor wiring at all: no ReactorStart/ReactorShutdown calls, no
+// FeatReactor need, and therefore no `import "reactor"` in the emitted
+// module for a build that never asked for one.
 //
 // Under ModeTest the same slot holds a wrapper around one test function:
-// start the reactor, drive it, render its result through fmt to console,
-// tear down, return 0. One seam, two occupants, and both are tier 2.
+// start the reactor (if the test function suspends), drive it, render its
+// result through fmt to console, tear down, return 0. One seam, two
+// occupants, and both are tier 2.
 func (l *lowerer) buildEntry(u *Unit, user *types.Func) {
 	mod := l.byUnit[u]
 	f := &Func{
@@ -34,8 +39,16 @@ func (l *lowerer) buildEntry(u *Unit, user *types.Func) {
 	defer func() { l.cur = prev }()
 
 	b := newFuncBuilder(l, f, nil)
-	l.need(builtins.FeatReactor)
-	b.callBuiltin(0, builtins.ReactorStart, Void)
+
+	// Only wire in the reactor if main/the test function can actually
+	// suspend (A.6.1's [+Await] marker). Every program pays the feature
+	// floor regardless (see features.go); the reactor is not part of that
+	// floor and must not be assumed.
+	needsReactor := l.suspends(user)
+	if needsReactor {
+		l.need(builtins.FeatReactor)
+		b.callBuiltin(0, builtins.ReactorStart, Void)
+	}
 
 	target := l.work.lookup(user, nil)
 	if target == nil {
@@ -48,7 +61,9 @@ func (l *lowerer) buildEntry(u *Unit, user *types.Func) {
 		}
 	}
 
-	b.callBuiltin(0, builtins.ReactorShutdown, Void)
+	if needsReactor {
+		b.callBuiltin(0, builtins.ReactorShutdown, Void)
+	}
 	b.seq.add(&Return{Value: ptrTo(IntVal(I32, 0))})
 }
 
