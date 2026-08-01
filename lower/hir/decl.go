@@ -210,6 +210,7 @@ func (l *lowerer) param(name string, t types.Type) *Param {
 // signature call is undefined behavior — not a diagnostic the verifier is
 // obligated to catch).
 //
+//
 // A.1.5.2 already names the fix rather than leaving it to be invented:
 // "a string carries no NUL terminator; one is manufactured only at a
 // declare boundary." So a `string` parameter here lowers to a bare `ptr`
