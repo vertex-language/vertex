@@ -303,6 +303,22 @@ func (d *DeclareDecl) Pos() token.Pos    { return d.Declare }
 func (d *ForeignClass) Pos() token.Pos   { return d.Class }
 func (d *BadDecl) Pos() token.Pos        { return d.From }
 
+// A.7.2 guarantees exactly one of Set/Method is non-nil, so the element's
+// extent is whichever one is present.
+func (e *ConstraintElem) Pos() token.Pos {
+	if e.Set != nil {
+		return e.Set.Pos()
+	}
+	return e.Method.Pos()
+}
+
+func (e *ConstraintElem) End() token.Pos {
+	if e.Set != nil {
+		return e.Set.End()
+	}
+	return e.Method.End()
+}
+
 func (d *ForeignFunc) Pos() token.Pos {
 	if len(d.Modifiers) > 0 {
 		return d.Modifiers[0].Pos()
