@@ -56,8 +56,8 @@ GOPROXY=direct go install github.com/vertex-language/vertex@latest
 Verify:
 
 ```sh
-vertex -version
-# vertex 0.4.0
+vertex version
+# vertex 0.4.0 (spec 2.2)
 ```
 
 ---
@@ -1461,99 +1461,133 @@ into a compile-time proof or a visible piece of syntax.
 
 ## Compiler Reference
 
-The compiler transforms `.vs` source through a four-stage pipeline:
+`vertex` compiles through one pipeline, orchestrated by `driver` and ending
+either in vvm's own IR encoders or in vvm's own native-image builder — this
+package makes the decisions, vvm does the verifying, lowering, and linking:
 
 ```
-.vs source → AST → Vertex IR (.vir / .vbytes) → Machine IR (.mir) → native code
+<file.vs | dir>
+     │  parser + analyzer (via importer for a package,
+     │           directly for a single file)
+     ▼
+[]*driver.Package  (checked, dependency-first)
+     │  lower/hir.Lower  — every decision made here
+     ▼
+*hir.Program
+     │  lower/vir.Lower  — mechanical
+     ▼
+[]*vir.Module  (unverified; ir/verify is vvm's to run)
+     │
+     ├─ -emit-vir / -emit-vbyte ── format/vbyte/{text,binary}.Encode ─► files
+     └─ (default)      ────────── vvm.BuildModule / BuildModuleGraph ─► image
 ```
+
+There is no separately-exposed Machine IR, assembly, or object-file stage:
+those are internal to vvm's own build pipeline, and there is no optimizer in
+either tree to gate with an `-O` flag.
 
 ```text
 Usage:
-  vertex [flags] <source.vs | package/>
+  vertex [build] [flags] <file.vs | package-dir>
+      Compile a package to a native executable for the host or -target.
+      The command word is optional: "vertex main.vs" is "vertex build main.vs".
 
-Emit mode (default: compile and link to native executable):
-  -emit-vir             emit Vertex IR text (.vir)
-  -emit-vbytes          emit Vertex IR binary (.vbytes)
-  -emit-mir             emit Machine IR text (.mir)
-  -emit-asm             emit native assembly text (.s)
-  -emit-obj, -c         emit relocatable object file (.o / .obj)
-  -dump, -dump-all      dump all pipeline stages (.dump)
-  -test                 discover and run test functions
+  vertex run [flags] <file.vs | package-dir> [-- args...]
+      Build for the host, execute immediately, forward the exit code.
+      Anything after -- is passed to the compiled program, not to vertex.
 
-Test options:
-  -dir  <path>     directory to search recursively (default: .)
-  -file <path>     single test file
+  vertex test [-dir <path> | -file <path>] [-run <substr>]
+      Discover 'test'-marked functions in a `build test` package and run
+      them, comparing each against its Expected(...) result.
 
-Options:
-  -o <file>        output file (default: derived from input)
-  -target <triple> linux-amd64, linux-arm64, linux-riscv64,
-                   darwin-amd64, darwin-arm64,
-                   windows-amd64, windows-arm64,
-                   freestanding-amd64, freestanding-arm64,
-                   freestanding-riscv64  (default: host OS/Arch)
-  -sysroot <path>  sysroot for cross-compilation library search
-  -packages-dir    Vertex packages root (overrides $VERTEX_PATH)
-  -O0/-O1/-O2/-Os  optimisation level (default: -O0)
-  -g               include debug information
-  -v, -version     print version and exit
+  vertex targets
+      List every target this toolchain can actually build for.
+
+  vertex version | help
+
+Build flags:
+  -o <path>             output file (default: derived from the input name).
+                          For -emit-vir/-emit-vbyte on a multi-package build,
+                          this must be a directory — one file per package.
+  -target <triple>      see "vertex targets"; defaults to the host
+  -min-os-version <v>   required for darwin targets; defaults to 14.0
+  -shared               build a shared library instead of an executable
+  -flat-base <addr>     load address for a freestanding flat image
+  -root <module>        override which module's entry function is the
+                          program's entry point (default: the package
+                          holding main)
+  -packages-dir <path>  packages root; overrides $VERTEX_PATH
+  -emit-vir             emit Vertex IR text (.vir), one file per package
+  -emit-vbyte           emit Vertex IR binary (.vbyte), one file per package
+  -v                    report each pipeline stage on stderr
+
+Run flags:
+  -packages-dir <path>  packages root; overrides $VERTEX_PATH
+  -v                     report each pipeline stage on stderr
+
+Test flags:
+  -dir <path>            directory holding `build test` files (default: .)
+  -file <path>           a single test file
+  -run <substr>          only run tests whose name contains this substring
+  -packages-dir <path>   packages root; overrides $VERTEX_PATH
+  -v                      print every test, not just failures
 ```
 
 **Examples:**
 
 ```sh
-vertex -o main        main.vs
-vertex -o main        -target darwin-arm64 -O2 main.vs
-vertex -c           -o main.o      main.vs
-vertex -emit-asm    -o main.s      main.vs
-vertex -emit-mir    -o main.mir    main.vs
-vertex -emit-vir    -o main.vir    main.vs
-vertex -emit-vbytes -o main.vbytes main.vs
-vertex -dump        -o main.dump   main.vs
-vertex -dump        -o -           main.vs
-vertex -test
-vertex -test -dir ./tests
-vertex -test -file literals_test.vs
+vertex main.vs
+vertex -o app ./cmd/app
+vertex build -target darwin-arm64 -o app main.vs
+vertex run main.vs -- --verbose
+vertex build -emit-vir -o build/ ./cmd/app
+vertex test -dir ./tests
+vertex test -file literals_test.vs -run comparison
+vertex targets
+vertex version
 ```
 
-| Mode | Output | Use case |
+| Command | Output | Use case |
 | --- | --- | --- |
-| *(default)* | executable | fully linked native binary |
-| `-emit-vir` | `.vir` | human-readable Vertex IR; inspect lowering |
-| `-emit-vbytes` | `.vbytes` | binary Vertex IR; incremental build cache |
-| `-emit-mir` | `.mir` | SSA Machine IR; inspect register allocation |
-| `-emit-asm` | `.s` | native assembly; inspect code generation |
-| `-c` / `-emit-obj` | `.o` / `.obj` | relocatable object; link separately |
-| `-dump` | `.dump` | all annotated pipeline stages in one file |
-| `-test` | *console* | execute `test` functions directly |
+| `vertex` / `vertex build` | executable (or `-shared` library) | the default: fully linked native binary |
+| `vertex build -emit-vir` | `.vir` per package | human-readable Vertex IR; inspect lowering |
+| `vertex build -emit-vbyte` | `.vbyte` per package | binary Vertex IR |
+| `vertex run` | *(runs immediately)* | build for the host and execute in one step |
+| `vertex test` | *console* | discover and run `test`-marked functions |
+| `vertex targets` | *console* | list every buildable target, marking the host |
 
-`$VERTEX_PATH` sets the packages root; `-packages-dir` overrides it. When neither
-is set, the compiler defaults to `~/.vertex/packages`.
+`$VERTEX_PATH` sets the packages root; `-packages-dir` overrides it. When
+neither is set, the compiler defaults to `~/.vertex/packages`.
 
 A `-target` must be compatible with a file's `build` tag; a file whose tag does
-not match is excluded from the build whole, never partially. An unrecognised tag
-is a compile error, not a silently-excluded file.
+not match is excluded from the build whole, never partially. An unrecognized
+target name is a compile error naming the known set, not a silent fallback.
 
 ---
 
 ## Platform Support
 
-| Target | Object file (`-c`) | Executable (default) | Assembly (`-emit-asm`) |
+Every target below has a `cpu/lower`, an `object` writer, and either a
+registered linker or a flat writer in vvm — `vertex targets` reports the same
+list at runtime, marking the host with `*`.
+
+| Target | `vertex build` (executable) | `-shared` | `-emit-vir` / `-emit-vbyte` |
 | --- | --- | --- | --- |
 | `linux-amd64` | yes | yes | yes |
 | `linux-arm64` | yes | yes | yes |
-| `linux-riscv64` | — | — | yes (`-emit-asm` only) |
 | `darwin-amd64` | yes | yes | yes |
 | `darwin-arm64` | yes | yes | yes |
 | `windows-amd64` | yes | yes | yes |
 | `windows-arm64` | yes | yes | yes |
-| `freestanding-amd64` | yes | — | yes |
-| `freestanding-arm64` | yes | — | yes |
-| `freestanding-riscv64` | — | — | yes (`-emit-asm` only) |
+| `freestanding-amd64` | flat image only; single package, entry must be `_start` | no — flat has no loader | yes |
+| `freestanding-arm64` | flat image only; single package, entry must be `_start` | no — flat has no loader | yes |
 
-Freestanding targets produce object files only; executable linking is not
-supported.
-
-Upcoming targets: `browser/wasm`, `android`, `browser/js`.
+`linux-riscv64` and every powerpc/mips/loongarch/s390x spelling are valid
+`.vir` target triples per the language spec but have no `cpu/lower`, object,
+or linker implementation in vvm, so they don't appear above. `linux-386` and
+`windows-386` are similarly absent: vvm emits x86 ELF object bytes but
+registers no ELF linker backend for x86. `browser/wasm`, `browser/js`, and
+`android` have no backend at all yet.
 
 ---
 

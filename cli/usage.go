@@ -53,16 +53,5 @@ Examples:
   vertex run main.vs -- --verbose
   vertex build -emit-vir -o build/ ./cmd/app
   vertex test -dir ./tests
-
-Not supported (and why):
-  -emit-mir, -emit-asm, -c/-emit-obj, -dump
-      vvm's public API emits linked images or Vertex IR — its object,
-      assembly, and machine-IR stages are internal to its own pipeline.
-  -O0/-O1/-O2/-Os, -g, -sysroot
-      No optimizer exists; host debug info and sysroot search are both
-      unimplemented in vvm. These error out rather than being ignored.
-  gpu/npu offload
-      lower/ has no gvir counterpart, so no .gvir is ever produced. The
-      launch call site type-checks; the kernel body has nowhere to go.
 `, driver.Version, driver.SpecVersion, driver.DefaultMinOSVersion)
 }
