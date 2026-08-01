@@ -2,6 +2,8 @@
 package hir
 
 import (
+	"fmt"
+	"os"
 	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/types"
 )
@@ -164,6 +166,7 @@ func (l *lowerer) foreignMembers(u *Unit, mod *Module, g *ExternGroup, members [
 			if obj == nil {
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "BIND %s: obj=%p\n", mem.Name.Name, obj)
 			sig, _ := obj.Type().(*types.Signature)
 			ef := &ExternFunc{Name: mem.Name.Name, Result: l.result(sig)}
 			for _, p := range paramsOf(sig) {

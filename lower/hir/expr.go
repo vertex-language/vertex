@@ -3,7 +3,8 @@ package hir
 
 import (
 	"strconv"
-
+	"fmt"
+	"os"
 	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/token"
 	"github.com/vertex-language/vertex/types"
@@ -427,6 +428,11 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 	fun := unparen(x.Fun)
 
 	if id, ok := fun.(*ast.Ident); ok {
+		if id.Name == "printf" {
+			o := b.info().ObjectOf(id)
+			fmt.Fprintf(os.Stderr, "CALL %s: obj=%p externFound=%v\n",
+				id.Name, o, b.l.externFor(o) != nil)
+		}
 		if bi, isBuiltin := b.info().ObjectOf(id).(*types.Builtin); isBuiltin {
 			return b.builtinCall(x, bi)
 		}
