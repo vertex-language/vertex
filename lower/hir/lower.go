@@ -75,10 +75,12 @@ func Lower(conf *Config, units []*Unit) (*Program, error) {
 		units:   units,
 		modules: map[string]*Module{},
 		byUnit:  map[*Unit]*Module{},
+		globals: map[types.Object]*globalBinding{},
 		prog:    &Program{},
 	}
 	l.types = newTypeLowerer(l)
 	l.work = newWorklist(l)
+	l.own = newOwnership(l)
 
 	for _, u := range units {
 		m := newModule(u.Path, u.Name)
@@ -140,6 +142,11 @@ type lowerer struct {
 	work  *worklist
 	own   *ownership
 
+	// globals maps a top-level object to where it landed: a vir const with
+	// no runtime storage, or module-level storage reached by address. See
+	// info.go's globalBinding.
+	globals map[types.Object]*globalBinding
+
 	feats builtins.FeatureSet
 
 	// cur is the instance being lowered: which unit's Info to read, which
@@ -172,7 +179,7 @@ func (l *lowerer) subst(t types.Type) types.Type {
 	if l.cur == nil || len(l.cur.subst) == 0 || t == nil {
 		return t
 	}
-	return types.Substitute(t, l.cur.subst)
+	return substitute(t, l.cur.subst)
 }
 
 func (l *lowerer) hirType(t types.Type) Type {

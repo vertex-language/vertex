@@ -379,7 +379,7 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 		}
 	}
 	if sel, ok := fun.(*ast.SelectorExpr); ok {
-		if s := b.info().Selections[sel]; s != nil && s.Kind() == types.MethodVal {
+		if s := b.info().Selections[sel]; s != nil && s.Kind == types.MethodVal {
 			return b.methodCall(x, sel, s)
 		}
 	}
@@ -428,7 +428,7 @@ func (b *funcBuilder) arguments(x *ast.CallExpr, target *Func) []Value {
 }
 
 func (b *funcBuilder) methodCall(x *ast.CallExpr, sel *ast.SelectorExpr, s *types.Selection) Value {
-	fn, ok := s.Obj().(*types.Func)
+	fn, ok := s.Obj.(*types.Func)
 	if !ok {
 		return Value{}
 	}
@@ -472,8 +472,8 @@ func (b *funcBuilder) resolveCallee(fun ast.Expr) (*Func, []Value) {
 			}
 		}
 	case *ast.SelectorExpr:
-		if s := b.info().Selections[f]; s != nil && s.Kind() == types.PackageMember {
-			if fn, ok := s.Obj().(*types.Func); ok {
+		if s := b.info().Selections[f]; s != nil && s.Kind == types.PackageMember {
+			if fn, ok := s.Obj.(*types.Func); ok {
 				return b.instantiate(fn, f.Sel), nil
 			}
 		}
@@ -507,7 +507,7 @@ func (b *funcBuilder) selector(x *ast.SelectorExpr) Value {
 	if s == nil {
 		return b.expr(x.Sel)
 	}
-	switch s.Kind() {
+	switch s.Kind {
 	case types.FieldVal:
 		base := b.addressOf(x.X)
 		st, ok := b.l.hirType(b.info().TypeOf(x.X)).(StructType)
@@ -524,7 +524,7 @@ func (b *funcBuilder) selector(x *ast.SelectorExpr) Value {
 		b.l.todo(x.Pos(), "namespace member %s — async/gpu/npu/chan namespaces", x.Sel.Name)
 		return Value{}
 	}
-	b.l.todo(x.Pos(), "selector kind %v", s.Kind())
+	b.l.todo(x.Pos(), "selector kind %v", s.Kind)
 	return Value{}
 }
 

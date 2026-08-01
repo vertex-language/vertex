@@ -165,7 +165,7 @@ func (b *funcBuilder) callExtern(pos token.Pos, name string, result Type, args .
 // and never through string literals, so there is one place to grep and one
 // place the build breaks when a signature changes.
 func (b *funcBuilder) callBuiltin(pos token.Pos, s builtinSymbol, result Type, args ...Value) Value {
-	b.l.needSymbol(s.Symbol)
+	b.l.needSymbol(s)
 	b.mod().AddImport(s.Module)
 	name := ""
 	if !IsVoid(result) {
