@@ -328,6 +328,9 @@ func Representable(v Value, b *Basic) bool {
 		if !ok {
 			return false
 		}
+		if b.is(InfoUntyped) {
+			return true
+		}
 		r, ok := intRanges[b.kind]
 		if !ok {
 			return false
