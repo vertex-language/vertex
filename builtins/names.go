@@ -61,10 +61,21 @@ func (s Symbol) ImportPath() string { return Namespace + "/" + s.Module }
 // exactly these three.
 var (
 	MemAllocate = Symbol{ModuleMemory, "allocate"} // (size i64) -> ptr, null on failure
-	MemFree     = Symbol{ModuleMemory, "free"}     // (p ptr) -> void
-	MemResize   = Symbol{ModuleMemory, "resize"}   // (p ptr, size i64) -> ptr
+
+	// MemFree is the module's own exported wrapper around the real libc
+	// free(3), named "dealloc" rather than "free" deliberately: memory.go
+	// declares the real libc symbol as an extern under the literal name
+	// "free" (an extern's declared name is always the bare, verbatim ABI
+	// symbol it names — cpu/lower/<arch>'s own contract), so this wrapper
+	// cannot also be called "free" without colliding in the module's flat
+	// namespace (§2.2 forbids exactly this: "name %q declared twice").
+	// Every call site reaches this through the Symbol value, never a
+	// hardcoded string, so the rename is safe to make here alone.
+	MemFree = Symbol{ModuleMemory, "dealloc"} // (p ptr) -> void
+
+	MemResize         = Symbol{ModuleMemory, "resize"} // (p ptr, size i64) -> ptr
 	MemAlignedAllocate = Symbol{ModuleMemory, "allocate_aligned"}
-	MemZero     = Symbol{ModuleMemory, "zero"} // (p ptr, len i64) -> void
+	MemZero           = Symbol{ModuleMemory, "zero"} // (p ptr, len i64) -> void
 )
 
 // Reference counting: `shared T` retain/release, `weak T`, and upgrade's
