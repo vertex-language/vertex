@@ -166,7 +166,16 @@ func (b *funcBuilder) callExtern(pos token.Pos, name string, result Type, args .
 // place the build breaks when a signature changes.
 func (b *funcBuilder) callBuiltin(pos token.Pos, s builtinSymbol, result Type, args ...Value) Value {
 	b.l.needSymbol(s)
-	b.mod().AddImport(s.Module)
+	// AddImport takes the full "namespace/module" path (§7.3) — every
+	// builtin module declares Namespace ("builtins", names.go), so the
+	// bare module name alone would leave vvm's importer with nothing to
+	// resolve against ("import \"memory\" does not resolve to any known
+	// module"). The call's own Callee.Module below stays the bare module
+	// name deliberately: §2.3's qualified-ident grammar is
+	// `ident "." ident`, never namespace-qualified, so "memory.allocate"
+	// is the correct call-site spelling even though "builtins/memory" is
+	// what the import line needs to say to make that name resolvable.
+	b.mod().AddImport(s.ImportPath())
 	name := ""
 	if !IsVoid(result) {
 		name = b.fn.fresh(s.Func)
