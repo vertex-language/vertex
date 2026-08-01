@@ -3,6 +3,7 @@ package hir
 import (
 	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/builtins"
+	"github.com/vertex-language/vertex/token"
 	"github.com/vertex-language/vertex/types"
 )
 
@@ -40,8 +41,8 @@ var (
 const builtinFeatureString = builtins.FeatString
 
 // builtinCall lowers A.4.8's builtin call forms. Builtins get no node of
-// their own in the tree — they are ordinary call syntax over reserved,
-// unshadowable names — so dispatch is by the object's spelling.
+// their own — they are ordinary call syntax over reserved, unshadowable
+// names — so dispatch is by the object's spelling.
 func (b *funcBuilder) builtinCall(x *ast.CallExpr, bi *types.Builtin) Value {
 	pos := x.Pos()
 	switch bi.Name() {
@@ -198,4 +199,28 @@ func (b *funcBuilder) builtinBox(x *ast.CallExpr, sym builtins.Symbol) Value {
 	}
 	b.store(pos, hi, h, v)
 	return h
+}
+
+// callBuiltin emits a qualified call into a builtin module and records the
+// feature. lower/hir references builtin symbols through builtins' constants
+// and never through string literals, so there is one place to grep and one
+// place the build breaks when a signature changes.
+func (b *funcBuilder) callBuiltin(pos token.Pos, s builtinSymbol, result Type, args ...Value) Value {
+	b.l.needSymbol(s)
+	// AddImport takes the full "namespace/module" path (§7.3) — every
+	// builtin module declares Namespace ("builtins", names.go), so the
+	// bare module name alone would leave vvm's importer with nothing to
+	// resolve against ("import \"memory\" does not resolve to any known
+	// module"). The call's own Callee.Module below stays the bare module
+	// name deliberately: §2.3's qualified-ident grammar is
+	// `ident "." ident`, never namespace-qualified, so "memory.allocate"
+	// is the correct call-site spelling even though "builtins/memory" is
+	// what the import line needs to say to make that name resolvable.
+	b.mod().AddImport(s.ImportPath())
+	name := ""
+	if !IsVoid(result) {
+		name = b.fn.fresh(s.Func)
+	}
+	return b.emit(&Instr{Pos: pos, Name: name, Op: OpCall, Type: result, Args: args,
+		Call: &Callee{Module: s.Module, Name: s.Func}})
 }

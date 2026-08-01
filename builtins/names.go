@@ -48,6 +48,15 @@ type Symbol struct {
 
 func (s Symbol) String() string { return s.Module + "." + s.Func }
 
+// ImportPath is the vir §7.3 import-path spelling for the module this
+// symbol lives in: "namespace/module", since every builtin module
+// declares Namespace via SetNamespace (memory.go, panic.go, ...). This is
+// distinct from the bare module name used at a call site — §2.3's
+// qualified-ident grammar is `ident "." ident`, module name only, no
+// namespace — so a call stays `memory.allocate` while the import line
+// that makes that name resolvable must be `builtins/memory`.
+func (s Symbol) ImportPath() string { return Namespace + "/" + s.Module }
+
 // The heap door (§5.2, tier 0). Everything that allocates goes through
 // exactly these three.
 var (
