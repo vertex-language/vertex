@@ -9,6 +9,7 @@ package driver
 import (
 	"fmt"
 
+	"github.com/vertex-language/vertex/builtins"
 	"github.com/vertex-language/vertex/lower/hir"
 	lowervir "github.com/vertex-language/vertex/lower/vir"
 	virmod "github.com/vertex-language/vvm/ir/vir"
@@ -33,6 +34,17 @@ type LowerOptions struct {
 // decision (ownership, monomorphization, control-flow flattening) and
 // lower/vir is mechanical afterward. If this function ever needs to
 // inspect what came out, that inspection belongs upstream.
+//
+// A third step follows both: hir.Program.Features names which builtin
+// modules (memory, panic, ...) the program's emitted calls actually need
+// — recorded via hir's own l.need at every builtin call site, so this set
+// can never disagree with what got emitted. builtins.Modules resolves
+// that set into real *vir.Module values, constructed directly in Go
+// against builder.go's API rather than parsed from a hand-maintained .vir
+// text source per target. Appending them here, after lower/vir's own
+// modules and before this function returns, is what makes an `import
+// "memory"` line in hir's output resolve to something real once vvm's
+// importer walks the returned module list.
 func Lower(opts *Options, t Target, pkgs []*Package, lo LowerOptions) ([]*virmod.Module, string, error) {
 	units := hirUnits(pkgs)
 
@@ -48,6 +60,12 @@ func Lower(opts *Options, t Target, pkgs []*Package, lo LowerOptions) ([]*virmod
 	}
 	if len(modules) == 0 {
 		return nil, "", fmt.Errorf("lower/vir produced no modules")
+	}
+
+	builtinModules := builtins.Modules(prog.Features, virConfig(t).Target)
+	if len(builtinModules) > 0 {
+		opts.logf("builtins: %d module(s) resolved from feature set", len(builtinModules))
+		modules = append(modules, builtinModules...)
 	}
 
 	return modules, lowervir.Root(prog), nil
@@ -91,6 +109,11 @@ func hirUnits(pkgs []*Package) []*hir.Unit {
 // a `link` section (§2.1 makes `target` mandatory exactly there). The OS
 // half already came from each file's build clause; the arch and ABI are
 // the driver's to supply, which is the whole reason Config has this field.
+//
+// Also the source builtins.Modules reads its vir.Target from, via
+// virConfig(t).Target in Lower above — the builtin modules must declare
+// the identical triple lower/vir wrote into the program's own modules, or
+// vvm's importer would see a target mismatch across the module graph.
 func virConfig(t Target) *lowervir.Config {
 	return &lowervir.Config{
 		Target: virmod.Target{
