@@ -64,7 +64,7 @@ func hirConfig(t Target, lo LowerOptions) *hir.Config {
 	c := &hir.Config{
 		// Layout is the one target-shaped fact hir consumes, and the
 		// driver is what chooses it — hir never sees a triple.
-		Sizes: t.Sizes,
+		Sizes: *t.Sizes,
 	}
 	if lo.TestFunc != "" {
 		c.Mode = hir.ModeTest
