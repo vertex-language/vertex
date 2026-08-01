@@ -29,7 +29,7 @@ const DefaultMinOSVersion = "14.0"
 type Target struct {
 	Name   string
 	Tag    token.BuildTag
-	Sizes  types.Sizes
+	Sizes  *types.Sizes
 	VVM    vvm.Target
 	Linked bool   // vvm can produce a finished image for this cell
 	Note   string // shown by `vertex targets`
@@ -107,7 +107,7 @@ func ResolveTarget(req targetRequest) (Target, error) {
 	t := Target{
 		Name:   name,
 		Tag:    spec.tag,
-		Sizes:  types.SizesFor(spec.tag),
+		Sizes:  types.SizesFor(spec.arch),
 		Linked: spec.linked,
 		Note:   spec.note,
 		VVM: vvm.Target{

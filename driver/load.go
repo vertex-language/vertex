@@ -174,7 +174,7 @@ func resolverFor(opts *Options) (importer.Resolver, error) {
 		return nil, fmt.Errorf("resolving the current directory: %w", err)
 	}
 	roots = append(roots, cwd)
-	return importer.NewDirResolver(roots...), nil
+	return importer.NewDirResolver(roots...)
 }
 
 func importerConfig(opts *Options, lc *loadContext, tag token.BuildTag) (*importer.Config, error) {

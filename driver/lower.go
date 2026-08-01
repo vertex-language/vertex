@@ -93,6 +93,11 @@ func hirUnits(pkgs []*Package) []*hir.Unit {
 // the driver's to supply, which is the whole reason Config has this field.
 func virConfig(t Target) *lowervir.Config {
 	return &lowervir.Config{
-		Target: t.VVM.String(),
+		Target: virmod.Target{
+			Arch:  t.VVM.Arch,
+			OS:    t.VVM.OS,
+			ABI:   t.VVM.ABI,
+			Tiers: t.VVM.Tier,
+		},
 	}
 }
