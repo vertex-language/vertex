@@ -230,14 +230,24 @@ func (b *funcBuilder) binary(x *ast.BinaryExpr) Value {
 	return Value{}
 }
 
-// binaryOp picks the opcode. Signedness lives here and nowhere else: the
-// plain forms trap on overflow while &+ &- &* wrap, and vir's add/sub/mul
-// already wrap modulo 2^N, so the trapping forms need an explicit overflow
-// check.
+// binaryOp picks the opcode for a written operator.
 func (l *lowerer) binaryOp(k token.Kind, t types.Type) Op {
+	return l.binaryOpFor(k.String(), t)
+}
+
+// binaryOpFor is the spelling-keyed table. Signedness lives here and nowhere
+// else: the plain forms trap on overflow while &+ &- &* wrap, and vir's
+// add/sub/mul already wrap modulo 2^N, so the trapping forms need an
+// explicit overflow check.
+//
+// It takes a spelling rather than a token.Kind because a compound assignment
+// must ask the same question about its base operator and token offers no way
+// back from a spelling to a Kind — see stmt.go's compoundBase. One table,
+// two callers, no second place for signedness to be decided.
+func (l *lowerer) binaryOpFor(op string, t types.Type) Op {
 	signed := l.isSigned(t)
 	float := l.classify(t) == kFloat
-	switch k.String() {
+	switch op {
 	case "+", "&+":
 		return OpAdd
 	case "-", "&-":
@@ -275,7 +285,7 @@ func (l *lowerer) binaryOp(k token.Kind, t types.Type) Op {
 	case "!=", "!==":
 		return OpNe
 	}
-	return l.cmpOp(signed, k.String(), t)
+	return l.cmpOp(signed, op, t)
 }
 
 func (l *lowerer) cmpOp(signed bool, k string, t types.Type) Op {

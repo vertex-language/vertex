@@ -108,7 +108,11 @@ func (w *worklist) lowerBody(j job) {
 	w.l.cur = &instance{unit: j.unit, mod: f.Module, subst: subst, depth: j.depth}
 	defer func() { w.l.cur = prev }()
 
-	sig, _ := j.fn.Type().(*types.Signature)
+	// The receiver and the marker both live on the Signature, not on the
+	// Func — A.4.2 makes the marker part of the callee's contract, so it is
+	// part of the type. Everything below therefore reads through here.
+	sig := j.fn.Signature()
+
 	f.Result = w.l.result(sig)
 	if st, ok := f.Result.(StructType); ok {
 		// An aggregate result is written through an sret destination the
@@ -116,13 +120,28 @@ func (w *worklist) lowerBody(j job) {
 		f.Params = append(f.Params, &Param{Name: "sret", Type: Ptr, SRet: st.Def})
 		f.Result = Void
 	}
-	if recv := j.fn.Recv(); recv != nil {
-		f.Params = append(f.Params, w.l.param("self", recv.Type()))
+	if sig != nil {
+		if recv := sig.Recv(); recv != nil {
+			f.Params = append(f.Params, w.l.param("self", recv.Type()))
+		}
 	}
 	for _, p := range paramsOf(sig) {
 		f.Params = append(f.Params, w.l.param(p.Name, p.Type))
 	}
-	f.Export = j.fn.Exported()
+
+	// vir has one flat namespace per module and spells every cross-module
+	// call `module.symbol`, so a callee that is not exported cannot be named
+	// from another module.
+	//
+	// There is no visibility fact for hir to read. ast.FuncDecl carries no
+	// modifier list and types.Func records none; the grammar admits a
+	// visibility modifier only inside a declare block (A.8.3), where it is
+	// banned. So everything lowered is exported. That is sound rather than
+	// merely convenient: monomorphization reaches a function only from a
+	// root, so an unreachable function is never lowered and there is no
+	// private symbol being leaked — the dead-symbol question was removed
+	// upstream rather than answered here.
+	f.Export = true
 
 	b := newFuncBuilder(w.l, f, decl)
 	b.body(decl.Body)
@@ -146,8 +165,8 @@ func substitution(fn *types.Func, args []types.Type) map[*types.TypeParam]types.
 
 func instanceName(fn *types.Func, args []types.Type) string {
 	var sb strings.Builder
-	if recv := fn.Recv(); recv != nil {
-		sb.WriteString(sanitize(types.TypeString(recv.Type())))
+	if sig := fn.Signature(); sig != nil && sig.Recv() != nil {
+		sb.WriteString(sanitize(types.TypeString(sig.Recv().Type())))
 		sb.WriteString("_")
 	}
 	sb.WriteString(fn.Name())
@@ -158,11 +177,13 @@ func instanceName(fn *types.Func, args []types.Type) string {
 	return sb.String()
 }
 
-// sortedTypes gives a deterministic rendering for keys built from a map.
+// sortedTypes gives a deterministic rendering for keys built from a map. A
+// TypeParam carries its own name (A.7.1's TypeParameterList entry), so there
+// is no declaring object to go through.
 func sortedTypes(m map[*types.TypeParam]types.Type) []string {
 	out := make([]string, 0, len(m))
 	for k, v := range m {
-		out = append(out, k.Obj().Name()+"="+types.TypeString(v))
+		out = append(out, k.Name()+"="+types.TypeString(v))
 	}
 	sort.Strings(out)
 	return out

@@ -152,7 +152,7 @@ func (b *funcBuilder) assign(s *ast.AssignStmt) {
 		lhs := b.addressOf(s.Targets[0])
 		cur := b.load(s.Pos(), b.l.hirType(t), lhs)
 		rhs := b.expr(s.Values[0])
-		op := b.l.binaryOp(compoundBase(s.Op), t)
+		op := b.l.binaryOpFor(compoundBase(s.Op), t)
 		res := b.op(s.OpPos, op, b.l.hirType(t), cur, rhs)
 		b.store(s.Pos(), b.l.hirType(t), lhs, res)
 		return
@@ -468,14 +468,19 @@ func (b *funcBuilder) deferStmt(s *ast.DeferStmt) {
 	sc.defers = append(sc.defers, last)
 }
 
-func compoundBase(k token.Kind) token.Kind {
-	// += -> +, <<= -> <<, and so on. token.Kind's spelling is the source
-	// of truth; the analyzer already validated the pair.
+// compoundBase strips a compound assignment down to its base operator:
+// += -> +, <<= -> <<, and so on.
+//
+// It yields a spelling rather than a token.Kind because token offers no
+// reverse lookup from a spelling to a Kind, and reconstructing one by
+// arithmetic on the enum would be a guess about an ordering token never
+// promised. The spelling is the source of truth either way — binaryOp
+// switches on it — so the base travels as a string and binaryOpFor answers
+// the same question expr.go asks. The analyzer already validated the pair.
+func compoundBase(k token.Kind) string {
 	s := k.String()
 	if len(s) > 1 && s[len(s)-1] == '=' {
-		if base, ok := token.LookupOperator(s[:len(s)-1]); ok {
-			return base
-		}
+		return s[:len(s)-1]
 	}
-	return k
+	return s
 }
