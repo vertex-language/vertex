@@ -1,3 +1,4 @@
+// decl.go
 package hir
 
 import (
@@ -166,7 +167,7 @@ func (l *lowerer) foreignMembers(u *Unit, mod *Module, g *ExternGroup, members [
 			sig, _ := obj.Type().(*types.Signature)
 			ef := &ExternFunc{Name: mem.Name.Name, Result: l.result(sig)}
 			for _, p := range paramsOf(sig) {
-				ef.Params = append(ef.Params, l.param(p.Name, p.Type))
+				ef.Params = append(ef.Params, l.foreignParam(p.Name, p.Type))
 			}
 			ef.Variadic = sig != nil && sig.Variadic()
 			g.Funcs = append(g.Funcs, ef)
@@ -196,6 +197,32 @@ func (l *lowerer) param(name string, t types.Type) *Param {
 		p.ByVal = st.Def
 	}
 	return p
+}
+
+// foreignParam builds one declare-block parameter's ABI shape (A.8.3).
+//
+// It differs from param in exactly one case. A.8.3 ⊢ "a declare block
+// describes call shape only, never foreign-side layout" — hir's own
+// {ptr,len} vx_string header is a Vertex-internal convention with nothing
+// on the C side that recognizes it, so treating a `string` parameter like
+// any other struct and passing it `byval[vx_string]` asserts an ABI shape
+// the real callee never declared (Vertex IR §5.4 item 8: a mismatched-
+// signature call is undefined behavior — not a diagnostic the verifier is
+// obligated to catch).
+//
+// A.1.5.2 already names the fix rather than leaving it to be invented:
+// "a string carries no NUL terminator; one is manufactured only at a
+// declare boundary." So a `string` parameter here lowers to a bare `ptr`
+// instead, and CString records that every call site must marshal a
+// NUL-terminated buffer onto it — see expr.go's cStringArg. Every other
+// type is unaffected and goes through param unchanged: this is not a
+// general "aggregates cross a boundary by pointer" rule, only the one
+// conversion the spec itself anticipates.
+func (l *lowerer) foreignParam(name string, t types.Type) *Param {
+	if l.classify(t) == kString {
+		return &Param{Name: sanitize(name), Type: Ptr, CString: true}
+	}
+	return l.param(name, t)
 }
 
 func (l *lowerer) result(sig *types.Signature) Type {

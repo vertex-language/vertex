@@ -1,3 +1,4 @@
+// expr.go
 package hir
 
 import (
@@ -133,7 +134,8 @@ func (b *funcBuilder) basicLit(x *ast.BasicLit) Value {
 // stringConstant materializes a string literal: the bytes go into a module
 // global, and the value is a {ptr, len} header. A.1.5.2 is explicit that a
 // string carries no NUL terminator; one is manufactured only at a declare
-// boundary.
+// boundary — see cStringArg below, which is where that manufacturing
+// actually happens.
 func (b *funcBuilder) stringConstant(pos token.Pos, s string) Value {
 	g := &Global{
 		Name: b.mod().uniqueName("str"),
@@ -430,7 +432,8 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 		}
 		// An extern has no Vertex body to instantiate, and must never
 		// reach resolveCallee/the monomorphization worklist below — see
-		// lower.go's externs field doc for what that misrouting produces.
+		// lower.go's externs field doc for what that misrouting used to
+		// produce.
 		if ef := b.l.externFor(b.info().ObjectOf(id)); ef != nil {
 			return b.externCallExpr(x, ef)
 		}
@@ -461,6 +464,7 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 func (b *funcBuilder) externCallExpr(x *ast.CallExpr, ef *ExternFunc) Value {
 	pos := x.Pos()
 	args := make([]Value, 0, len(x.Args))
+	var temps []Value
 	for _, a := range x.Args {
 		if kv, ok := a.(*ast.KeyValueExpr); ok {
 			a = kv.Value
@@ -476,9 +480,65 @@ func (b *funcBuilder) externCallExpr(x *ast.CallExpr, ef *ExternFunc) Value {
 		// owningExpr has for a Vertex callee: ownership markers are a
 		// Vertex-source convention (A.9.1) with nothing on the other side
 		// of a declare boundary to honor it.
+		//
+		// One case is not "pass through unchanged", though: a Vertex
+		// `string` has no C-ABI shape of its own (decl.go's foreignParam
+		// doc explains why), so it is bridged here rather than at the
+		// signature alone — this covers a string reaching a fixed
+		// parameter and one reaching the `...` tail alike, since a
+		// variadic position has no declared Param for foreignParam to
+		// have marked in the first place.
+		if b.l.classify(b.info().TypeOf(a)) == kString {
+			buf := b.cStringArg(a)
+			args = append(args, buf)
+			temps = append(temps, buf)
+			continue
+		}
 		args = append(args, b.expr(a))
 	}
-	return b.callExtern(pos, ef.Name, ef.Result, args...)
+	res := b.callExtern(pos, ef.Name, ef.Result, args...)
+	// Each marshaled buffer is call-scoped: built fresh for this call and
+	// freed immediately after, never bound to anything a mut/var/transfer
+	// marker could reach and never live past the call that used it.
+	for _, t := range temps {
+		b.callBuiltin(pos, symMemFree, Void, t)
+	}
+	return res
+}
+
+// cStringArg marshals a Vertex string argument into a heap buffer holding
+// its bytes plus a manufactured NUL terminator, and yields the pointer —
+// the conversion A.1.5.2 names for exactly this seam, and the one
+// externCallExpr performs for every string-typed argument crossing a
+// declare boundary. The buffer is temporary: externCallExpr frees it
+// immediately after the call it was built for, so nothing here needs an
+// owning binding or a deinit routine of its own.
+func (b *funcBuilder) cStringArg(x ast.Expr) Value {
+	pos := x.Pos()
+	sv := b.expr(x)
+	st, ok := b.l.hirType(b.info().TypeOf(x)).(StructType)
+	if !ok {
+		b.l.errorf(pos, "internal: cStringArg on a non-string operand")
+		return Value{}
+	}
+	src := b.loadField(pos, st.Def, sv, "ptr")
+	n := b.loadField(pos, st.Def, sv, "len")
+	size := b.op(pos, OpAdd, I64, n, IntVal(I64, 1)) // +1 for the manufactured NUL
+
+	buf := b.callBuiltin(pos, symMemAllocate, Ptr, size)
+	oom := &If{Cond: b.op(pos, OpEq, I1, buf, NullVal())}
+	oom.Then = b.into(func() {
+		// Matches builtinBox's convention (builtin.go): an allocation this
+		// package makes on the program's behalf, rather than one the user
+		// wrote a `new`/`resize` call for, fails loudly (A.10.1's split).
+		b.callBuiltin(pos, symPanicOOM, Void)
+		b.seq.add(&Unreachable{})
+	})
+	b.seq.add(oom)
+
+	b.opVoid(pos, OpMemcopy, Void, buf, src, n)
+	b.store(pos, I8, b.indexPtr(pos, I8, buf, n), IntVal(I8, 0))
+	return buf
 }
 
 // callWithSRet supplies the destination for an aggregate result and hands

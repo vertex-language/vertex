@@ -1,39 +1,4 @@
-// Package hir is where every decision is made.
-//
-// Given a checked package graph and its *types.Info, hir produces a
-// *hir.Program: monomorphic, ownership-explicit, control-flow-flattened,
-// with builtin calls named and nothing left that a later phase has to
-// reinterpret. lower/vir is mechanical afterward by construction — if it
-// ever needs a type switch on "is this an owning type" or "was this
-// transferred," that logic belongs here.
-//
-// Two invariants govern the package and are checkable from outside it:
-// hir never imports vvm, and hir never sees a target triple (overview §7,
-// invariants 1 and 10). Layout is the one target-shaped fact it consumes,
-// and it arrives as a types.Sizes on Config, chosen by the driver from the
-// build tag.
-//
-// # Representation
-//
-// A Program is a list of Modules, one per originating Vertex package plus
-// one per canonical owning module for synthesized symbols. A Module maps
-// onto vir's namespace/module split exactly: Path is the import path and
-// becomes vir's `namespace`, Name is the PackageClause name and becomes
-// vir's `module` (A.2.3's "the path is a locator, the declared name is the
-// qualifier," carried through to the linker unchanged).
-//
-// A Func holds structured statements (Body) until Flatten runs, and flat
-// Blocks afterward. Both shapes hold the same *Instr values, so there is
-// one instruction representation across the whole pipeline.
-//
-// # Aggregates are pointers
-//
-// Vertex IR makes struct and array memory-only — never held in a named
-// value. So a hir Value whose Type is aggregate (IsAggregate) *is* a ptr at
-// the vir level, pointing at storage the emitting code owns. Aggregate
-// parameters carry ByVal, aggregate results carry SRet, and aggregate
-// assignment is a memcopy of Size bytes. This is stated once, here, and
-// lower/vir reads it off IsAggregate rather than re-deriving it.
+// hir.go
 package hir
 
 import (
@@ -279,6 +244,18 @@ type Param struct {
 	Type  Type
 	ByVal *Struct
 	SRet  *Struct
+
+	// CString marks a declare-block parameter that began as a Vertex
+	// `string` and was bridged to a bare `ptr` for its C-ABI boundary
+	// (A.1.5.2: "a string carries no NUL terminator; one is manufactured
+	// only at a declare boundary"). decl.go's foreignParam is the only
+	// place that sets it. hir's own call-site marshaling (expr.go's
+	// externCallExpr) does not need to read it back — it decides whether
+	// to marshal from each argument's own checked type, which also covers
+	// a string reaching the `...` tail, where no declared Param exists to
+	// consult. The flag is kept here anyway, as the declared signature's
+	// own record of which position was bridged this way.
+	CString bool
 }
 
 func (f *Func) fresh(base string) string {
