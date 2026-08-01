@@ -67,7 +67,9 @@ func (c *Checker) typInternal(e ast.Expr) types.Type {
 		return types.NewPointer(c.typ(x.Elem))
 
 	case *ast.FuncType:
-		return c.signature(nil, x, nil)
+		// A.3.4 ⊢ a bare FunctionType has no receiver; the marker comes from
+		// the node itself, which signature reads.
+		return c.signature(nil, x)
 
 	case *ast.TupleExpr:
 		return c.tupleType(x)

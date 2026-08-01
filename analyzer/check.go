@@ -46,8 +46,19 @@ type Importer interface {
 // file's imports.
 type declInfo struct {
 	decl      ast.Decl
+	file      *ast.File // the declaring file; A.8.1's BuildClause check reads it
 	fileScope *types.Scope
 	node      ast.Node // the specific spec/field when decl covers several
+
+	// family is the import family a declare block's handles were minted by
+	// (A.4.4). It is decided in phase 1 by familyForBlock, because the block
+	// keyword refines what the build tag started — under darwin a `declare
+	// module` is flat C while a `declare framework` is an Objective-C object
+	// graph — and by phase 2 the enclosing block is no longer in hand.
+	//
+	// It is the zero value (FamilyUnknown) for every non-foreign declaration,
+	// which is correct: nothing else mints a handle.
+	family types.Family
 }
 
 // Checker holds one package's checking state.
@@ -105,7 +116,7 @@ func NewChecker(conf *Config, path, name string, info *types.Info) *Checker {
 func (c *Checker) Files(files []*ast.File) (*types.Package, error) {
 	c.files = files
 
-	c.collectObjects()  // phase 1: names exist, types are nil
+	c.collectObjects()   // phase 1: names exist, types are nil
 	c.resolveDeclTypes() // phase 2: types filled in, cycles caught
 	c.checkBodies()      // phase 3: bodies walked, uses recorded
 
