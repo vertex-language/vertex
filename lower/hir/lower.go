@@ -76,6 +76,7 @@ func Lower(conf *Config, units []*Unit) (*Program, error) {
 		modules: map[string]*Module{},
 		byUnit:  map[*Unit]*Module{},
 		globals: map[types.Object]*globalBinding{},
+		externs: map[types.Object]*ExternFunc{},
 		prog:    &Program{},
 	}
 	l.types = newTypeLowerer(l)
@@ -146,6 +147,20 @@ type lowerer struct {
 	// no runtime storage, or module-level storage reached by address. See
 	// info.go's globalBinding.
 	globals map[types.Object]*globalBinding
+
+	// externs maps a checked object declared inside a `declare` block to
+	// the *ExternFunc decl.go already built for it. A call naming such an
+	// object must be routed here directly rather than through the
+	// monomorphization worklist: an extern has no Vertex body to
+	// instantiate, and prior to this map, resolveCallee had no way to
+	// tell the two apart — a call to `printf` was scheduled as if it were
+	// an ordinary Vertex function, collided with the extern's own
+	// reserved name in the module's flat namespace, got silently
+	// suffixed ("printf" -> "printf_1"), and produced a declared body
+	// with no instructions and no terminator, since findFuncDecl can
+	// never find an ast.FuncDecl behind a declare-block member. See
+	// expr.go's externCallExpr and decl.go's bindExtern call site.
+	externs map[types.Object]*ExternFunc
 
 	feats builtins.FeatureSet
 

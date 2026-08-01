@@ -131,6 +131,32 @@ func (l *lowerer) globalFor(obj types.Object) *globalBinding {
 }
 
 // ---------------------------------------------------------------------------
+// externs
+// ---------------------------------------------------------------------------
+
+// bindExtern records that obj (the checked object behind one `declare`
+// block member) is reached by calling ef directly — never by scheduling
+// it through the monomorphization worklist, which has no notion of a
+// foreign body. See lower.go's externs field doc for the failure this
+// prevents.
+func (l *lowerer) bindExtern(obj types.Object, ef *ExternFunc) {
+	if obj == nil {
+		return
+	}
+	if l.externs == nil {
+		l.externs = map[types.Object]*ExternFunc{}
+	}
+	l.externs[obj] = ef
+}
+
+func (l *lowerer) externFor(obj types.Object) *ExternFunc {
+	if obj == nil || l.externs == nil {
+		return nil
+	}
+	return l.externs[obj]
+}
+
+// ---------------------------------------------------------------------------
 // enums
 // ---------------------------------------------------------------------------
 

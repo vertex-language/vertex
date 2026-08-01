@@ -416,7 +416,8 @@ func (b *funcBuilder) cast(x *ast.CastExpr) Value {
 	return v
 }
 
-// callExpr routes a call three ways: a reserved builtin name, a method
+// callExpr routes a call four ways: a reserved builtin name, a
+// module-local extern function (a declare-block member, A.8), a method
 // through a recorded Selection, or an ordinary direct call. There are no
 // vtables to consult — every call, including a generic one post-
 // monomorphization, is direct by construction.
@@ -426,6 +427,12 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 	if id, ok := fun.(*ast.Ident); ok {
 		if bi, isBuiltin := b.info().ObjectOf(id).(*types.Builtin); isBuiltin {
 			return b.builtinCall(x, bi)
+		}
+		// An extern has no Vertex body to instantiate, and must never
+		// reach resolveCallee/the monomorphization worklist below — see
+		// lower.go's externs field doc for what that misrouting produces.
+		if ef := b.l.externFor(b.info().ObjectOf(id)); ef != nil {
+			return b.externCallExpr(x, ef)
 		}
 	}
 	if sel, ok := fun.(*ast.SelectorExpr); ok {
@@ -441,6 +448,37 @@ func (b *funcBuilder) callExpr(x *ast.CallExpr) Value {
 	vals := b.arguments(x, target)
 	_ = args
 	return b.callWithSRet(x.Pos(), target, vals)
+}
+
+// externCallExpr lowers a call to a module-local extern function (a
+// declare-block member, A.8). There is no *hir.Func to instantiate here —
+// an extern has no Vertex body to monomorphize, so it must never reach the
+// worklist. Routing it there is exactly the bug this replaces: the
+// worklist would schedule a same-named shell (colliding with the extern's
+// own reserved name and getting suffixed, e.g. "printf" -> "printf_1"),
+// findFuncDecl would find no ast.FuncDecl behind it, and lower/vir would
+// emit a declared-but-unterminated function.
+func (b *funcBuilder) externCallExpr(x *ast.CallExpr, ef *ExternFunc) Value {
+	pos := x.Pos()
+	args := make([]Value, 0, len(x.Args))
+	for _, a := range x.Args {
+		if kv, ok := a.(*ast.KeyValueExpr); ok {
+			a = kv.Value
+		}
+		// A byval param is a pointer at the vir level (decl.go's param);
+		// an aggregate hir.Value already *is* that pointer (the package
+		// doc comment), so a plain b.expr is correct for both scalar and
+		// byval-aggregate positions, including a trailing variadic
+		// argument (A.4.4's `...` on the declare-block signature) — vir's
+		// call site takes a flat operand list regardless of arity, so a
+		// variadic argument needs no different lowering than a fixed one.
+		// There is no owning-marker system to consult here the way
+		// owningExpr has for a Vertex callee: ownership markers are a
+		// Vertex-source convention (A.9.1) with nothing on the other side
+		// of a declare boundary to honor it.
+		args = append(args, b.expr(a))
+	}
+	return b.callExtern(pos, ef.Name, ef.Result, args...)
 }
 
 // callWithSRet supplies the destination for an aggregate result and hands

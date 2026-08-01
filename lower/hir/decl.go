@@ -171,6 +171,13 @@ func (l *lowerer) foreignMembers(u *Unit, mod *Module, g *ExternGroup, members [
 			ef.Variadic = sig != nil && sig.Variadic()
 			g.Funcs = append(g.Funcs, ef)
 			mod.names[ef.Name] = true
+			// Record the checked object -> ExternFunc mapping so a call
+			// naming this identifier (expr.go's callExpr) resolves here
+			// directly instead of falling through to the monomorphization
+			// worklist, which has no notion of a foreign body — see
+			// lower.go's externs field doc for what that misrouting used
+			// to produce.
+			l.bindExtern(obj, ef)
 		case *ast.ForeignClass:
 			l.foreignMembers(u, mod, g, mem.Members)
 		case *ast.ForeignField:
