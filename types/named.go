@@ -19,17 +19,32 @@ func NewNamed(obj *TypeName, underlying Type) *Named {
 	return &Named{obj: obj, underlying: underlying}
 }
 
-func (n *Named) Obj() *TypeName          { return n.obj }
-func (n *Named) Underlying() Type        { return n.underlying }
-func (n *Named) NumMethods() int         { return len(n.methods) }
-func (n *Named) Method(i int) *Func      { return n.methods[i] }
+func (n *Named) Obj() *TypeName           { return n.obj }
+func (n *Named) Underlying() Type         { return n.underlying }
+func (n *Named) NumMethods() int          { return len(n.methods) }
+func (n *Named) Method(i int) *Func       { return n.methods[i] }
 func (n *Named) TypeParams() []*TypeParam { return n.typeParams }
-func (n *Named) TypeArgs() []Type        { return n.typeArgs }
+func (n *Named) TypeArgs() []Type         { return n.typeArgs }
 
 func (n *Named) AddMethod(f *Func) { n.methods = append(n.methods, f) }
 
 func (n *Named) SetTypeParams(tp []*TypeParam) { n.typeParams = tp }
 func (n *Named) SetTypeArgs(ta []Type)         { n.typeArgs = ta }
+
+// SetUnderlying fills in what this Named was declared as, after the object
+// itself exists.
+//
+// The two-step construction is not a convenience. A.2's order-independence lets
+// a field name its own enclosing type — `struct Node { next: typed_ptr Node }` —
+// so the resolver must bind the Named to its TypeName before walking any field,
+// or the field's lookup trips the cycle guard on an object whose type is still
+// nil. NewNamed(obj, nil) opens that window and this closes it.
+//
+// Underlying() answers nil inside the window. That is the honest answer — the
+// declaration has no shape yet — and every structural predicate reaches it
+// through predicates.Underlying, whose type switches simply do not match, so a
+// premature read degrades to "not a struct, not an enum" rather than panicking.
+func (n *Named) SetUnderlying(t Type) { n.underlying = t }
 
 // LookupMethod finds a declared method by name. Vertex has no inheritance and
 // no embedding (A.6.3), so there is no promotion to walk — the set is flat.
@@ -64,10 +79,10 @@ type Struct struct {
 
 func NewStruct(fields []*Field, class bool) *Struct { return &Struct{fields, class} }
 
-func (s *Struct) NumFields() int      { return len(s.fields) }
-func (s *Struct) Field(i int) *Field  { return s.fields[i] }
-func (s *Struct) Class() bool         { return s.class }
-func (s *Struct) Underlying() Type    { return s }
+func (s *Struct) NumFields() int     { return len(s.fields) }
+func (s *Struct) Field(i int) *Field { return s.fields[i] }
+func (s *Struct) Class() bool        { return s.class }
+func (s *Struct) Underlying() Type   { return s }
 
 func (s *Struct) LookupField(name string) (*Field, int) {
 	for i, f := range s.fields {
@@ -111,10 +126,10 @@ func NewEnum(variants []*Variant, discrim *Basic) *Enum {
 	return &Enum{variants, discrim}
 }
 
-func (e *Enum) NumVariants() int        { return len(e.variants) }
-func (e *Enum) Variant(i int) *Variant  { return e.variants[i] }
-func (e *Enum) Discriminant() *Basic    { return e.discrim }
-func (e *Enum) Underlying() Type        { return e }
+func (e *Enum) NumVariants() int       { return len(e.variants) }
+func (e *Enum) Variant(i int) *Variant { return e.variants[i] }
+func (e *Enum) Discriminant() *Basic   { return e.discrim }
+func (e *Enum) Underlying() Type       { return e }
 
 // UnitOnly reports whether every variant is a unit variant (A.6.5).
 func (e *Enum) UnitOnly() bool {
@@ -163,9 +178,9 @@ type Abstract struct {
 
 func NewAbstract(obj *TypeName, f Family) *Abstract { return &Abstract{obj, f} }
 
-func (a *Abstract) Obj() *TypeName    { return a.obj }
-func (a *Abstract) Family() Family    { return a.family }
-func (a *Abstract) Underlying() Type  { return a }
+func (a *Abstract) Obj() *TypeName   { return a.obj }
+func (a *Abstract) Family() Family   { return a.family }
+func (a *Abstract) Underlying() Type { return a }
 
 // ------------------------------------------------------------ type params
 
@@ -184,7 +199,7 @@ func NewTypeParam(name string, index int, c *Constraint) *TypeParam {
 	return &TypeParam{name, index, c}
 }
 
-func (t *TypeParam) Name() string             { return t.name }
-func (t *TypeParam) Index() int               { return t.index }
-func (t *TypeParam) Constraint() *Constraint  { return t.constraint }
-func (t *TypeParam) Underlying() Type         { return t }
+func (t *TypeParam) Name() string            { return t.name }
+func (t *TypeParam) Index() int              { return t.index }
+func (t *TypeParam) Constraint() *Constraint { return t.constraint }
+func (t *TypeParam) Underlying() Type        { return t }

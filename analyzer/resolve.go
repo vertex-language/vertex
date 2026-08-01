@@ -188,13 +188,16 @@ func (c *Checker) localVarDecl(d *ast.VarDecl) {
 // A.5.6 puts it, "what is being transferred is each element, one per iteration,
 // and the marker names what moves." The parser accepts `mut a, b` even though
 // no production combines them (A.14), so that combination is rejected here.
+//
+// The bare (shared-access) form carries token.INVALID — the zero Kind — since
+// there is no marker token to record.
 func (c *Checker) forStmt(x *ast.ForStmt) {
 	c.expr(x.X)
 
 	c.openScope(x, "for")
 	defer c.closeScope()
 
-	if x.Mode != token.ILLEGAL && len(x.Names) > 1 {
+	if x.Mode != token.INVALID && len(x.Names) > 1 {
 		c.errorAt(x.ModePos, x.ModePos, diag.MutOutsidePosition, x.Mode.String())
 	}
 	for _, n := range x.Names {
