@@ -48,6 +48,19 @@ func (w *worklist) key(fn *types.Func, args []types.Type) string {
 // enqueue schedules one instantiation and returns the *Func it will occupy,
 // creating the shell immediately so a recursive or mutually recursive call
 // can reference it before its body exists.
+//
+// The shell's Result is resolved right here, eagerly, from fn's own
+// checked signature — not left nil for lowerBody to fill in later. A nil
+// Type reads as "not void" to IsVoid (the type assertion nil.(VoidType)
+// fails), so any call reaching this shell before its body is lowered would
+// otherwise wrongly bind a result name to what may be a void call. This is
+// not a hypothetical: buildEntry calls the seeded main/test function from
+// inside seed(), strictly before work.run() ever executes lowerBody, so
+// the entry shim is guaranteed to observe a half-built shell on every
+// build unless Result is settled up front. The signature is already fully
+// resolved by the checker at this point, so there is no reason to defer
+// this — lowerBody's own assignment of f.Result becomes a redundant
+// re-computation of the same value once this runs first.
 func (w *worklist) enqueue(u *Unit, fn *types.Func, args []types.Type, depth int) *Func {
 	k := w.key(fn, args)
 	if f, ok := w.done[k]; ok {
@@ -72,6 +85,15 @@ func (w *worklist) enqueue(u *Unit, fn *types.Func, args []types.Type, depth int
 		Origin: fn,
 		Pos:    fn.Pos(),
 	}
+
+	// Resolve Result now, under this instantiation's own substitution,
+	// exactly as lowerBody would later — but before any caller can
+	// possibly observe the shell in a half-built state.
+	prev := w.l.cur
+	w.l.cur = &instance{unit: u, mod: mod, subst: substitution(fn, args), depth: depth}
+	shell.Result = w.l.result(fn.Signature())
+	w.l.cur = prev
+
 	mod.Funcs = append(mod.Funcs, shell)
 	w.done[k] = shell
 	w.queue = append(w.queue, job{unit: u, fn: fn, args: args, depth: depth})
@@ -113,6 +135,10 @@ func (w *worklist) lowerBody(j job) {
 	// part of the type. Everything below therefore reads through here.
 	sig := j.fn.Signature()
 
+	// f.Result was already resolved in enqueue, under the same
+	// substitution, so this is a no-op recomputation of the same value —
+	// left in place only because it is harmless and keeps lowerBody
+	// self-contained if enqueue's early resolution is ever reverted.
 	f.Result = w.l.result(sig)
 	if st, ok := f.Result.(StructType); ok {
 		// An aggregate result is written through an sret destination the
