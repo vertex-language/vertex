@@ -1,6 +1,8 @@
 package hir
 
 import (
+	"strconv"
+
 	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/token"
 	"github.com/vertex-language/vertex/types"
@@ -69,6 +71,38 @@ func (b *funcBuilder) basicLit(x *ast.BasicLit) Value {
 	t := b.info().TypeOf(x)
 	ht := b.l.hirType(t)
 	tv, ok := b.info().Types[x]
+
+	// --- FALLBACK IF TYPECHECK PASS IS MISSING ---
+	if !ok || tv.Value == nil {
+		switch x.Kind.String() {
+		case "INT":
+			if val, err := strconv.ParseInt(x.Value, 0, 64); err == nil {
+				if t == nil {
+					return IntVal(I32, val) // Default to I32 if type is missing
+				}
+				return IntVal(ht, val)
+			}
+		case "FLOAT":
+			if val, err := strconv.ParseFloat(x.Value, 64); err == nil {
+				if t == nil {
+					return FloatVal(F64, val)
+				}
+				return FloatVal(ht, val)
+			}
+		case "TRUE":
+			return BoolVal(true)
+		case "FALSE":
+			return BoolVal(false)
+		case "STRING":
+			s := x.Value
+			if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+				s = s[1 : len(s)-1]
+			}
+			return b.stringConstant(x.Pos(), s)
+		}
+	}
+	// ---------------------------------------------
+
 	if ok && tv.Value != nil {
 		if s, isStr := types.StringVal_(tv.Value); isStr {
 			return b.stringConstant(x.Pos(), s)
@@ -715,14 +749,14 @@ func (b *funcBuilder) addressOf(x ast.Expr) Value {
 		if st, ok := b.l.hirType(b.info().TypeOf(x.X)).(StructType); ok && x.Index < len(st.Def.Fields) {
 			return b.fieldPtr(x.Pos(), st.Def, b.addressOf(x.X), st.Def.Fields[x.Index].Name)
 		}
-	case *ast.IndexExpr:
+	case *IndexExpr:
 		src := b.info().TypeOf(x.X)
 		elem := b.l.hirType(b.l.elem(src))
 		base, length := b.sequenceParts(x.X, src)
 		idx := b.expr(x.Indices[0])
 		b.boundsCheck(x.Pos(), idx, length)
 		return b.indexPtr(x.Pos(), elem, base, idx)
-	case *ast.UnaryExpr:
+	case *UnaryExpr:
 		if x.Op.String() == "&" {
 			return b.expr(x.X) // &p = v writes through p
 		}
