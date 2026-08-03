@@ -499,8 +499,8 @@ heap.
 
 ```vertex
 struct Vec2 {
-    x: float32,
-    y: float32,
+    x: float32
+    y: float32
 }
 
 func (v: Vec2) length() -> float32 { }             // shared receiver
@@ -513,15 +513,18 @@ var pos = Vec2{x: 1.0, y: 2.0}
 pos.scale(factor: 2.0)      // bare — no `&`; `mut` is a signature fact
 ```
 
-Fields are separated by commas; a line break between them is conventional but
-not required. Trailing commas are valid. Struct literals require field labels.
+A struct or class body is a **comma-free, newline-separated** list of fields —
+each field sits on its own line, with no comma between them and none trailing
+the last one. This applies only to the *declaration*; a struct literal like
+`Vec2{x: 1.0, y: 2.0}` above is constructing a value, not declaring fields, and
+still uses commas between labeled values. Struct literals require field labels.
 
 Field defaults are evaluated at construction for any field the literal omits:
 
 ```vertex
 struct Config {
-    workers: int32 = 4,
-    verbose: bool  = false,
+    workers: int32 = 4
+    verbose: bool  = false
 }
 
 let c = Config{}
@@ -533,8 +536,8 @@ reader which storage discipline is in play:
 
 ```vertex
 class Animal {
-    name:   string,
-    health: int32,
+    name:   string
+    health: int32
 }
 
 func (a: Animal) init(name: string, health: int32) {
@@ -601,7 +604,7 @@ func identity[T](value: T) -> T {
 }
 
 struct Box[T] {
-    value: T,
+    value: T
 }
 
 func (b: Box[T]) get() -> T {
@@ -825,8 +828,8 @@ named struct as the payload:
 
 ```vertex
 struct MousePos {
-    x: int32,
-    y: int32,
+    x: int32
+    y: int32
 }
 
 enum Event {
@@ -1309,7 +1312,7 @@ native convention, not the reverse.
 
 ```vertex
 class Window {
-    handle: SDL_Window,
+    handle: SDL_Window
 }
 
 func (w: Window) init(title: string) {
@@ -1518,7 +1521,7 @@ Build flags:
                           holding main)
   -packages-dir <path>  packages root; overrides $VERTEX_PATH
   -emit-vir             emit Vertex IR text (.vir), one file per package
-  -emit-vbyte           emit Vertex IR binary (.vbyte), one file per package
+  -emit-vbyte             emit Vertex IR binary (.vbyte), one file per package
   -v                    report each pipeline stage on stderr
 
 Run flags:
