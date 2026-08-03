@@ -109,33 +109,6 @@ func isValueFlag(a string) bool {
 	return false
 }
 
-// rejectRetiredFlags turns a flag the 0.4.0 CLI accepted but this toolchain
-// cannot honor into a specific error naming *why*, rather than flag's
-// generic "flag provided but not defined". A silently-ignored -O2 would be
-// worse than either.
-func rejectRetiredFlags(flags []string) error {
-	retired := map[string]string{
-		"emit-mir": "there is no Machine IR stage — vvm lowers vir straight to machine code, and its top-level package exposes no MIR surface",
-		"emit-asm": "vvm's assembly printers are debug-only and live below its public API; there is no supported path to a .s file",
-		"emit-obj": "vvm's object-file stage (toObjectBytes) is internal to its build pipeline — it emits linked images or nothing",
-		"c":        "same as -emit-obj: vvm has no public relocatable-object entry point",
-		"dump":     "the pipeline-dump format described in the 0.4.0 README was never wired to this pipeline",
-		"g":        "vvm's --debug is device-only (amdtx .file/.loc); the host pipeline emits no debug info yet",
-		"sysroot":  "link dependencies resolve through vvm's own linkdeps search paths, which take no sysroot",
-		"O0":       "there is no optimizer in either tree; -O is not accepted rather than silently ignored",
-		"O1":       "there is no optimizer in either tree; -O is not accepted rather than silently ignored",
-		"O2":       "there is no optimizer in either tree; -O is not accepted rather than silently ignored",
-		"Os":       "there is no optimizer in either tree; -O is not accepted rather than silently ignored",
-	}
-	for _, f := range flags {
-		name := strings.SplitN(strings.TrimLeft(f, "-"), "=", 2)[0]
-		if why, ok := retired[name]; ok {
-			return fmt.Errorf("-%s is not supported: %s", name, why)
-		}
-	}
-	return nil
-}
-
 func fail(err error) int {
 	fmt.Fprintf(os.Stderr, "vertex: %v\n", err)
 	return 1
@@ -145,22 +118,19 @@ func fail(err error) int {
 
 func cmdBuild(args []string) int {
 	positionals, flags, _ := splitArgs(args)
-	if err := rejectRetiredFlags(flags); err != nil {
-		return fail(err)
-	}
 
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	var (
-		output       string
-		target       string
-		minOS        string
-		root         string
-		pkgDir       string
-		flatBase     uint64
-		emitVIR      bool
-		emitVByte    bool
-		shared       bool
-		verbose      bool
+		output    string
+		target    string
+		minOS     string
+		root      string
+		pkgDir    string
+		flatBase  uint64
+		emitVIR   bool
+		emitVByte bool
+		shared    bool
+		verbose   bool
 	)
 	fs.StringVar(&output, "o", "", "output path")
 	fs.StringVar(&target, "target", "", "target triple (default: host)")
@@ -220,9 +190,6 @@ func cmdBuild(args []string) int {
 
 func cmdRun(args []string) int {
 	positionals, flags, passthrough := splitArgs(args)
-	if err := rejectRetiredFlags(flags); err != nil {
-		return fail(err)
-	}
 
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	var (
@@ -256,11 +223,13 @@ func cmdRun(args []string) int {
 
 // --- test ------------------------------------------------------------------
 
+// cmdTest hands opts.Input to driver.RunTestsAuto rather than driver.RunTests
+// directly. Which of RunTests/RunTestSuite actually runs is a fact about
+// the input's own filesystem shape (one package vs. a tree of them), which
+// is exactly the kind of pipeline decision this package's own doc comment
+// says belongs to driver, not here — cmdTest only gets the input path.
 func cmdTest(args []string) int {
 	positionals, flags, _ := splitArgs(args)
-	if err := rejectRetiredFlags(flags); err != nil {
-		return fail(err)
-	}
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	var (
@@ -270,12 +239,16 @@ func cmdTest(args []string) int {
 		pkgDir  string
 		verbose bool
 	)
-	fs.StringVar(&dir, "dir", "", "directory holding `build test` files (default: .)")
+	fs.StringVar(&dir, "dir", "", "directory holding `build test` files, or a tree of such directories (default: .)")
 	fs.StringVar(&file, "file", "", "a single test file")
 	fs.StringVar(&filter, "run", "", "only run tests whose name contains this substring")
 	fs.StringVar(&pkgDir, "packages-dir", "", "Vertex packages root (overrides $VERTEX_PATH)")
 	fs.BoolVar(&verbose, "v", false, "print every test, not just failures")
-	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: vertex test [-dir <path> | -file <path>] [-run <substr>]") }
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: vertex test [-dir <path> | -file <path>] [-run <substr>]")
+		fmt.Fprintln(os.Stderr, "  -dir may name a single test package or a directory tree of them;")
+		fmt.Fprintln(os.Stderr, "  a directory with no .vs files of its own runs every package beneath it.")
+	}
 	if err := fs.Parse(flags); err != nil {
 		return 2
 	}
@@ -299,7 +272,7 @@ func cmdTest(args []string) int {
 		PackagesDir: pkgDir,
 		Verbose:     verbose,
 	}
-	ok, err := driver.RunTests(opts, filter)
+	ok, err := driver.RunTestsAuto(opts, filter)
 	if err != nil {
 		return fail(err)
 	}

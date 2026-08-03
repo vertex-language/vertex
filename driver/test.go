@@ -10,10 +10,26 @@
 // So the runner checks once, partitions the resulting diagnostics by which
 // test function's extent they land in, and only then builds and runs the
 // tests that were meant to compile.
+//
+// A third thing shapes the suite-discovery half at the bottom of this
+// file: `loadDir` (load.go) treats a directory as one package only if it
+// holds .vs files directly, the same directory-granularity importer.Load
+// and parser.ParseDir already assume. A directory that holds none but has
+// subdirectories that do — `testutils/` over `testutils/01_values/`,
+// `testutils/02_operators/`, ... — is not itself a package, so RunTests
+// alone cannot point at it. RunTestsAuto tells the two cases apart and
+// RunTestSuite runs every discovered package, aggregating the result. No
+// new CLI flag is needed: whether a directory is a single package or a
+// suite root is a fact about its own contents, never ambiguous, so it's
+// decided by inspection rather than by asking the caller to say which.
 package driver
 
 import (
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -126,12 +142,32 @@ type TestResult struct {
 // RunTests loads the input as a `build test` package, runs every test
 // whose name contains filter, and reports. It returns false if any test
 // failed.
+//
+// This is the single-package path: opts.Input must itself hold .vs files
+// directly (loadDir's own definition of a package). RunTestsAuto is what
+// tells this case apart from a suite root; most callers should use that
+// instead of calling this directly, unless the input is already known to
+// be one package.
 func RunTests(opts *Options, filter string) (bool, error) {
+	results, err := runPackageTests(opts, filter)
+	if err != nil {
+		return false, err
+	}
+	_, failed := report(opts, results)
+	return failed == 0, nil
+}
+
+// runPackageTests is RunTests minus the pass/fail reduction: it loads
+// opts.Input as one `build test` package and returns every discovered
+// test's outcome. Factored out so RunTestSuite can run this once per
+// discovered package and aggregate the results itself, using the same
+// per-line formatting report() already gives a single-package run.
+func runPackageTests(opts *Options, filter string) ([]TestResult, error) {
 	opts.defaults()
 
 	t, err := ResolveTarget(targetRequest{MinOSVersion: opts.MinOSVersion})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	// `build test` is the only tag that changes what is grammatical, so a
 	// test run loads under it rather than under the host's own tag.
@@ -140,21 +176,17 @@ func RunTests(opts *Options, filter string) (bool, error) {
 	lc := newLoadContext()
 	pkgs, loadErr := loadForTest(opts, lc, t)
 	if pkgs == nil && loadErr != nil {
-		return false, loadErr
+		return nil, loadErr
 	}
 
 	root := pkgs[len(pkgs)-1]
 	cases := DiscoverTests(root)
 	if len(cases) == 0 {
-		return false, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"%s declares no `test`-marked functions (a test file needs `build test`)", opts.Input)
 	}
 
-	results, fatal := runCases(opts, t, pkgs, cases, lc, filter)
-	if fatal != nil {
-		return false, fatal
-	}
-	return report(opts, results), nil
+	return runCases(opts, t, pkgs, cases, lc, filter)
 }
 
 // loadForTest is Load, minus the "abort on any diagnostic" behavior: an
@@ -274,8 +306,11 @@ func runValueCase(opts *Options, t Target, pkgs []*Package, c TestCase) TestResu
 	return TestResult{Case: c, Reason: fmt.Sprintf("expected %q, got %q", c.Expected, got)}
 }
 
-func report(opts *Options, results []TestResult) bool {
-	passed, failed := 0, 0
+// report prints one package's results — ok lines only under -v, every FAIL
+// line always — followed by its own pass/fail/total line, and returns the
+// counts so a caller aggregating several packages (RunTestSuite) doesn't
+// have to re-walk results to total them.
+func report(opts *Options, results []TestResult) (passed, failed int) {
 	for _, r := range results {
 		if r.Passed {
 			passed++
@@ -288,5 +323,143 @@ func report(opts *Options, results []TestResult) bool {
 		fmt.Fprintf(opts.Stdout, "FAIL  %s — %s\n", r.Case.Name, r.Reason)
 	}
 	fmt.Fprintf(opts.Stdout, "\n%d passed, %d failed, %d total\n", passed, failed, len(results))
-	return failed == 0
+	return passed, failed
+}
+
+// ---------------------------------------------------------------------------
+// suite discovery
+// ---------------------------------------------------------------------------
+
+// RunTestsAuto decides between RunTests and RunTestSuite from opts.Input's
+// own shape, so neither the CLI nor a caller has to say up front whether
+// it's pointing at one package or a tree of them:
+//
+//   - A file always goes through RunTests, matching Load's own two-path
+//     split (loadFile never treats a file as a directory).
+//   - A directory holding .vs files directly is one package (loadDir's own
+//     definition) and runs through RunTests unchanged.
+//   - A directory holding none is a suite root only if some subdirectory
+//     does; RunTestSuite runs every one of those and aggregates.
+func RunTestsAuto(opts *Options, filter string) (bool, error) {
+	opts.defaults()
+
+	info, err := os.Stat(opts.Input)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", opts.Input, err)
+	}
+	if !info.IsDir() {
+		return RunTests(opts, filter)
+	}
+
+	has, err := dirHasVsFiles(opts.Input)
+	if err != nil {
+		return false, err
+	}
+	if has {
+		return RunTests(opts, filter)
+	}
+	return RunTestSuite(opts, filter)
+}
+
+// RunTestSuite runs every test package discovered under opts.Input —
+// every directory in the tree that holds .vs files directly — as an
+// independent RunTests-style run, and aggregates pass/fail counts across
+// all of them. It returns false if any package failed to run or any test
+// within any package failed.
+//
+// Each package is fully isolated: its own Load, its own per-test-function
+// Lower/build/run cycle (runPackageTests), so a compile error in one
+// package's tests cannot mask or block another's.
+func RunTestSuite(opts *Options, filter string) (bool, error) {
+	opts.defaults()
+
+	dirs, err := discoverTestPackageDirs(opts.Input)
+	if err != nil {
+		return false, fmt.Errorf("walking %s: %w", opts.Input, err)
+	}
+	if len(dirs) == 0 {
+		return false, fmt.Errorf(
+			"%s holds no test package — no directory under it carries .vs files directly", opts.Input)
+	}
+
+	allOK := true
+	var totalPassed, totalFailed int
+	for _, dir := range dirs {
+		sub := *opts
+		sub.Input = dir
+
+		fmt.Fprintf(opts.Stdout, "%s:\n", dir)
+		results, err := runPackageTests(&sub, filter)
+		if err != nil {
+			fmt.Fprintf(opts.Stdout, "  error: %v\n\n", err)
+			allOK = false
+			continue
+		}
+		passed, failed := report(opts, results)
+		totalPassed += passed
+		totalFailed += failed
+		if failed > 0 {
+			allOK = false
+		}
+		fmt.Fprintln(opts.Stdout)
+	}
+
+	fmt.Fprintf(opts.Stdout, "=== %d passed, %d failed, %d total across %d package(s) ===\n",
+		totalPassed, totalFailed, totalPassed+totalFailed, len(dirs))
+	return allOK, nil
+}
+
+// discoverTestPackageDirs walks root and returns every directory — root
+// included — that holds at least one .vs file directly, sorted so a suite
+// run is byte-reproducible in the order it reports packages. A directory
+// whose name starts with '.' is skipped entirely (its own name, not its
+// path, so "./.git" is skipped but a root the caller literally names
+// "./." is still walked): the same convention every other tree-walking
+// tool assumes for VCS and metadata directories, and nothing here needs a
+// flag to opt out of it.
+func discoverTestPackageDirs(root string) ([]string, error) {
+	root = filepath.Clean(root)
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != root && strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
+		has, err := dirHasVsFiles(path)
+		if err != nil {
+			return err
+		}
+		if has {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// dirHasVsFiles reports whether dir holds at least one .vs file directly —
+// the same test loadDir itself effectively applies by handing every such
+// file to parser.ParseDir. Subdirectories don't count: a package is
+// directory-granular, never recursive (the same rule ast.NewPackage and
+// importer.Load already enforce).
+func dirHasVsFiles(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".vs") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
