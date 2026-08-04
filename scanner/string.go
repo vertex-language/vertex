@@ -4,9 +4,11 @@ import (
 	"github.com/vertex-language/vertex/diag"
 )
 
-// scanString consumes a double-quoted StringLiteral. The returned text is the
-// raw source spelling including both quotes and every escape as written — vfmt
-// needs the original, and the analyzer decodes separately.
+// scanString consumes an interpreted string literal. The returned text is the
+// raw source spelling, both quotes and every escape exactly as written: a
+// formatter needs the original, and decoding belongs to a later phase.
+//
+// A `'` is legal unescaped here, since string_value excludes only `"` and `\`.
 func (s *Scanner) scanString() string {
 	offs := s.offset
 	s.next() // opening quote
@@ -16,8 +18,8 @@ func (s *Scanner) scanString() string {
 			s.error(diag.UnterminatedString, offs)
 			break
 		}
-		// DoubleStringCharacter excludes LineTerminator. The terminator is left
-		// unconsumed so it still ends the statement (A.0.6) and recovery
+		// A line terminator may not appear in an interpreted string. It is
+		// left unconsumed so that it still ends the statement and recovery
 		// resumes on the next line rather than swallowing it.
 		if isLineTerminator(s.ch) {
 			s.error(diag.NewlineInString, offs)
@@ -35,15 +37,14 @@ func (s *Scanner) scanString() string {
 	return string(s.src[offs:s.offset])
 }
 
-// scanRawString consumes a backtick StringLiteral. A.1.5.2 ⊢ it is raw and
-// multi-line: no escape sequence is recognised, and every LineTerminator it
-// spans is part of its value.
+// scanRawString consumes a raw string literal. It recognizes no escape
+// sequence, and every line terminator it spans is part of its value.
 //
 // Those terminators advance the line table but do not set nlPending — they are
 // string content, not statement structure.
 func (s *Scanner) scanRawString() string {
 	offs := s.offset
-	s.next() // opening backtick
+	s.next() // opening back quote
 
 	for {
 		if s.ch == eof {
@@ -63,9 +64,11 @@ func (s *Scanner) scanRawString() string {
 	return string(s.src[offs:s.offset])
 }
 
-// scanChar consumes a CharLiteral. A.1.5.2 ⊢ it denotes exactly one Unicode
-// scalar value; the count below is in source units, so an escape counts once
+// scanChar consumes a character literal, which denotes exactly one Unicode
+// scalar value. The count below is in source units, so an escape counts once
 // and a multi-byte rune counts once.
+//
+// A `"` is legal unescaped here, since char_value excludes only `'` and `\`.
 func (s *Scanner) scanChar() string {
 	offs := s.offset
 	s.next() // opening quote
@@ -100,7 +103,7 @@ func (s *Scanner) scanChar() string {
 	return string(s.src[offs:s.offset])
 }
 
-// scanEscape consumes an EscapeSequence. It is entered with the backslash
+// scanEscape consumes an escape sequence. It is entered with the backslash
 // already consumed, so s.ch is the character following it.
 func (s *Scanner) scanEscape() {
 	backslash := s.offset - 1
@@ -145,8 +148,8 @@ func (s *Scanner) scanEscape() {
 		}
 		s.next() // '}'
 
-		// A surrogate is a code point but not a scalar value, and a Vertex char
-		// holds a scalar (A.1.5.2). Both failures share one code.
+		// A surrogate is a code point but not a scalar value, and the escape
+		// must denote a scalar value. Both failures share one code.
 		if v > 0x10FFFF || (0xD800 <= v && v < 0xE000) {
 			s.errorSpan(diag.UnicodeEscapeRange, backslash, s.offset, "U+"+text)
 		}

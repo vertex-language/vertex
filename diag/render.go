@@ -9,8 +9,8 @@ import (
 )
 
 // Renderer produces human-facing output. It is deliberately separate from
-// Diagnostic: the normative comparison in A.12.2 is against Text(), never
-// against anything this file produces.
+// Diagnostic: the normative comparison is against Text(), never against
+// anything this file produces.
 type Renderer struct {
 	Fset *token.FileSet
 
@@ -49,10 +49,11 @@ func (r *Renderer) Render(w io.Writer, d *Diagnostic) error {
 		return err
 	}
 
-	pos := r.Fset.Position(d.Pos)
-	if pos.IsValid() {
-		if _, err := fmt.Fprintf(w, "  --> %s\n", pos); err != nil {
-			return err
+	if r.Fset != nil {
+		if pos := r.Fset.Position(d.Pos); pos.IsValid() {
+			if _, err := fmt.Fprintf(w, "  --> %s\n", pos); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -62,13 +63,14 @@ func (r *Renderer) Render(w io.Writer, d *Diagnostic) error {
 	}
 
 	for _, n := range d.Notes {
-		np := r.Fset.Position(n.Pos)
 		if _, err := fmt.Fprintf(w, "  %s %s\n", r.color(ansiCyan, "note:"), n.Message); err != nil {
 			return err
 		}
-		if np.IsValid() {
-			if _, err := fmt.Fprintf(w, "  --> %s\n", np); err != nil {
-				return err
+		if r.Fset != nil {
+			if np := r.Fset.Position(n.Pos); np.IsValid() {
+				if _, err := fmt.Fprintf(w, "  --> %s\n", np); err != nil {
+					return err
+				}
 			}
 		}
 		nEnd := n.End

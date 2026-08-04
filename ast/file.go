@@ -7,12 +7,12 @@ import (
 	"github.com/vertex-language/vertex/token"
 )
 
-// BuildClause is `build <tag>` (A.2.2). Both `build` and the tag scan as
-// identifiers.
+// BuildClause is `build <tag>`. Both `build` and the tag scan as identifiers.
 //
-// Tag is TagNone when Name is unrecognized. A.2.2 makes that a compile error
-// rather than a silently-excluded file, so the caller must distinguish "unknown
-// tag" from "no build clause" — Build.IsValid() answers the latter.
+// Tag is TagNone when Name is unrecognized. An unrecognized tag is a compile
+// error rather than a silently excluded file, so a caller must distinguish
+// "unknown tag" from "no build clause" — the nil-ness of File.Build answers the
+// latter.
 type BuildClause struct {
 	Build  token.Pos
 	TagPos token.Pos
@@ -23,16 +23,20 @@ type BuildClause struct {
 func (b *BuildClause) Pos() token.Pos { return b.Build }
 func (b *BuildClause) End() token.Pos { return b.TagPos + token.Pos(len(b.Name)) }
 
-// File is one parsed .vs source file.
+// File is one parsed source file.
+//
+// The package clause is the first non-comment construct and is mandatory; the
+// build clause, if present, is the second; all imports precede all
+// declarations. Top-level declarations are order-independent.
 //
 // Comments holds every comment in the file in source order, including those
-// already attached as a Doc or Comment elsewhere. Attaching to nodes and keeping
-// the flat list is the same arrangement gofmt relies on: the flat list is what a
-// printer walks to place anything the attachment heuristic missed.
+// already attached as a Doc or trailing Comment elsewhere. Keeping the flat
+// list alongside the attachments is what lets a printer place anything the
+// attachment heuristic missed.
 type File struct {
 	Doc     *CommentGroup
 	Package token.Pos
-	Name    *Ident // the PackageClause name — the qualifier importers use
+	Name    *Ident // the package clause name — the qualifier importers use
 
 	Build   *BuildClause // nil if absent
 	Imports []*ImportDecl
@@ -65,13 +69,12 @@ func (f *File) Filename(fset *token.FileSet) string {
 
 // Package is a set of files compiled as one unit.
 //
-// One package is one .o/.vbyte, so this type's contents fix the compilation
-// unit exactly. It is a validated container and nothing more: no I/O, no import
-// resolution, no scopes. Resolution belongs to the loader, which is why this
-// does not take an importer the way Go's deprecated ast.NewPackage did.
+// It is a validated container and nothing more: no I/O, no import resolution,
+// no scopes. Resolution belongs to the loader, which is why this takes no
+// importer.
 type Package struct {
-	Name  string // from the PackageClause; all files agree
-	Path  string // resolved import path — a locator, not a name (A.2.3)
+	Name  string // from the package clause; all files agree
+	Path  string // resolved import path — a locator, not a name
 	Dir   string
 	Tag   token.BuildTag
 	Files []*File // sorted by filename
@@ -95,9 +98,9 @@ func (p *Package) End() token.Pos {
 //
 // It is pure: no filesystem access, no imports, no diagnostics beyond its own
 // well-formedness checks. It asserts only what makes the container coherent —
-// at least one file, agreement on the PackageClause name, and agreement with
-// the target tag. Everything the annex marks with a leading turnstile is a
-// static rule over an already-parsed tree and belongs to the analyzer, not here.
+// at least one file, agreement on the package clause name, and agreement with
+// the target tag. Everything else is a static rule over an already-parsed tree
+// and belongs to the analyzer.
 //
 // Files are sorted by filename so the resulting object is byte-reproducible.
 func NewPackage(fset *token.FileSet, path, dir string, target token.BuildTag, files []*File) (*Package, error) {
@@ -129,9 +132,9 @@ func NewPackage(fset *token.FileSet, path, dir string, target token.BuildTag, fi
 		}
 	}
 
-	// A.2.2: a file whose tag does not match the target is excluded from the
-	// build whole. Filtering is the loader's job, so reaching here with a
-	// mismatch is a caller bug rather than a user error.
+	// A file whose tag does not match the target is excluded from the build
+	// outright, and filtering is the loader's job — so a mismatch reaching here
+	// is a caller bug rather than a user error.
 	for _, f := range sorted {
 		if t := f.BuildTag(); t != token.TagNone && t != target {
 			return nil, fmt.Errorf("package %s: %s carries build tag %q, not %q",

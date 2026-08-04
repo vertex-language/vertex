@@ -2,39 +2,40 @@ package ast
 
 import "github.com/vertex-language/vertex/token"
 
-// BlockStmt is `{ StatementList }` (A.5).
+// BlockStmt is `{ StatementList }`.
 //
-// A.0.6 makes this brace newline-significant, unlike the braces of a
-// CompositeLit, MapLit, FieldList, or DeclareBody. The scanner cannot tell them
-// apart, which is why it records line breaks as Token.NLBefore and never
-// suppresses them.
+// This brace is terminator-significant, unlike the braces of a LiteralValue,
+// MapLit, field list, or declare body. That distinction is a parsing question
+// resolved as the brace is opened, and the tree records only which construct
+// the parser built.
 type BlockStmt struct {
 	Lbrace token.Pos
 	List   []Stmt
 	Rbrace token.Pos
 }
 
-// DeclStmt wraps a declaration appearing in statement position. In practice a
-// *VarDecl, since A.5 lists VariableDeclaration among the statements and A.2
-// lists it among the top-level declarations.
+// DeclStmt wraps a declaration appearing in statement position — in practice a
+// *VarDecl, which is both a Statement and a TopLevelDecl.
 type DeclStmt struct {
 	Decl Decl
 }
 
-// ExprStmt is A.5.9's ExpressionStatement. The grammar excludes a bare
-// CompositeLiteral or MapLiteral here, which is what keeps `{...}` unambiguous
-// against a BlockStmt.
+// ExprStmt is an expression in statement position. A bare CompositeLit or
+// MapLit is excluded here, which is what keeps `{...}` unambiguous against a
+// Block.
 type ExprStmt struct {
 	X Expr
 }
 
-// AssignStmt is both forms of A.5.2. Op is ASSIGN for the list form and a
-// CompoundAssignOperator otherwise; the compound form has exactly one target
-// and one value.
+// AssignStmt is both forms of assignment. Op is ASSIGN for the list form and a
+// compound assign_op otherwise, in which case there is exactly one target and
+// one value.
 //
-// A target may be `&x` (an *UnaryExpr, dereference-on-the-write-side) or a
-// BlankIdentifier. Assignment is a statement and never an expression, so there
-// is no `=` inside a condition anywhere in this tree.
+// A target is a bare PrimaryExpr, so a dereference-write `&p = 99` is a
+// *UnaryExpr and the blank identifier is an ordinary *Ident; neither needs its
+// own shape. Which shapes are assignable is a static rule. Assignment is a
+// statement and never an expression, so no `=` appears inside a condition
+// anywhere in this tree.
 type AssignStmt struct {
 	Targets []Expr
 	OpPos   token.Pos
@@ -42,34 +43,37 @@ type AssignStmt struct {
 	Values  []Expr // owning positions: any may be a *TransferExpr
 }
 
-// IfStmt has no initializer clause. A.5.4 is explicit that the error-checking
-// idiom is two statements and that the verbosity is intentional.
+// IfStmt has no initializer clause; the two-statement error-checking idiom is
+// intentional.
 type IfStmt struct {
 	If   token.Pos
-	Cond Expr // parsed under [~Lit]
+	Cond Expr
 	Body *BlockStmt
 	Else Stmt // *BlockStmt or *IfStmt; nil if absent
 }
 
-// WhileStmt is the only loop primitive (A.5.5).
+// WhileStmt is the only loop primitive.
 type WhileStmt struct {
 	While token.Pos
 	Cond  Expr
 	Body  *BlockStmt
 }
 
-// ForStmt is `for IterationBinding in Expr Block` (A.5.6).
+// ForStmt is `for IterationBinding in Expression Block`.
 //
-// Mode is ILLEGAL for the bare (shared-access) form, MUT for exclusive access,
-// or VAR for the consuming form. A.5.6 puts the marker on the binding rather
-// than the iterable because what transfers is each element, one per iteration.
+// Mode is INVALID for the bare form, MUT for exclusive access, or VAR for the
+// consuming form. The marker sits on the binding rather than on the iterable,
+// because what transfers is each element, one per iteration.
 //
-// Names holds one name, or two for the index/value and key/value forms.
+// Names holds one name, or two for the index/value and key/value forms. The
+// marker and the two-name form do not combine, but both are parsed together
+// here so the combination can be diagnosed as itself rather than as a syntax
+// error at the comma.
 type ForStmt struct {
 	For     token.Pos
 	ModePos token.Pos
-	Mode    token.Kind // ILLEGAL, MUT, VAR
-	Names   []*Ident   // len 1 or 2; entries may be BlankIdentifier
+	Mode    token.Kind // INVALID, MUT, VAR
+	Names   []*Ident   // len 1 or 2
 	In      token.Pos
 	X       Expr
 	Body    *BlockStmt
@@ -83,8 +87,8 @@ type SwitchStmt struct {
 	Rbrace token.Pos
 }
 
-// CaseClause is `case PatternList :` or `default :` (A.5.7).
-// Patterns == nil marks the default clause; A.5.7 permits at most one.
+// CaseClause is `case PatternList :` or `default :`. Patterns == nil marks the
+// default clause; that there is at most one is a static rule.
 type CaseClause struct {
 	Case     token.Pos // position of `case` or `default`
 	Patterns []Expr    // nil for default
@@ -92,33 +96,35 @@ type CaseClause struct {
 	Body     []Stmt
 }
 
-// EnumPattern is `.Name` or `.Name(bindings)` in case position (A.5.7).
+// EnumPattern is `.identifier` or `.identifier(bindings)` in Pattern position,
+// where a leading dot is always this and never an EnumShorthand reached through
+// Expression.
 //
-// Distinct from EnumShorthand because the payload entries are binding names,
-// not expressions, and A.5.7 makes them views into the payload rather than
-// copies.
+// The distinction is not cosmetic: the payload entries are binding names rather
+// than expressions, and they are views into the payload rather than copies.
 type EnumPattern struct {
 	Dot    token.Pos
 	Name   *Ident
 	Lparen token.Pos // NoPos when there is no payload list
-	Binds  []*Ident  // entries may be BlankIdentifier
+	Binds  []*Ident
 	Rparen token.Pos
 }
 
+// ReturnStmt is a bare comma list, never parenthesized: parentheses construct a
+// tuple, bare commas unbuild one.
 type ReturnStmt struct {
 	Return  token.Pos
-	Results []Expr // bare comma list, never parenthesized (A.5.3)
+	Results []Expr
 }
 
-// DeferStmt takes a call and nothing else (A.5.8). Arguments are evaluated at
-// registration; only the call is postponed.
+// DeferStmt takes a call and nothing else.
 type DeferStmt struct {
 	Defer token.Pos
 	Call  *CallExpr
 }
 
-// BranchStmt is `break`, `continue`, or `fallthrough`. There are no loop labels
-// (A.5.9), so it carries none.
+// BranchStmt is `break`, `continue`, or `fallthrough`. There are no loop
+// labels, so it carries none.
 type BranchStmt struct {
 	TokPos token.Pos
 	Tok    token.Kind // BREAK, CONTINUE, FALLTHROUGH
@@ -131,24 +137,37 @@ type SelectStmt struct {
 	Rbrace token.Pos
 }
 
-// SelectClause is one case of A.10.2. Targets is non-nil for the
-// `x = ch.receive()` form. Op is the channel operation, optionally wrapped in an
-// *AwaitExpr — A.10.2 requires a single select to be entirely bare or entirely
-// awaited, checked statically.
+// SelectClause is one clause of a select, covering all three ChannelCase forms.
 //
-// Op == nil marks the default clause.
+// Kw is LET or VAR for the declaring form, which introduces bindings scoped to
+// this clause's body; INVALID otherwise. Targets is non-nil for the assigning
+// form over pre-declared targets. Exactly one of Bindings and Targets is
+// non-empty, and both are empty for the bare form.
+//
+// Op is the channel operation, optionally wrapped in an *AwaitExpr. That one
+// select is entirely bare or entirely awaited, and which calls are admissible
+// here at all, are static rules. Op == nil marks the default clause.
 type SelectClause struct {
-	Case    token.Pos
-	Targets []Expr
-	Assign  token.Pos
-	Op      Expr // *CallExpr or *AwaitExpr wrapping one; nil for default
-	Colon   token.Pos
-	Body    []Stmt
+	Case token.Pos
+
+	KwPos    token.Pos
+	Kw       token.Kind // LET, VAR, or INVALID
+	Bindings []*Binding
+	Targets  []Expr
+
+	Assign token.Pos
+	Op     Expr // *CallExpr or *AwaitExpr wrapping one; nil for default
+
+	Colon token.Pos
+	Body  []Stmt
 }
 
+// BadStmt marks an unparseable statement span; see BadExpr.
 type BadStmt struct {
 	From, To token.Pos
 }
+
+// -------------------------------------------------------------- positions
 
 func (s *BlockStmt) Pos() token.Pos    { return s.Lbrace }
 func (s *DeclStmt) Pos() token.Pos     { return s.Decl.Pos() }
@@ -210,11 +229,11 @@ func (s *ReturnStmt) End() token.Pos {
 	if n := len(s.Results); n > 0 {
 		return s.Results[n-1].End()
 	}
-	return s.Return + 6
+	return s.Return + token.Pos(len(token.RETURN.Spelling()))
 }
 
 func (s *BranchStmt) End() token.Pos {
-	return s.TokPos + token.Pos(len(s.Tok.String()))
+	return s.TokPos + token.Pos(len(s.Tok.Spelling()))
 }
 
 func (*BlockStmt) stmtNode()  {}
@@ -231,4 +250,6 @@ func (*BranchStmt) stmtNode() {}
 func (*SelectStmt) stmtNode() {}
 func (*BadStmt) stmtNode()    {}
 
-func (*EnumPattern) exprNode() {} // appears in Pattern position (A.5.7)
+// EnumPattern is an Expr because it occupies a Pattern slot, whose other
+// alternative is an Expression.
+func (*EnumPattern) exprNode() {}

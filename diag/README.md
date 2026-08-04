@@ -1,135 +1,86 @@
 # diag
 
-`github.com/vertex-language/vertex/diag`
-
-`diag` is the shared diagnostic currency for the Vertex toolchain — scanner, parser, analyzer, and `vir` all produce `*diag.Diagnostic` values through this package rather than formatting their own error strings. It depends on `token` (`github.com/vertex-language/vertex/token`) for `Pos` and `FileSet`; nothing in the toolchain depends on `diag` for anything but diagnostics.
-
-The package splits into four concerns: stable rule identifiers (`Code`), the diagnostic value itself, collection (`List`), and human-facing rendering (`Renderer`). The first two are what a phase produces; the last two are what a driver does with the result.
-
-## Codes
-
-### `Code`
-
 ```go
-type Code int
+import "github.com/vertex-language/vertex/diag"
 ```
 
-`Code` is the stable handle for a diagnostic rule. Renumbering one is a breaking change to the language's test corpus, because A.12.2's `Expected(error, "...")` compares rendered message text as specification. Values are assigned explicitly rather than via `iota` so that inserting a new code can never shift another's number.
+Package `diag` is the shared diagnostic currency for the Vertex toolchain. Scanner, parser, analyzer, and vir all produce `*Diagnostic` values through this package rather than formatting their own error strings.
 
-Codes fall into ranges keyed to A.14's categories:
+`diag` depends on `token` for `Pos` and `FileSet`, and on nothing else.
 
-```
-0xxx  internal
-1xxx  lexical                       (A.1)
-2xxx  syntactic                     (A.2–A.5)
-3xxx  declarations and names        (A.6)
-4xxx  types                         (A.3)
-5xxx  ownership and exclusivity     (A.9)
-6xxx  generics                      (A.7)
-7xxx  pointers and memory           (A.4.8)
-8xxx  interop                       (A.8)
-9xxx  concurrency, devices, testing (A.10–A.12)
-```
+## Design philosophy
 
-Gaps within a range are deliberate and reserved for analyzer passes that don't exist yet; only 1xxx (scanner) and 2xxx (parser) are densely populated today, plus two early entries in 5xxx and 7xxx that exist because their spec sections already commit to a named fix-it (`TransferMethodRemoved`, `AddrOnNonPointer`/`AddrOnTemporary`).
+A rejection has one shape everywhere: a stable `Code`, a span, a message rendered from a registered template, and optionally secondary spans and machine-applicable edits.
 
-### `Internal`
+The template registry is what keeps one rule's message identical across every site that raises it. This matters beyond consistency: it's what makes the error form of `grammar.md`'s `ExpectedType` — whose second operand is a message string — stable enough to serve as specification. A test can assert `Expected(error, "expected a type, found ...")` and trust that text never drifts based on which call site happened to raise it.
 
-```go
-const Internal Code = 1
-```
+**Rendering is a separate concern from the diagnostic itself.** The normative comparison is always against `Diagnostic.Text()`, never against anything `Renderer` produces. This is enforced structurally: `Text()` returns the message alone, stripped of position, severity, code, notes, and caret — so a source excerpt or column number can never leak into a spec-level comparison.
 
-Marks a broken compiler invariant — never produced by valid or invalid source. If a caller sees one, it's a bug in the compiler, not in the user's program. `New` also falls back to `Internal` automatically if asked to build a diagnostic from an unregistered code.
+## Package layout
 
-### Registry
+| File | Contents |
+|---|---|
+| `diag.go` | `Diagnostic`, `Severity`, constructors (`New`, `At`, `AtToken`, `AtNode`), and the `WithNote`/`WithFixit` builder methods |
+| `code.go` | `Code`, the numeric ranges, the template registry, and the conformance list `declaredCodes` |
+| `list.go` | `Reporter`, `List` (a diagnostic sink with sort/dedup/truncate), and `ReporterFunc` |
+| `render.go` | `Renderer`, which produces human-facing output with source excerpts and carets |
 
-Each `Code` maps to a message template and default `Severity` in an internal registry. The template is the normative text: changing one changes what `Expected(error, "...")` tests match, so it's treated as a language change rather than an implementation detail. Templates avoid deictic phrasing ("this literal", "here") in favor of naming the construct, since `Diagnostic.Text()` strips position information and the message has to read the same with or without a span shown.
-
-- **`(Code) String() string`** — renders the stable identifier, e.g. `"V1003"`. This is what a test that cares which rule fired should pin, rather than the message text.
-- **`(Code) Severity() Severity`** — the code's registered severity, defaulting to `Error` for an unregistered code so a registry gap can't silently downgrade a rejection into a warning.
-- **`(Code) Template() string`** — the raw format string, intended for the test runner and tooling that enumerates the normative surface, not for call sites.
-- **`(Code) Registered() bool`** — whether the code has a registry entry at all.
-- **`Codes() []Code`** — every declared code, in declaration order, from a hand-maintained list. It exists so a conformance test can assert that every declared code has a registry entry, that no two codes share a numeric value, and that no two share a template — properties the compiler can't check itself since Go has no reflection over untyped constants.
-
-## Diagnostics
-
-### `Severity`
-
-```go
-type Severity uint8
-
-const (
-	Error Severity = iota
-	Warning
-)
-```
-
-Stringifies to `"error"` or `"warning"`.
-
-### `Diagnostic`
+## Core type
 
 ```go
 type Diagnostic struct {
 	Code Code
 	Sev  Severity
 
-	Pos token.Pos
-	End token.Pos
+	Pos token.Pos // where the diagnostic points
+	End token.Pos // bounds the underlined span
 
-	Message string
-
-	Notes  []Note
-	Fixits []Fixit
+	Message string // the rendered template — the normative text
+	Notes   []Note
+	Fixits  []Fixit
 }
 ```
 
-The single currency for a rejection, produced identically by every phase. `Pos` is where the diagnostic points; `End` bounds the underlined span, and if it's `NoPos` or doesn't exceed `Pos`, only one column is underlined. `Message` is the already-rendered template — the normative text `Expected(error, "...")` compares against.
+`Notes` carries secondary spans — a use-after-transfer needs two: where the binding died, and where it was subsequently read. `Fixits` carries machine-applicable edits, present from the start because grammar.md already commits to one by name — `transfer` is reserved and bound to nothing so that x.transfer() diagnoses as a misspelled ownership marker, and it's cheaper to carry an empty slice now than to thread a new field through every constructor later.
 
-`Notes` carries secondary spans for diagnostics that need to point at more than one place — a use-after-transfer (A.9.2) needs both where the binding died and where it was subsequently read. `Fixits` carries machine-applicable edits; the field exists from day one because the spec already commits to two fix-its by name (A.1.4's `.transfer()` removal and A.4.8's `addr(x)` → `&x`), and threading a new field through every constructor later would be worse than carrying an empty slice now.
-
-### `Note` and `Fixit`
+## Constructing diagnostics
 
 ```go
-type Note struct {
-	Pos     token.Pos
-	End     token.Pos
-	Message string
-}
-
-type Fixit struct {
-	Message string
-	Pos     token.Pos
-	End     token.Pos
-	Text    string
-}
+func New(code Code, pos, end token.Pos, args ...any) *Diagnostic
+func At(code Code, pos token.Pos, args ...any) *Diagnostic       // zero-width position
+func AtToken(code Code, t token.Token, args ...any) *Diagnostic  // over a token's full extent
+func AtNode(code Code, pos, end token.Pos, args ...any) *Diagnostic
 ```
 
-A `Fixit` is a single replacement over `[Pos, End)`: an empty `Text` is a deletion, an empty span is an insertion.
+Call sites never format their own text — `New` looks up the code's registered template and formats it with `args`. `AtNode` deliberately takes `pos, end token.Pos` rather than an `ast.Node`, so that `diag` does not depend on `ast`. The dependency runs the other way; a cycle here would be structural.
 
-### Constructors
+Builder methods attach secondary information and return the diagnostic for chaining:
 
-- **`New(code Code, pos, end token.Pos, args ...any) *Diagnostic`** — builds a diagnostic by formatting the code's registered template with `args`. Call sites never format their own text; that's what keeps one rule's message identical across every site that raises it. If `code` isn't registered, `New` returns an `Internal` diagnostic instead of panicking.
-- **`At(code Code, pos token.Pos, args ...any) *Diagnostic`** — `New` for a zero-width position (`end` is `token.NoPos`).
-- **`AtToken(code Code, t token.Token, args ...any) *Diagnostic`** — `New` over a token's full extent, using `t.Pos` and `t.End()`.
+```go
+d := list.Add(diag.UndeclaredName, pos, end, name)
+d.WithNote(declPos, declEnd, "did you mean %s?", suggestion)
+d.WithFixit(pos, end, "var "+name, "use the 'var' prefix")
+```
 
-### Mutators
+`WithInsert` and `WithDelete` are convenience wrappers over `WithFixit` for an empty span and empty replacement text, respectively.
 
-- **`(*Diagnostic) WithNote(pos, end token.Pos, format string, args ...any) *Diagnostic`** — appends a `Note`, formatted like `fmt.Sprintf`. Returns the receiver so it chains.
-- **`(*Diagnostic) WithFixit(pos, end token.Pos, text, format string, args ...any) *Diagnostic`** — appends a `Fixit`. Typical use:
+## Codes and the registry
 
-  ```go
-  d.WithFixit(call.Pos(), call.End(), "var "+name, "use the 'var' prefix")
-  ```
+`Code` is a stable, explicitly-numbered handle — never assigned by `iota`, so inserting a new code can't shift another's value. Ranges follow grammar.md's own section order: 0xxx internal, 1xxx lexical elements, 2xxx syntax errors, 3xxx types, 4xxx expressions, 5xxx statements, 6xxx declarations and names, 7xxx generics, 8xxx declare blocks, 9xxx test result types.
 
-### Accessors
+Only the lexical (1xxx) and syntax (2xxx) ranges are densely populated today, since the scanner and the parser are the only phases that exist; every other range holds the forms grammar.md names as parsing-and-then-rejected, waiting for the analyzer pass that raises them.
 
-- **`(*Diagnostic) Text() string`** — the message alone: no position, severity, code, notes, or caret. This is what an `Expected(error, "...")` test compares against; keeping it separate from rendering is what stops a source excerpt or column number from leaking into a normative comparison.
-- **`(*Diagnostic) Error() string`** — same as `Text()`, so a `*Diagnostic` satisfies `error`.
-- **`(*Diagnostic) Span() (pos, end token.Pos)`** — the underlined extent, normalizing an absent or inverted `End` to `Pos + 1`.
+```go
+func (c Code) String() string     // "V1003" — the stable identifier to pin in tests
+func (c Code) Severity() Severity // defaults to Error if unregistered
+func (c Code) Template() string   // the raw format string
+func (c Code) Registered() bool
+func Codes() []Code               // every declared code, in declaration order
+```
 
-## Collection
+`declaredCodes` is a hand-maintained list backing a conformance test, since Go has no reflection over untyped constants, and a code declared but never registered would surface as a silent Internal at the first call site that used it. The test checks that every declared code has a registry entry, no two codes share a numeric value, and no two share a message template.
 
-### `Reporter`
+## Collecting diagnostics
 
 ```go
 type Reporter interface {
@@ -137,40 +88,36 @@ type Reporter interface {
 }
 ```
 
-What a phase accepts. Scanner, parser, and analyzer all take a `Reporter` rather than a concrete `*List`, so an LSP can stream diagnostics one at a time and a batch build can collect them into a list, without either phase knowing which. `ReporterFunc` adapts a plain function to the interface.
+Scanner, parser, and analyzer all accept a `Reporter` rather than a concrete `*List` — so an LSP can stream diagnostics and a batch build can collect them, without either phase knowing which.
 
-### `List`
+`List` is the standard collector (its zero value is ready to use):
 
 ```go
-type List struct { /* ... */ }
+l := &diag.List{}
+l.Add(diag.ExpectedToken, pos, end, "')'", "','")
+
+l.Sort()             // by position, then code, stably
+l.Dedup()             // drop identical (code, pos, message) triples
+l.Truncate(100)       // keep the first n
+if err := l.Err(); err != nil { ... }
 ```
 
-Collects diagnostics; the zero value is ready to use.
+`Sort` groups by file in `AddFile` order, since positions are `FileSet`-global. `Dedup` exists because parser recovery routinely re-reports at a resync point; this is cheaper than making every recovery path idempotent. `Truncate` deliberately does not synthesize a "too many errors" entry — that text would be an unregistered message.
 
-- **`(*List) Report(d *Diagnostic)`** — the `Reporter` implementation. A `nil` diagnostic is silently ignored, which lets a phase call `Report(maybeNilCheck())` without an extra branch.
-- **`(*List) Add(code Code, pos, end token.Pos, args ...any) *Diagnostic`** — `New` plus `Report` in one call, returning the diagnostic so a caller can chain `WithNote`/`WithFixit` onto an already-recorded entry.
-- **`(*List) Items() []*Diagnostic`**, **`Len() int`**, **`NumErrors() int`**, **`HasErrors() bool`** — basic accessors; `NumErrors` counts only `Error`-severity entries.
-- **`(*List) Sort()`** — orders by position, then by code, stably. Positions are `FileSet`-global, so this also groups by file in the order files were added to the set.
-- **`(*List) Dedup()`** — removes diagnostics identical in code, position, and message. Parser error recovery routinely re-reports at a resync point; deduping after the fact is cheaper than making every recovery path idempotent.
-- **`(*List) Truncate(n int)`** — keeps the first `n` diagnostics and recomputes the error count. It deliberately does not synthesize a "too many errors" entry, since that text would be an unregistered message outside the `Code`/registry system; a caller that truncates is expected to say so itself.
-- **`(*List) Err() error`** — returns the list itself as an `error` if it holds any `Error`-severity diagnostic, `nil` otherwise. Idiomatic use is `if err := list.Err(); err != nil { ... }`.
-- **`(*List) Error() string`** — renders messages only, one per line, so a `*List` can be returned as a plain `error` without dragging in `Renderer` or a `FileSet`.
+`List` also implements `error`, rendering one message per line, so it can be returned directly from a phase without dragging in the renderer or a `FileSet`.
 
 ## Rendering
 
-### `Renderer`
+`Renderer` turns a `Diagnostic` or `List` into human-facing text, with an optional source excerpt and caret run under the offending span:
 
 ```go
-type Renderer struct {
-	Fset   *token.FileSet
-	Source func(*token.File) []byte
-	Color  bool
+r := &diag.Renderer{
+	Fset:   fset,
+	Source: func(f *token.File) []byte { return sourceBytes[f.Name()] },
+	Color:  true,
 }
+r.Render(os.Stderr, d)
+r.RenderList(os.Stderr, list)
 ```
 
-Produces human-facing output, deliberately kept separate from `Diagnostic` itself — the normative comparison in A.12.2 is always against `Text()`, never against anything `Renderer` produces. `Source` supplies a file's bytes for excerpting and may be `nil`, in which case diagnostics render without a source line or caret. `Color` enables ANSI escapes.
-
-- **`(*Renderer) Render(w io.Writer, d *Diagnostic) error`** — writes a diagnostic as a severity/code header line, a `-->` file position, a source excerpt with carets under the span, then each note and fix-it in turn.
-- **`(*Renderer) RenderList(w io.Writer, l *List) error`** — calls `Render` for every item in a `*List`, separated by a blank line.
-
-Excerpting is internal: given a start/end span, the renderer locates the containing line via `Fset.File`, blanks everything before the span while preserving tabs (so the caret run aligns under any tab width without the renderer needing to know one), and clips a multi-line span's caret run to the first line.
+`Source` may be `nil`, in which case diagnostics render without a source line or caret. The caret run is built by echoing the line's leading whitespace — preserving tabs — so it aligns correctly under any tab width without the renderer needing to know one.

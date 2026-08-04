@@ -1,7 +1,7 @@
 package types
 
-// BasicKind enumerates A.1.4's PredeclaredTypeNames plus the untyped kinds a
-// literal carries before it reaches a typed position (A.1.5.1).
+// BasicKind enumerates the PredeclaredTypeNames, the predeclared tensor element
+// type names, and the untyped kinds a literal carries before it lands.
 type BasicKind int
 
 const (
@@ -23,19 +23,28 @@ const (
 	Char
 	String
 
-	// Untyped kinds. A.1.5.1 ⊢ "An integer literal is untyped until it reaches
-	// a typed position, where it takes that position's type." These never
-	// appear in a declared signature; they exist only between the literal and
-	// its destination.
+	// Tensor element types. Ordinary identifiers in the same implicit scope as
+	// the type names, but with their own legality rule: §2.3 ⊢ legal "only
+	// inside an `npu` body". They are Basics because they are scalar element
+	// types with their own widths, and IsTensorElem is what gates them.
+	BF16
+	FP8E4M3
+	FP8E5M2
+	Int4
+
+	// Untyped kinds. §4.1 ⊢ "a literal has no type until it lands; where a
+	// destination type exists the literal takes it". These never appear in a
+	// declared signature; they exist only between a literal and its
+	// destination.
 	UntypedBool
 	UntypedInt
 	UntypedFloat
 	UntypedChar
 	UntypedString
 
-	// UntypedNil is not a general value. A.5.2 ⊢ nil "is not a general value
-	// and has no type of its own" — it appears only against typed_ptr and as
-	// the map-erase operand.
+	// UntypedNil is not a general value. §10 ⊢ "there is no optional type, no
+	// propagation operator, and no general `nil`. `nil` belongs to
+	// `typed_ptr T` and to nothing else."
 	UntypedNil
 )
 
@@ -44,9 +53,8 @@ const (
 // The flags are named Info* rather than Is* because predicates.go exports
 // IsInteger, IsFloat, IsNumeric, IsString, IsOrdered, and IsUntyped as
 // functions over Type, and Go gives constants and functions one namespace per
-// package. The functions are the API analyzer and lower call; these flags are
-// the internal representation those functions read, so the flags are what
-// carries the distinguishing prefix.
+// package. The functions are the API the analyzer and lower call; these flags
+// are the representation those functions read.
 type BasicInfo uint
 
 const (
@@ -58,8 +66,18 @@ const (
 	InfoString
 	InfoUntyped
 
+	// InfoTensorElem marks the four names of §2.3's tensor-element family. It
+	// is carried alongside the family bit (bf16 and the fp8 pair are floats,
+	// int4 is an integer) so arithmetic inside an npu body reads the same
+	// predicates as anywhere else, while ConvertibleTo can still single them
+	// out for §4.2's constructor-spelling exception.
+	InfoTensorElem
+
 	InfoNumeric = InfoInteger | InfoFloat
-	InfoOrdered = InfoInteger | InfoFloat | InfoString | InfoChar
+
+	// §3.5 ⊢ Ordered is "numerics and `string`". `char` is deliberately absent:
+	// it is comparable but not ordered, so `'a' < 'b'` is an error.
+	InfoOrdered = InfoNumeric | InfoString
 )
 
 type Basic struct {
@@ -79,18 +97,21 @@ func (b *Basic) is(i BasicInfo) bool { return b != nil && b.info&i != 0 }
 // Typ holds the singleton for each BasicKind, indexed by kind.
 //
 // There is exactly one object per kind, so identity comparison on *Basic is
-// type identity — which is what makes A.1.4's byte/uint8 rule fall out. The
-// spec says they "denote the same type; no conversion is required or permitted
-// between them, in either direction", so `byte` is not a distinct entry here.
-// The universe scope binds both spellings to Typ[Uint8].
+// type identity — which is what makes §2.3's byte rule fall out. ⊢ "`byte` is
+// an alias for `uint8`, not a distinct type", so there is no `byte` entry here
+// and the universe scope binds both spellings to Typ[Uint8].
 //
 // The cost is that a diagnostic about a value the user wrote as `byte` says
-// "uint8". That is the correct trade: inventing a second object to preserve the
-// spelling would make Identical() lie.
+// "uint8". That is the correct trade: a second object to preserve the spelling
+// would make Identical lie.
 var Typ = []*Basic{
 	Invalid: {Invalid, 0, "invalid type"},
 
-	Bool:    {Bool, InfoBoolean, "bool"},
+	Bool: {Bool, InfoBoolean, "bool"},
+
+	// §2.3 ⊢ "`int` and `uint` are the target's pointer width and are distinct
+	// types from `int64`/`uint64` even where the widths agree." Distinctness is
+	// this entry; the width is Sizes.WordSize (sizes.go).
 	Int:     {Int, InfoInteger, "int"},
 	Int8:    {Int8, InfoInteger, "int8"},
 	Int16:   {Int16, InfoInteger, "int16"},
@@ -104,11 +125,16 @@ var Typ = []*Basic{
 	Float32: {Float32, InfoFloat, "float32"},
 	Float64: {Float64, InfoFloat, "float64"},
 
-	// A.1.5.2 ⊢ a CharLiteral "denotes exactly one Unicode scalar value, held
-	// in 4 bytes. 'A' and "A" are different types and never interconvert
-	// implicitly." Char is therefore its own kind, not an alias for int32.
+	// §2.3 ⊢ "`char` is one Unicode scalar value." It is its own kind, not an
+	// alias for int32: grammar.md keeps char_value and string_value separate,
+	// and §4.1 ⊢ 'A' and "A" "never interconvert implicitly".
 	Char:   {Char, InfoChar, "char"},
 	String: {String, InfoString, "string"},
+
+	BF16:    {BF16, InfoFloat | InfoTensorElem, "bf16"},
+	FP8E4M3: {FP8E4M3, InfoFloat | InfoTensorElem, "fp8e4m3"},
+	FP8E5M2: {FP8E5M2, InfoFloat | InfoTensorElem, "fp8e5m2"},
+	Int4:    {Int4, InfoInteger | InfoTensorElem, "int4"},
 
 	UntypedBool:   {UntypedBool, InfoBoolean | InfoUntyped, "untyped bool"},
 	UntypedInt:    {UntypedInt, InfoInteger | InfoUntyped, "untyped int"},
@@ -118,35 +144,41 @@ var Typ = []*Basic{
 	UntypedNil:    {UntypedNil, InfoUntyped, "untyped nil"},
 }
 
-// Predeclared names, in the order A.1.4 lists them. `byte` and `uint8` share an
-// entry deliberately; see Typ.
-var predeclared = map[string]*Basic{
-	"bool":    Typ[Bool],
-	"int":     Typ[Int],
-	"int8":    Typ[Int8],
-	"int16":   Typ[Int16],
-	"int32":   Typ[Int32],
-	"int64":   Typ[Int64],
-	"uint":    Typ[Uint],
-	"uint8":   Typ[Uint8],
-	"uint16":  Typ[Uint16],
-	"uint32":  Typ[Uint32],
-	"uint64":  Typ[Uint64],
+// predeclaredTypes are the PredeclaredTypeNames, in the order grammar.md lists
+// them. `byte` and `uint8` share an entry deliberately; see Typ.
+var predeclaredTypes = map[string]*Basic{
+	"int": Typ[Int], "int8": Typ[Int8], "int16": Typ[Int16],
+	"int32": Typ[Int32], "int64": Typ[Int64],
+	"uint": Typ[Uint], "uint8": Typ[Uint8], "uint16": Typ[Uint16],
+	"uint32": Typ[Uint32], "uint64": Typ[Uint64],
 	"byte":    Typ[Uint8],
-	"float32": Typ[Float32],
-	"float64": Typ[Float64],
-	"char":    Typ[Char],
-	"string":  Typ[String],
+	"float32": Typ[Float32], "float64": Typ[Float64],
+	"bool": Typ[Bool], "char": Typ[Char], "string": Typ[String],
+}
+
+// predeclaredTensorElems are the predeclared tensor element type names. They
+// are a separate table from predeclaredTypes because they are a separate family
+// with a separate legality rule (§2.3), not because the scanner tells them
+// apart — it does not, and neither does Universe, which holds both.
+var predeclaredTensorElems = map[string]*Basic{
+	"bf16": Typ[BF16], "fp8e4m3": Typ[FP8E4M3],
+	"fp8e5m2": Typ[FP8E5M2], "int4": Typ[Int4],
 }
 
 // LookupPredeclared returns the basic type for a PredeclaredTypeName, or nil.
-// These are ordinary identifiers pre-bound in an implicit scope (A.1.4), so the
-// resolver consults this rather than the scanner recognizing them.
-func LookupPredeclared(name string) *Basic { return predeclared[name] }
+func LookupPredeclared(name string) *Basic { return predeclaredTypes[name] }
+
+// LookupTensorElem returns the basic type for a predeclared tensor element type
+// name, or nil. The analyzer consults this to decide whether a resolved name
+// carries §2.3's npu-body restriction.
+func LookupTensorElem(name string) *Basic { return predeclaredTensorElems[name] }
 
 // Default returns the type an untyped constant takes when it reaches a position
-// that imposes none. A.1.5.1 makes this rare — most literals land in a typed
-// position — but a bare `let x = 1` needs an answer.
+// that imposes none. §4.1 makes this rare — most literals land somewhere typed
+// — but a bare `let x = 1` needs an answer.
+//
+// UntypedNil has no default: §10 gives it no type of its own, so it stays
+// untyped and the analyzer rejects a destination that is not a typed_ptr.
 func Default(t Type) Type {
 	if b, ok := t.(*Basic); ok {
 		switch b.kind {

@@ -1,15 +1,26 @@
 // Package scanner converts Vertex source bytes into tokens.
 //
-// The scanner never suppresses a line terminator and never synthesizes one.
-// A.0.6 makes a line break inside { } ordinary whitespace, but statements also
-// live inside { } blocks and end at a LineTerminator; whether a given brace
-// opens a Block or a CompositeLiteral is exactly the [+Lit] question the parser
-// tracks. So line structure is recorded as token.Token.NLBefore and the parser
-// decides what it means.
+// The scanner emits every line terminator and interprets none. A line
+// terminator is a terminator if and only if the innermost enclosing bracketing
+// construct is one whose production writes `terminator`, and whether a given
+// `{` opens a Block or a LiteralValue is a parsing question. So line structure
+// is only ever recorded — on token.Token.NLBefore — and the parser decides what
+// it means. There is no SEMICOLON kind, no synthesized NEWLINE, and no
+// automatic semicolon insertion.
 //
-// A line terminator inside a raw string is part of that string's value (A.1.5.2)
-// and does not set NLBefore, though it does advance the line table. Keeping
-// those two effects separate is why they are separate calls below.
+// A run of consecutive line terminators is one terminator, so one bool carries
+// the whole rule: no consumer ever needs the count.
+//
+// A line terminator inside a raw string is part of that string's value and must
+// not end a statement, though it does advance the line table. Keeping those two
+// effects separate is why consumeLineTerminator and skipSpace are separate
+// calls below.
+//
+// The scanner recognizes keywords and the three reserved literal keywords
+// through token.Lookup, and nothing else. Contextual keywords, predeclared type
+// and tensor-element and constraint names, and reserved builtin names are all
+// ordinary identifiers here; they are pre-bound in an implicit outermost scope
+// that the scanner must not know about.
 package scanner
 
 import (
@@ -26,7 +37,8 @@ type Mode uint
 
 const (
 	// ScanComments returns COMMENT tokens instead of discarding them. A
-	// comment still affects NLBefore either way (A.1.1).
+	// comment participates in line structure either way; the mode controls
+	// only whether the token is surfaced.
 	ScanComments Mode = 1 << iota
 )
 
@@ -35,8 +47,8 @@ const eof = -1
 const (
 	lineSep = 0x2028 // <LS>
 	paraSep = 0x2029 // <PS>
-	nbsp    = 0x00A0 // <NBSP>
-	zwnbsp  = 0xFEFF // <ZWNBSP>, which also makes a leading BOM ordinary space
+	nbsp    = 0x00A0
+	bom     = 0xFEFF // ordinary white space wherever it appears, leading BOM included
 )
 
 type Scanner struct {
@@ -49,15 +61,17 @@ type Scanner struct {
 	offset   int  // byte offset of ch
 	rdOffset int  // byte offset just past ch
 
-	// nlPending records that a LineTerminator has been seen since the last
+	// nlPending records that a line terminator has been seen since the last
 	// token was produced. It is consumed by the next token's NLBefore.
 	nlPending bool
 
-	// prev is the kind of the last non-comment token. Its only use is the
-	// tuple-index rule: `.` followed by a digit is always positional tuple
-	// access (A.4.3), since EnumShorthand takes an identifier and Vertex has
-	// no leading-dot float literals.
-	prev token.Kind
+	// prev and prev2 are the kinds of the last two non-comment tokens. Their
+	// only use is the one restriction to longest-match scanning: a float_lit
+	// may not begin immediately after a `.` whose own preceding token can end
+	// an operand. Both halves of that condition are needed, which is why two
+	// kinds are kept rather than one.
+	prev  token.Kind
+	prev2 token.Kind
 
 	ErrorCount int
 }
@@ -77,6 +91,7 @@ func (s *Scanner) Init(file *token.File, src []byte, rep diag.Reporter, mode Mod
 	s.rdOffset = 0
 	s.nlPending = false
 	s.prev = token.INVALID
+	s.prev2 = token.INVALID
 	s.ErrorCount = 0
 
 	s.next()
@@ -99,6 +114,10 @@ func (s *Scanner) errorSpan(code diag.Code, from, to int, args ...any) {
 // next advances to the following character. It does not touch the line table:
 // line terminators are consumed explicitly by consumeLineTerminator, because
 // <CR><LF> is one terminator over two bytes and <LS>/<PS> are three each.
+//
+// NUL is reported here rather than at the dispatch below, so that one appearing
+// inside a string or comment is still rejected — a compiler must reject the NUL
+// character in source text, not merely in code.
 func (s *Scanner) next() {
 	if s.rdOffset >= len(s.src) {
 		s.offset = len(s.src)
@@ -109,7 +128,7 @@ func (s *Scanner) next() {
 	if b := s.src[s.rdOffset]; b < utf8.RuneSelf {
 		s.rdOffset++
 		if b == 0 {
-			s.error(diag.IllegalCharacter, s.offset, "NUL")
+			s.error(diag.NulCharacter, s.offset)
 		}
 		s.ch = rune(b)
 		return
@@ -135,16 +154,17 @@ func isLineTerminator(ch rune) bool {
 	return ch == '\n' || ch == '\r' || ch == lineSep || ch == paraSep
 }
 
-// isWhiteSpace matches A.1's WhiteSpace set.
+// isWhiteSpace matches the white_space set: tab, VT, FF, space, NBSP, ZWNBSP,
+// and any code point in category Zs.
 func isWhiteSpace(ch rune) bool {
 	switch ch {
-	case '\t', '\v', '\f', ' ', nbsp, zwnbsp:
+	case '\t', '\v', '\f', ' ', nbsp, bom:
 		return true
 	}
-	return ch > utf8.RuneSelf && unicode.Is(unicode.Zs, ch)
+	return ch >= utf8.RuneSelf && unicode.Is(unicode.Zs, ch)
 }
 
-// consumeLineTerminator consumes one full LineTerminator sequence and records
+// consumeLineTerminator consumes one full line_terminator sequence and records
 // the new line. It deliberately does not set nlPending: a terminator inside a
 // raw string advances the line table without ending a statement.
 func (s *Scanner) consumeLineTerminator() {
@@ -174,15 +194,25 @@ func (s *Scanner) skipSpace() {
 }
 
 // token builds a token carrying the pending line-break flag and clears it.
-// COMMENT does not update prev, so a comment between `.` and a digit does not
-// disturb the tuple-index rule.
+//
+// COMMENT does not update the kind history, so a comment sitting between a `.`
+// and a digit does not disturb the selector-dot restriction.
 func (s *Scanner) token(kind token.Kind, pos token.Pos, lit string) token.Token {
 	t := token.Token{Kind: kind, Pos: pos, Lit: lit, NLBefore: s.nlPending}
 	s.nlPending = false
 	if kind != token.COMMENT {
-		s.prev = kind
+		s.prev2, s.prev = s.prev, kind
 	}
 	return t
+}
+
+// afterSelectorDot reports whether a numeric literal beginning here falls under
+// the one restriction to longest-match scanning: the previous token is a `.`
+// and the one before it can end an operand. Where it holds, the scanner
+// produces an int_lit and any `.` inside the would-be float scans separately,
+// which is what makes a chain like `t.0.0` fall out.
+func (s *Scanner) afterSelectorDot() bool {
+	return s.prev == token.PERIOD && s.prev2.EndsOperand()
 }
 
 // Scan returns the next token. At end of input it returns EOF indefinitely,
@@ -199,12 +229,16 @@ func (s *Scanner) Scan() token.Token {
 		case ch == eof:
 			return s.token(token.EOF, pos, "")
 
-		case isIdentStart(ch):
+		case ch == 0:
+			// Already reported by next(); consumed here so one NUL does not
+			// stall the scan.
+			s.next()
+			return s.token(token.INVALID, pos, string(s.src[offs:s.offset]))
+
+		case isIdentStart(ch) || ch == '$':
 			lit := s.scanIdent()
-			// token.Lookup maps keywords and the three ReservedLiteralKeywords.
-			// ContextualKeywords, PredeclaredTypeNames, and ReservedBuiltinNames
-			// are absent from that table by design (A.1.3, A.1.4) and arrive
-			// here as IDENT.
+			// Lookup maps the reserved keywords and true/false/nil. Everything
+			// else is an ordinary identifier and keeps its spelling.
 			kind := token.Lookup(lit)
 			if kind != token.IDENT {
 				lit = ""
@@ -212,7 +246,7 @@ func (s *Scanner) Scan() token.Token {
 			return s.token(kind, pos, lit)
 
 		case '0' <= ch && ch <= '9':
-			if s.prev == token.PERIOD {
+			if s.afterSelectorDot() {
 				return s.token(token.INT, pos, s.scanTupleIndex())
 			}
 			kind, lit := s.scanNumber()
@@ -226,28 +260,18 @@ func (s *Scanner) Scan() token.Token {
 
 		case ch == '\'':
 			return s.token(token.CHAR, pos, s.scanChar())
-
-		case ch == '$':
-			// A.1.2 ⊢ '$' is not an identifier character in Vertex. Consume the
-			// whole would-be identifier so one paste of foreign source yields
-			// one diagnostic per name rather than one per character.
-			s.next()
-			for isIdentPart(s.ch) {
-				s.next()
-			}
-			s.errorSpan(diag.DollarInIdent, offs, s.offset)
-			return s.token(token.IDENT, pos, string(s.src[offs:s.offset]))
 		}
 
-		// Punctuators and comments. Longest match wins (A.1.6).
+		// Operators, punctuation, and comments. The longest match wins.
 		switch ch {
 		case '/':
 			if p := s.peek(); p == '/' || p == '*' {
-				lit, spansLine := s.scanComment()
+				lit, actsAsTerminator := s.scanComment()
 				t := s.token(token.COMMENT, pos, lit)
-				if spansLine {
-					// A.1.1 ⊢ a comment containing a LineTerminator is itself
-					// one for the purposes of A.0.6.
+				if actsAsTerminator {
+					// A general comment containing no line terminator is white
+					// space; every other comment, line comments included, acts
+					// like a line terminator.
 					s.nlPending = true
 				}
 				if s.mode&ScanComments != 0 {
@@ -303,6 +327,8 @@ func (s *Scanner) Scan() token.Token {
 			return s.token(s.munch2('=', token.MUL_ASSIGN, token.MUL), pos, "")
 		case '%':
 			return s.token(s.munch2('=', token.REM_ASSIGN, token.REM), pos, "")
+		case '^':
+			return s.token(s.munch2('=', token.XOR_ASSIGN, token.XOR), pos, "")
 
 		case '-':
 			s.next()
@@ -348,9 +374,6 @@ func (s *Scanner) Scan() token.Token {
 				return s.token(token.OR_ASSIGN, pos, "")
 			}
 			return s.token(token.OR, pos, "")
-
-		case '^':
-			return s.token(s.munch2('=', token.XOR_ASSIGN, token.XOR), pos, "")
 
 		case '<':
 			s.next()
@@ -427,9 +450,10 @@ func (s *Scanner) munch2(want byte, both, single token.Kind) token.Kind {
 	return single
 }
 
-// scanComment consumes a // or /* */ comment. spansLine reports whether it
-// contained a LineTerminator.
-func (s *Scanner) scanComment() (lit string, spansLine bool) {
+// scanComment consumes a line comment or a general comment. actsAsTerminator
+// reports whether the comment behaves as a line terminator rather than as white
+// space, which every comment does except a general comment spanning no line.
+func (s *Scanner) scanComment() (lit string, actsAsTerminator bool) {
 	offs := s.offset
 	s.next() // '/'
 
@@ -438,20 +462,20 @@ func (s *Scanner) scanComment() (lit string, spansLine bool) {
 		for s.ch != eof && !isLineTerminator(s.ch) {
 			s.next()
 		}
-		return string(s.src[offs:s.offset]), false
+		return string(s.src[offs:s.offset]), true
 	}
 
 	s.next() // '*'
 	terminated := false
 	for s.ch != eof {
 		if isLineTerminator(s.ch) {
-			spansLine = true
+			actsAsTerminator = true
 			s.consumeLineTerminator()
 			continue
 		}
 		ch := s.ch
 		s.next()
-		// A.1.1 ⊢ MultiLineComment does not nest; the first */ closes it.
+		// General comments do not nest; the first */ closes.
 		if ch == '*' && s.ch == '/' {
 			s.next()
 			terminated = true
@@ -461,11 +485,11 @@ func (s *Scanner) scanComment() (lit string, spansLine bool) {
 	if !terminated {
 		s.error(diag.UnterminatedComment, offs)
 	}
-	return string(s.src[offs:s.offset]), spansLine
+	return string(s.src[offs:s.offset]), actsAsTerminator
 }
 
-// Tokenize scans src to completion. Convenience for tests and tooling; the
-// parser drives Scan directly.
+// Tokenize scans src to completion, including the trailing EOF. Convenience
+// for tests and tooling; the parser drives Scan directly.
 func Tokenize(file *token.File, src []byte, rep diag.Reporter, mode Mode) []token.Token {
 	var s Scanner
 	s.Init(file, src, rep, mode)

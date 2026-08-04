@@ -2,10 +2,12 @@ package ast
 
 import "github.com/vertex-language/vertex/token"
 
-// Receiver is `( Identifier : ReceiverType )` (A.6.1). Type may be wrapped in an
-// *OwnershipType for the mut/var/shared forms, and carries a TypeParameterList
-// as an *IndexExpr for a method on a generic type — A.7.6 makes that list bind
-// the names rather than introduce fresh ones.
+// Receiver is `( identifier : ReceiverType )`.
+//
+// Type may be wrapped in an *OwnershipType for the mut, var, and shared forms,
+// and carries a TypeParameters list as an *IndexExpr for a method on a generic
+// type. That list re-declares the receiver type's existing names rather than
+// introducing fresh ones.
 type Receiver struct {
 	Lparen token.Pos
 	Name   *Ident
@@ -17,31 +19,39 @@ type Receiver struct {
 func (r *Receiver) Pos() token.Pos { return r.Lparen }
 func (r *Receiver) End() token.Pos { return r.Rparen + 1 }
 
-// FuncDecl is a FunctionDeclaration and also an InitializerDeclaration and
-// DeinitializerDeclaration (A.6.1, A.6.4).
+// FuncDecl is both FunctionDecl and MethodDecl, and with them the initializer
+// and deinitializer forms.
 //
-// Those get no node of their own because they have no distinct shape: A.1.3
-// makes `init` and `deinit` ContextualKeywords that are ordinary method names
-// in a receiver declaration, so they scan as IDENT and parse as this. Whether a
-// given FuncDecl is an initializer is a question about its Name and Recv,
-// answered by the analyzer.
+// Those get no shape of their own: `init` and `deinit` are contextual keywords
+// that are ordinary method names in a receiver declaration, so they arrive as
+// identifiers and land in Name like any other. Whether a given FuncDecl is one
+// is a question about its Name and Recv, answered by the analyzer.
+//
+// TypeParams is parsed on a method too, where it is rejected, so that the
+// diagnostic can point a caret at the bracket list rather than report a syntax
+// error.
 type FuncDecl struct {
 	Doc        *CommentGroup
 	Recv       *Receiver // nil for a free function
 	Name       *Ident
-	TypeParams *TypeParamList // nil; A.7.6 forbids one on a method
+	TypeParams *TypeParamList
 	Type       *FuncType
 	Body       *BlockStmt // nil only in error recovery
 }
 
-// Field is one entry of a struct or class body (A.6.2).
+// Field is one FieldDecl. It serves a struct body, a class body, and a foreign
+// class body, which are one production.
+//
+// A field list is newline-separated juxtaposition rather than a comma list, so
+// the enclosing brace is terminator-significant and two fields on one line do
+// not parse. Default is evaluated at construction for any omitted field.
 type Field struct {
 	Doc     *CommentGroup
 	Name    *Ident
 	Colon   token.Pos
 	Type    Expr
 	Assign  token.Pos
-	Default Expr // A.6.2: evaluated at construction for any omitted field
+	Default Expr
 	Comment *CommentGroup
 }
 
@@ -53,11 +63,11 @@ func (f *Field) End() token.Pos {
 	return f.Type.End()
 }
 
-// RecordDecl is both StructDeclaration and ClassDeclaration (A.6.2, A.6.3).
+// RecordDecl is both StructDecl and ClassDecl.
 //
-// One node, because A.6.3 says a class is byte-for-byte identical in layout to
-// a struct and differs only in its member and method model. The shapes are the
-// same; Kw carries the distinction and every consumer that cares reads it.
+// One node, because a class is byte-for-byte identical in layout to a struct
+// and differs only in its member and method model. The shapes are the same; Kw
+// carries the distinction and every consumer that cares reads it.
 type RecordDecl struct {
 	Doc        *CommentGroup
 	KwPos      token.Pos
@@ -69,10 +79,11 @@ type RecordDecl struct {
 	Rbrace     token.Pos
 }
 
-// Variant is one entry of an enum body (A.6.5): a unit variant, a payload
-// variant `Name(T, U)`, or a unit variant with an explicit discriminant.
+// Variant is one enum variant: a unit variant, a payload variant `Name(T, U)`,
+// or a unit variant with an explicit discriminant.
 //
-// An explicit discriminant on a payload variant parses and is rejected (A.14).
+// Both suffixes are accepted on any variant, so an explicit discriminant on a
+// payload variant parses and can be diagnosed as itself.
 type Variant struct {
 	Doc     *CommentGroup
 	Name    *Ident
@@ -95,6 +106,9 @@ func (v *Variant) End() token.Pos {
 	return v.Name.End()
 }
 
+// EnumDecl is an enum declaration. Its body is a comma-separated variant list
+// and is not terminator-significant, which is what lets a variant list span
+// lines.
 type EnumDecl struct {
 	Doc        *CommentGroup
 	Enum       token.Pos
@@ -107,7 +121,7 @@ type EnumDecl struct {
 	Rbrace     token.Pos
 }
 
-// TypeAliasDecl is `type Name[params] = Target` (A.6.6). A Target of
+// TypeAliasDecl is `type Name[params] = AliasTarget`. A Target of
 // *AbstractType makes the alias nominal and opaque; anything else is
 // transparent.
 type TypeAliasDecl struct {
@@ -119,37 +133,32 @@ type TypeAliasDecl struct {
 	Target     Expr
 }
 
-// ConstraintElem is one element of a constraint body (A.7.2). Exactly one field
-// is non-nil.
+// ConstraintElem is one element of a constraint body. Exactly one field is
+// non-nil.
 //
-// Set holds a TypeSet or a ConstraintName undifferentiated, because A.7.2 says
-// a single identifier parses as both and is resolved by what the name denotes.
-// A union is a *BinaryExpr with Op OR; a `~T` term is a *UnaryExpr with TILDE.
+// Set holds a TypeSet and a constraint name undifferentiated, because a single
+// identifier parses as both and is resolved by what the name denotes. A union
+// is a *BinaryExpr with Op OR; a `~T` term is a *UnaryExpr with TILDE.
 type ConstraintElem struct {
 	Set    Expr
 	Method *MethodReq
 }
 
-// MethodReq is a MethodRequirement (A.7.2). Satisfied by any type declaring a
-// matching receiver method; monomorphization lowers the call directly, so this
-// introduces no interface value and no vtable.
+// MethodReq is a MethodRequirement. It takes a full Signature, so a constraint
+// can require a marked method.
 type MethodReq struct {
 	Doc    *CommentGroup
 	Func   token.Pos
 	Name   *Ident
-	Params *ParamList
-	Arrow  token.Pos
-	Result Expr
+	Type   *FuncType
 }
 
 func (m *MethodReq) Pos() token.Pos { return m.Func }
-func (m *MethodReq) End() token.Pos {
-	if m.Result != nil {
-		return m.Result.End()
-	}
-	return m.Params.End()
-}
+func (m *MethodReq) End() token.Pos { return m.Type.End() }
 
+// ConstraintDecl is a constraint declaration. There are no interfaces; a
+// constraint is its own declaration form and is legal only in a bracket
+// position, which is a static rule. Multiple elements form an intersection.
 type ConstraintDecl struct {
 	Doc        *CommentGroup
 	Constraint token.Pos
@@ -159,24 +168,30 @@ type ConstraintDecl struct {
 	Rbrace     token.Pos
 }
 
-// VarDecl is `let`/`var` with initializers, and bare `var Binding` (A.5.1).
-// Also a TopLevelDeclaration, where A.2 requires a compile-time-evaluable
-// initializer.
+// VarDecl is `let`/`var` with initializers, and bare `var Binding`.
+//
+// The bare form covers all three initializer-free spellings uniformly, `var w`
+// among them: statement-leading `var` is always a declaration, so a bare
+// transfer marker outside an owning position lands on a real declaration node
+// and is diagnosed as itself rather than as a syntax error.
+//
+// This is also a TopLevelDecl, where the initializer must be
+// compile-time-evaluable and the bare form is rejected. Both are static rules.
 type VarDecl struct {
 	Doc      *CommentGroup
 	KwPos    token.Pos
 	Kw       token.Kind // LET or VAR
 	Bindings []*Binding
-	Assign   token.Pos // NoPos for bare `var x: T`
+	Assign   token.Pos // NoPos for the bare form
 	Values   []Expr    // owning positions: any may be a *TransferExpr
 	Comment  *CommentGroup
 }
 
-// Binding is one entry of a BindingList (A.5.1).
+// Binding is one entry of a BindingList.
 type Binding struct {
-	Name  *Ident // may be a BlankIdentifier
+	Name  *Ident
 	Colon token.Pos
-	Type  Expr // nil when inferred; required for bare `var x: T`
+	Type  Expr // nil when inferred
 }
 
 func (b *Binding) Pos() token.Pos { return b.Name.Pos() }
@@ -187,10 +202,10 @@ func (b *Binding) End() token.Pos {
 	return b.Name.End()
 }
 
-// ImportDecl is `import "path"` or `import ( ... )` (A.2.3). There is no
-// aliasing form, no dot-import, and no blank import, so there is nothing to
-// record but paths — the qualifier comes from the imported package's own
-// PackageClause.
+// ImportDecl is `import "path"` or `import ( ... )`. There is no aliasing form,
+// no dot-import, and no blank import, so there is nothing to record but paths —
+// the qualifier comes from the imported package's own package clause, and the
+// path is a locator, not a name.
 type ImportDecl struct {
 	Doc    *CommentGroup
 	Import token.Pos
@@ -199,12 +214,26 @@ type ImportDecl struct {
 	Rparen token.Pos
 }
 
-// ---------------------------------------------------------- declare blocks
+// --------------------------------------------------------- declare blocks
 
-// DeclareDecl is `declare framework "S" { }` or `declare module ["tag"] "S" { }`
-// (A.8.1). Kind is the ContextualKeyword, which scans as IDENT.
+// ForeignMember is a member of a declare body or a foreign class body.
 //
-// A variant tag on a framework block parses and is rejected (A.8.2).
+// The declare body admits a foreign function, a foreign class, and a nested
+// declare declaration; the foreign class body admits a foreign function, a
+// foreign initializer, and a field. A nested declare and a field each parse and
+// are rejected, so both *DeclareDecl and *Field implement this.
+type ForeignMember interface {
+	Node
+	foreignMember()
+}
+
+// DeclareDecl is `declare framework "S" { }` or `declare module ["tag"] "S" { }`.
+// Kind is the contextual keyword, which scans as an identifier.
+//
+// The variant tag is hoisted out of the module form, so a tagged framework
+// block parses and is rejected with a message about `declare framework` rather
+// than as a syntax error at the bracket. The tag set is closed; membership is a
+// static rule.
 type DeclareDecl struct {
 	Doc     *CommentGroup
 	Declare token.Pos
@@ -217,8 +246,7 @@ type DeclareDecl struct {
 	Rbrace  token.Pos
 }
 
-// VariantTag is the closed bracketed tag set of A.8.2. It reuses the same
-// compile-time-configuration bracket as generic instantiation and array length.
+// VariantTag is the bracketed tag set.
 type VariantTag struct {
 	Lbrack token.Pos
 	Tags   []*BasicLit
@@ -228,71 +256,43 @@ type VariantTag struct {
 func (v *VariantTag) Pos() token.Pos { return v.Lbrack }
 func (v *VariantTag) End() token.Pos { return v.Rbrack + 1 }
 
-// ForeignMember is a member of a declare block.
-type ForeignMember interface {
-	Node
-	foreignMember()
-}
-
-// ForeignFunc is a ForeignFunctionDeclaration or ForeignInitializerDeclaration
-// (A.8.3).
+// ForeignFunc is both ForeignFuncDecl and ForeignInitDecl.
 //
-// Init marks the `init` prefix modifier, which A.8.3 is explicit is a modifier
-// on func and not a function name. Name is nil for the unnamed initializer form
-// that bare `Type(...)` construction resolves to.
+// Init marks the `init` prefix modifier, which is a modifier on func and not a
+// function name; Name is nil for the unnamed initializer form that bare
+// `Type(...)` construction resolves to.
 //
-// Modifiers and Body exist for the error forms. A.0.5 makes rejected forms part
-// of the grammar, so `private init func() -> Bad` and a foreign declaration
-// with a body must parse in order to be diagnosed as themselves rather than as
-// a syntax error.
+// Body exists for the rejected form. A declare block describes call shapes
+// only, so a block on a foreign declaration must parse in order to be diagnosed
+// as itself. A marker on one is rejected the same way, and needs no field here
+// because Type already carries every marker written.
 type ForeignFunc struct {
-	Doc       *CommentGroup
-	Modifiers []*Ident   // A.8.3 ✗ visibility modifiers are banned
-	Init      token.Pos  // NoPos when absent
-	Func      token.Pos
-	Name      *Ident // nil for the unnamed initializer
-	Params    *ParamList
-	Arrow     token.Pos
-	Result    Expr
-	Body      *BlockStmt // A.8.3 ✗ declarations cannot have bodies
+	Doc    *CommentGroup
+	Init   token.Pos // NoPos when absent
+	Func   token.Pos
+	Name   *Ident // nil for the unnamed initializer
+	Type   *FuncType
+	Body   *BlockStmt
 }
 
-// ForeignClass is a ForeignClassDeclaration (A.8.3). Fields are banned — a
-// declare block describes call shape only — but parse, so Members may hold a
-// *ForeignField for diagnosis.
+// ForeignClass is a foreign class declaration. Its members are foreign
+// functions, foreign initializers, and — parsed only to be rejected — fields.
 type ForeignClass struct {
-	Doc       *CommentGroup
-	Modifiers []*Ident
-	Class     token.Pos
-	Name      *Ident
-	Lbrace    token.Pos
-	Members   []ForeignMember
-	Rbrace    token.Pos
+	Doc     *CommentGroup
+	Class   token.Pos
+	Name    *Ident
+	Lbrace  token.Pos
+	Members []ForeignMember
+	Rbrace  token.Pos
 }
 
-// ForeignField exists only to be rejected (A.8.3 ✗ fields describe layout).
-type ForeignField struct {
-	Doc   *CommentGroup
-	Name  *Ident
-	Colon token.Pos
-	Type  Expr
-}
-
-func (d *ForeignField) Pos() token.Pos { return d.Name.Pos() }
-func (d *ForeignField) End() token.Pos { return d.Type.End() }
-
+// BadDecl marks an unparseable declaration span; see BadExpr.
 type BadDecl struct {
 	From, To token.Pos
 }
 
 // -------------------------------------------------------------- positions
 
-func (d *FuncDecl) Pos() token.Pos {
-	if d.Recv != nil {
-		return d.Recv.Pos()
-	}
-	return d.Type.Func
-}
 func (d *RecordDecl) Pos() token.Pos     { return d.KwPos }
 func (d *EnumDecl) Pos() token.Pos       { return d.Enum }
 func (d *TypeAliasDecl) Pos() token.Pos  { return d.Type }
@@ -303,8 +303,22 @@ func (d *DeclareDecl) Pos() token.Pos    { return d.Declare }
 func (d *ForeignClass) Pos() token.Pos   { return d.Class }
 func (d *BadDecl) Pos() token.Pos        { return d.From }
 
-// A.7.2 guarantees exactly one of Set/Method is non-nil, so the element's
-// extent is whichever one is present.
+func (d *FuncDecl) Pos() token.Pos {
+	if d.Recv != nil {
+		return d.Recv.Pos()
+	}
+	return d.Type.Func
+}
+
+func (d *ForeignFunc) Pos() token.Pos {
+	if d.Init.IsValid() {
+		return d.Init
+	}
+	return d.Func
+}
+
+// Exactly one of Set and Method is non-nil, so the element's extent is
+// whichever one is present.
 func (e *ConstraintElem) Pos() token.Pos {
 	if e.Set != nil {
 		return e.Set.Pos()
@@ -319,22 +333,6 @@ func (e *ConstraintElem) End() token.Pos {
 	return e.Method.End()
 }
 
-func (d *ForeignFunc) Pos() token.Pos {
-	if len(d.Modifiers) > 0 {
-		return d.Modifiers[0].Pos()
-	}
-	if d.Init.IsValid() {
-		return d.Init
-	}
-	return d.Func
-}
-
-func (d *FuncDecl) End() token.Pos {
-	if d.Body != nil {
-		return d.Body.End()
-	}
-	return d.Type.End()
-}
 func (d *RecordDecl) End() token.Pos     { return d.Rbrace + 1 }
 func (d *EnumDecl) End() token.Pos       { return d.Rbrace + 1 }
 func (d *TypeAliasDecl) End() token.Pos  { return d.Target.End() }
@@ -342,6 +340,20 @@ func (d *ConstraintDecl) End() token.Pos { return d.Rbrace + 1 }
 func (d *DeclareDecl) End() token.Pos    { return d.Rbrace + 1 }
 func (d *ForeignClass) End() token.Pos   { return d.Rbrace + 1 }
 func (d *BadDecl) End() token.Pos        { return d.To }
+
+func (d *FuncDecl) End() token.Pos {
+	if d.Body != nil {
+		return d.Body.End()
+	}
+	return d.Type.End()
+}
+
+func (d *ForeignFunc) End() token.Pos {
+	if d.Body != nil {
+		return d.Body.End()
+	}
+	return d.Type.End()
+}
 
 func (d *VarDecl) End() token.Pos {
 	if n := len(d.Values); n > 0 {
@@ -357,16 +369,6 @@ func (d *ImportDecl) End() token.Pos {
 	return d.Paths[len(d.Paths)-1].End()
 }
 
-func (d *ForeignFunc) End() token.Pos {
-	switch {
-	case d.Body != nil:
-		return d.Body.End()
-	case d.Result != nil:
-		return d.Result.End()
-	}
-	return d.Params.End()
-}
-
 func (*FuncDecl) declNode()       {}
 func (*RecordDecl) declNode()     {}
 func (*EnumDecl) declNode()       {}
@@ -379,4 +381,5 @@ func (*BadDecl) declNode()        {}
 
 func (*ForeignFunc) foreignMember()  {}
 func (*ForeignClass) foreignMember() {}
-func (*ForeignField) foreignMember() {}
+func (*DeclareDecl) foreignMember()  {}
+func (*Field) foreignMember()        {}

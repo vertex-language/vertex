@@ -30,9 +30,10 @@ func baseName(base int) string {
 	return "decimal"
 }
 
-// scanDigits consumes a digit run in the given base, enforcing A.1.5.1's
-// separator rules: '_' may not lead a run, trail it, or be doubled. It returns
-// the number of digits consumed, separators excluded.
+// scanDigits consumes one digit run in the given base, enforcing the separator
+// rules: '_' may appear between successive digits, and may not lead a run,
+// trail one, or be doubled. It returns the number of digits consumed,
+// separators excluded.
 //
 // A decimal digit out of range for a narrow base is consumed rather than
 // terminating the run, so 0b1234 produces one diagnostic per bad digit instead
@@ -79,17 +80,23 @@ func (s *Scanner) scanDigits(base int) int {
 	}
 }
 
-// scanNumber consumes a NumericLiteral (A.1.5.1) and reports whether it is an
-// integer or a float.
+// scanNumber consumes a NumericLiteral and reports whether it is an integer or
+// a float. Each base has its own tail because the three do not share a shape:
+// only hexadecimal has a binary-exponent float form, only decimal has a bare
+// exponent, and the two define a fractional part differently. There is no
+// prefix-free octal form, so 0600 is the decimal integer 600.
 //
 // Two decisions here are load-bearing beyond this function:
 //
-//   - A fractional part must be non-empty, so `1.` is not a literal. That is
-//     what makes `1..5` scan as INT DOTDOT INT rather than requiring lookahead
-//     surgery.
-//   - A hexadecimal float requires its binary exponent (A.1.5.1 ⊢), so `0xC.3`
-//     is diagnosed as an incomplete float rather than silently accepted or
-//     split into three tokens.
+//   - A decimal fractional part, if a point is written, must be non-empty, so
+//     `1.` is not a literal. That is what makes `1..5` scan as
+//     int_lit ".." int_lit without lookahead surgery elsewhere.
+//   - A hexadecimal float requires its binary exponent, so `0xC.3` is
+//     diagnosed as an incomplete float rather than silently accepted or split
+//     into three tokens.
+//
+// A `.` immediately followed by another `.` is never consumed as a point, which
+// is what keeps a range operator intact after any base.
 func (s *Scanner) scanNumber() (token.Kind, string) {
 	offs := s.offset
 	kind := token.INT
@@ -116,16 +123,16 @@ func (s *Scanner) scanNumber() (token.Kind, string) {
 	switch base {
 	case 16:
 		n := s.scanDigits(16)
-		hasFrac := false
+		if n == 0 {
+			s.error(diag.EmptyDigits, offs, "'"+prefix+"'")
+		}
+		hasPoint := false
 		if s.ch == '.' && s.peek() != '.' {
 			s.next()
-			// HexDigitsWithSeparatorsopt — the fraction may be empty here,
-			// unlike the decimal case.
+			// The hexadecimal fraction may be empty; the exponent below is
+			// what makes the literal well formed, not this digit run.
 			s.scanDigits(16)
-			hasFrac = true
-		}
-		if n == 0 && !hasFrac {
-			s.error(diag.EmptyDigits, offs, "'"+prefix+"'")
+			hasPoint = true
 		}
 		switch {
 		case s.ch == 'p' || s.ch == 'P':
@@ -137,7 +144,7 @@ func (s *Scanner) scanNumber() (token.Kind, string) {
 			if s.scanDigits(10) == 0 {
 				s.error(diag.MissingExponentDigit, s.offset)
 			}
-		case hasFrac:
+		case hasPoint:
 			s.error(diag.HexFloatNoExponent, offs)
 			kind = token.FLOAT
 		}
@@ -166,35 +173,38 @@ func (s *Scanner) scanNumber() (token.Kind, string) {
 		}
 	}
 
-	if isIdentPart(s.ch) {
-		bad := s.offset
-		for isIdentPart(s.ch) {
-			s.next()
-		}
-		s.errorSpan(diag.NumberJoinedToIdent, bad, s.offset)
-	}
-
+	s.rejectJoinedIdent()
 	return kind, string(s.src[offs:s.offset])
 }
 
-// scanTupleIndex consumes the digit run of a positional tuple access (A.4.3).
+// scanTupleIndex consumes the digit run of a positional tuple access.
 //
-// It is entered only when the previous token was PERIOD, where a digit can mean
-// nothing else: EnumShorthand takes an identifier, and Vertex has no
-// leading-dot float literals. Scanning here rather than splitting a FLOAT in
-// the parser is what makes `t.0.0` fall out — the second dot ends this run and
-// the rule fires again.
+// It is entered only where the selector-dot restriction applies, and its whole
+// job is to produce an int_lit where longest match would have produced a
+// float: no point is consumed and no exponent is recognized, so the next `.`
+// ends this run and the rule fires again, which is what makes a chain compose.
+//
+// Separators are enforced here as they are in any other digit run, because the
+// token produced is an ordinary int_lit. That a tuple index must additionally
+// be written in decimal with no '_' is a static rule over the spelling this
+// returns, not a lexical one.
 func (s *Scanner) scanTupleIndex() string {
 	offs := s.offset
-	for '0' <= s.ch && s.ch <= '9' {
+	s.scanDigits(10)
+	s.rejectJoinedIdent()
+	return string(s.src[offs:s.offset])
+}
+
+// rejectJoinedIdent consumes any identifier characters directly following a
+// numeric literal and reports them as one span, so `123abc` is one diagnosed
+// token rather than an int_lit followed by an identifier.
+func (s *Scanner) rejectJoinedIdent() {
+	if !isIdentPart(s.ch) {
+		return
+	}
+	bad := s.offset
+	for isIdentPart(s.ch) {
 		s.next()
 	}
-	if isIdentPart(s.ch) {
-		bad := s.offset
-		for isIdentPart(s.ch) {
-			s.next()
-		}
-		s.errorSpan(diag.NumberJoinedToIdent, bad, s.offset)
-	}
-	return string(s.src[offs:s.offset])
+	s.errorSpan(diag.NumberJoinedToIdent, bad, s.offset)
 }

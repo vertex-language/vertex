@@ -1,12 +1,14 @@
 package token
 
-// BuildTag is the A.2.2 target selector. It lives in token rather than parser
-// because parser, loader, and the driver all need it, and because it changes
-// what is grammatical (build test licenses the `test` marker and Expected).
+// BuildTag is the target selector a BuildClause names.
+//
+// It lives here rather than in the parser because the parser, the loader, and
+// the driver all need it, and because it changes what is admissible: a file's
+// tag is what licenses an ExpectedType result.
 type BuildTag int
 
 const (
-	TagNone BuildTag = iota // no BuildClause in the file
+	TagNone BuildTag = iota // no build clause in the file
 	TagLinux
 	TagWindows
 	TagDarwin
@@ -15,6 +17,8 @@ const (
 	TagTest
 )
 
+// buildTags holds each tag's spelling. Every spelling is a contextual keyword,
+// recognized only in BuildTag position.
 var buildTags = [...]string{
 	TagNone:    "",
 	TagLinux:   "linux",
@@ -32,9 +36,14 @@ func (t BuildTag) String() string {
 	return "BuildTag(?)"
 }
 
-// LookupBuildTag reports the tag for s. The bool is load-bearing: A.2.2 makes
-// an unrecognised tag a compile error, never a silently-excluded file, so the
-// caller must be able to tell "unknown" from "not this target".
+func (t BuildTag) IsValid() bool { return t != TagNone }
+
+// LookupBuildTag reports the tag spelled s.
+//
+// The bool is load-bearing. An unrecognized tag is a compile error, never a
+// silently excluded file, so a caller must be able to tell an unknown spelling
+// from TagNone's "no clause at all" — which a zero-value return cannot do.
+// Implementations may recognize tags beyond this set.
 func LookupBuildTag(s string) (BuildTag, bool) {
 	for i, name := range buildTags {
 		if name != "" && name == s {
@@ -44,12 +53,8 @@ func LookupBuildTag(s string) (BuildTag, bool) {
 	return TagNone, false
 }
 
-// LicensesTest reports whether this tag makes the `test` FunctionMarker and
-// Expected(...) result types grammatical (A.2.2, A.12.1).
+// LicensesTest reports whether a file built under t admits an ExpectedType
+// result. The grammar admits ExpectedType only through DeclResult; restricting
+// it further to this tag is a static rule, and this predicate is what that rule
+// reads.
 func LicensesTest(t BuildTag) bool { return t == TagTest }
-
-// HasFrameworks reports whether the target platform has a first-class notion of
-// a bundled versioned library, i.e. whether `declare framework` is legal
-// (A.8.1). Checked by the analyzer; the predicate lives here so the answer has
-// one home.
-func HasFrameworks(t BuildTag) bool { return t == TagDarwin }

@@ -5,9 +5,11 @@ import (
 	"strings"
 )
 
-// TypeString renders t in source syntax. This is what a diag template's %s
-// receives, so it is normative text under A.12.2 — a change here changes what
-// an Expected(error, "...") test matches.
+// TypeString renders t in source syntax.
+//
+// This is what a diag template's %s receives, so it is normative text: a change
+// here changes what an `Expected(error, "...")` result matches. diag's registry
+// exists for the same reason, and the two must move together.
 func TypeString(t Type) string {
 	var b strings.Builder
 	writeType(&b, t)
@@ -72,7 +74,8 @@ func writeType(b *strings.Builder, t Type) {
 
 	case *Pointer:
 		b.WriteString("typed_ptr ")
-		// A.3.3 ⊢ nesting requires parentheses.
+		// A typed_ptr may not be the direct base of another, so a nested one is
+		// written parenthesized and must render that way to round-trip.
 		if _, nested := x.elem.(*Pointer); nested {
 			b.WriteByte('(')
 			writeType(b, x.elem)
@@ -80,6 +83,17 @@ func writeType(b *strings.Builder, t Type) {
 			return
 		}
 		writeType(b, x.elem)
+
+	case *Vector:
+		b.WriteString("vector[")
+		writeType(b, x.elem)
+		fmt.Fprintf(b, ", %d]", x.lanes)
+
+	case *Predicate:
+		// §5.1 ⊢ a lane predicate "has no source spelling". A diagnostic still
+		// has to name it, so this is a description rather than syntax, and it
+		// is written so a reader cannot mistake it for something writable.
+		fmt.Fprintf(b, "lane predicate of %d lanes", x.lanes)
 
 	case *Tuple:
 		writeTuple(b, x)
@@ -172,7 +186,7 @@ func writeSignature(b *strings.Builder, s *Signature) {
 			b.WriteString(": ")
 		}
 		if s.variadic && i == s.params.Len()-1 {
-			b.WriteString("... ")
+			b.WriteString("...")
 		}
 		if m := v.mode.String(); m != "" {
 			b.WriteString(m)
@@ -187,9 +201,15 @@ func writeSignature(b *strings.Builder, s *Signature) {
 		b.WriteString(m)
 	}
 
-	// A.3.4 ⊢ omitting `-> Type` is the void form; there is no `void` type name,
-	// so a unit result renders as nothing at all.
-	if s.results.IsUnit() {
+	if s.expected != nil {
+		b.WriteString(" -> ")
+		writeExpected(b, s.expected)
+		return
+	}
+
+	// §7.1 ⊢ omitting the result is the void form; there is no `void` type
+	// name, so a void signature renders with nothing after the parameters.
+	if s.results.Len() == 0 {
 		return
 	}
 	b.WriteString(" -> ")
@@ -198,6 +218,69 @@ func writeSignature(b *strings.Builder, s *Signature) {
 		return
 	}
 	writeTuple(b, s.results)
+}
+
+func writeExpected(b *strings.Builder, e *Expected) {
+	b.WriteString("Expected(")
+	if e.typ != nil {
+		writeType(b, e.typ)
+	} else {
+		b.WriteString("error")
+	}
+	if e.hasMsg {
+		fmt.Fprintf(b, ", %q", e.msg)
+	}
+	b.WriteByte(')')
+}
+
+// ExpectedString renders an ExpectedType for a diagnostic. It is separate from
+// TypeString because Expected is not a Type.
+func ExpectedString(e *Expected) string {
+	if e == nil {
+		return ""
+	}
+	var b strings.Builder
+	writeExpected(&b, e)
+	return b.String()
+}
+
+// ConstraintString renders a constraint for a diagnostic. Also separate,
+// because a Constraint is not a Type either.
+func ConstraintString(c *Constraint) string {
+	switch {
+	case c == nil:
+		return "<nil>"
+	case c.obj != nil:
+		return c.obj.name
+	case c.IsAny():
+		return "any"
+	}
+
+	var b strings.Builder
+	for i, t := range c.terms {
+		if i > 0 {
+			b.WriteString(" | ")
+		}
+		if t.Tilde {
+			b.WriteByte('~')
+		}
+		writeType(&b, t.Type)
+	}
+	for _, e := range c.embeds {
+		if b.Len() > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(ConstraintString(e))
+	}
+	for _, m := range c.methods {
+		if b.Len() > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString("func ")
+		b.WriteString(m.name)
+		b.WriteString(strings.TrimPrefix(TypeString(m.typ), "func"))
+	}
+	return b.String()
 }
 
 // ObjectString renders an object for a diagnostic: its kind, name, and type.
@@ -219,6 +302,9 @@ func ObjectString(obj Object) string {
 	case *PkgName:
 		return fmt.Sprintf("package %s", o.name)
 	}
+	if obj == nil {
+		return "<nil>"
+	}
 	return obj.Name()
 }
 
@@ -229,6 +315,8 @@ func (m *Map) String() string       { return TypeString(m) }
 func (t *Tuple) String() string     { return TypeString(t) }
 func (c *Chan) String() string      { return TypeString(c) }
 func (p *Pointer) String() string   { return TypeString(p) }
+func (v *Vector) String() string    { return TypeString(v) }
+func (p *Predicate) String() string { return TypeString(p) }
 func (s *Signature) String() string { return TypeString(s) }
 func (t *Tensor) String() string    { return TypeString(t) }
 func (n *Named) String() string     { return TypeString(n) }
@@ -236,3 +324,5 @@ func (s *Struct) String() string    { return TypeString(s) }
 func (e *Enum) String() string      { return TypeString(e) }
 func (a *Abstract) String() string  { return TypeString(a) }
 func (t *TypeParam) String() string { return TypeString(t) }
+func (e *Expected) String() string  { return ExpectedString(e) }
+func (c *Constraint) String() string { return ConstraintString(c) }

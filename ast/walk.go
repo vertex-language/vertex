@@ -27,20 +27,9 @@ func walkIdents(v Visitor, list []*Ident) {
 	}
 }
 
-func maybe(v Visitor, n Node) {
-	// A typed-nil in an interface is not == nil, so callers pass concrete
-	// pointers and this guards the common optional-field case.
-	switch x := n.(type) {
-	case nil:
-		return
-	case Expr:
-		if x == nil {
-			return
-		}
-	}
-	Walk(v, n)
-}
-
+// Walk traverses node in depth-first order, visiting exactly its declared
+// children. It panics on an unrecognized type, which means the switch below
+// must be extended whenever a node type is added.
 func Walk(v Visitor, node Node) {
 	if v = v.Visit(node); v == nil {
 		return
@@ -55,8 +44,8 @@ func Walk(v Visitor, node Node) {
 			Walk(v, c)
 		}
 
-	case *Ident, *BasicLit, *NamespaceExpr, *AbstractType,
-		*BadExpr, *BadStmt, *BadDecl, *BranchStmt, *BuildClause, *Marker:
+	case *Ident, *BasicLit, *NamespaceExpr, *AbstractType, *Marker,
+		*BuildClause, *BadExpr, *BadStmt, *BadDecl, *BranchStmt:
 		// leaves
 
 	// ---- shared parts
@@ -118,6 +107,15 @@ func Walk(v Visitor, node Node) {
 			Walk(v, n.Body)
 		}
 
+	case *ChanConstructor:
+		Walk(v, n.Elem)
+		if n.Cap != nil {
+			Walk(v, n.Cap)
+		}
+
+	case *HeapConstructor:
+		Walk(v, n.X)
+
 	case *SelectorExpr:
 		Walk(v, n.X)
 		Walk(v, n.Sel)
@@ -177,8 +175,8 @@ func Walk(v Visitor, node Node) {
 
 	case *FuncType:
 		Walk(v, n.Params)
-		if n.Marker != nil {
-			Walk(v, n.Marker)
+		for _, m := range n.Markers {
+			Walk(v, m)
 		}
 		if n.Result != nil {
 			Walk(v, n.Result)
@@ -193,6 +191,10 @@ func Walk(v Visitor, node Node) {
 	case *TensorType:
 		Walk(v, n.Elem)
 		walkExprs(v, n.Shape)
+
+	case *VectorType:
+		Walk(v, n.Elem)
+		Walk(v, n.Len)
 
 	// ---- statements
 
@@ -251,6 +253,9 @@ func Walk(v Visitor, node Node) {
 		}
 
 	case *SelectClause:
+		for _, b := range n.Bindings {
+			Walk(v, b)
+		}
 		walkExprs(v, n.Targets)
 		if n.Op != nil {
 			Walk(v, n.Op)
@@ -342,11 +347,11 @@ func Walk(v Visitor, node Node) {
 		}
 
 	case *MethodReq:
-		Walk(v, n.Name)
-		Walk(v, n.Params)
-		if n.Result != nil {
-			Walk(v, n.Result)
+		if n.Doc != nil {
+			Walk(v, n.Doc)
 		}
+		Walk(v, n.Name)
+		Walk(v, n.Type)
 
 	case *ConstraintDecl:
 		if n.Doc != nil {
@@ -373,6 +378,9 @@ func Walk(v Visitor, node Node) {
 		walkExprs(v, n.Values)
 
 	case *ImportDecl:
+		if n.Doc != nil {
+			Walk(v, n.Doc)
+		}
 		for _, p := range n.Paths {
 			Walk(v, p)
 		}
@@ -395,28 +403,25 @@ func Walk(v Visitor, node Node) {
 		}
 
 	case *ForeignFunc:
-		walkIdents(v, n.Modifiers)
+		if n.Doc != nil {
+			Walk(v, n.Doc)
+		}
 		if n.Name != nil {
 			Walk(v, n.Name)
 		}
-		Walk(v, n.Params)
-		if n.Result != nil {
-			Walk(v, n.Result)
-		}
+		Walk(v, n.Type)
 		if n.Body != nil {
 			Walk(v, n.Body)
 		}
 
 	case *ForeignClass:
-		walkIdents(v, n.Modifiers)
+		if n.Doc != nil {
+			Walk(v, n.Doc)
+		}
 		Walk(v, n.Name)
 		for _, m := range n.Members {
 			Walk(v, m)
 		}
-
-	case *ForeignField:
-		Walk(v, n.Name)
-		Walk(v, n.Type)
 
 	// ---- containers
 
@@ -456,9 +461,9 @@ func (f inspector) Visit(node Node) Visitor {
 	return nil
 }
 
-// Inspect walks node in depth-first order, calling f for each node. If f returns
-// false, the node's children are skipped. f is also called with nil after a
-// subtree's children have been walked.
+// Inspect walks node in depth-first order, calling f for each node. If f
+// returns false, the node's children are skipped. f is also called with nil
+// after a subtree's children have been walked.
 func Inspect(node Node, f func(Node) bool) {
 	Walk(inspector(f), node)
 }

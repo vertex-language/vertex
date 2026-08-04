@@ -3,26 +3,33 @@ package diag
 import "fmt"
 
 // Code identifies a diagnostic rule. It is the stable handle: renumbering one
-// is a breaking change to the language's test corpus, because A.12.2's
-// Expected(error, "...") compares rendered message text as specification.
+// is a breaking change to the language's test corpus, because the error form of
+// grammar.md's ExpectedType — `Expected(error, "...")` — compares rendered
+// message text as specification.
 //
 // Numeric values are assigned explicitly, never by iota, so inserting a code
-// cannot shift another. Ranges follow A.14's categories:
+// cannot shift another. Ranges follow grammar.md's own section order:
 //
 //	0xxx  internal
-//	1xxx  lexical                       (A.1)
-//	2xxx  syntactic                     (A.2–A.5)
-//	3xxx  declarations and names        (A.6)
-//	4xxx  types                         (A.3)
-//	5xxx  ownership and exclusivity     (A.9)
-//	6xxx  generics                      (A.7)
-//	7xxx  pointers and memory           (A.4.8)
-//	8xxx  interop                       (A.8)
-//	9xxx  concurrency, devices, testing (A.10–A.12)
+//	1xxx  lexical elements
+//	2xxx  syntax errors
+//	3xxx  types
+//	4xxx  expressions
+//	5xxx  statements
+//	6xxx  declarations and names
+//	7xxx  generics
+//	8xxx  declare blocks
+//	9xxx  test result types
 //
-// Gaps within a range are deliberate and reserved. Ranges 5xxx, 6xxx, 8xxx, and
-// 9xxx remain almost entirely unpopulated because the analyzer passes that
-// raise them do not exist yet; A.14 is the inventory they will be drawn from.
+// Gaps within a range are deliberate and reserved. Only 1xxx and 2xxx are
+// densely populated today, because the scanner and the parser are the only
+// phases that exist; every other range holds the forms grammar.md names as
+// parsing-and-then-rejected, waiting for the analyzer pass that raises them.
+//
+// grammar.md defines syntax only. Where it says "static rule," it means the
+// form derives and is checked after parsing — those are the codes outside 1xxx
+// and 2xxx. Rules that grammar.md does not mention at all belong to
+// semantics.md and are not represented here.
 type Code int
 
 // ------------------------------------------------------------------ internal
@@ -33,147 +40,188 @@ const (
 	Internal Code = 1
 )
 
-// ------------------------------------------------------------------- lexical
+// ----------------------------------------------------------------- lexical
 
-// Lexical diagnostics (A.1). The scanner is the only producer.
+// Lexical elements. The scanner is the only producer.
 const (
 	IllegalCharacter Code = 1001
 	IllegalUTF8      Code = 1002
-	DollarInIdent    Code = 1003 // A.1.2 ⊢ `$` is not an identifier character
+	NulCharacter     Code = 1003 // ⊢ a compiler must reject U+0000 in source text
+	DollarInIdent    Code = 1004 // ⊢ `$` is not an identifier character in any position
 
-	UnterminatedComment Code = 1010 // A.1.1 ⊢ does not nest; the first */ closes
+	UnterminatedComment Code = 1010 // ⊢ general comments do not nest; the first */ closes
 
 	UnterminatedString    Code = 1020
-	NewlineInString       Code = 1021 // DoubleStringCharacter excludes LineTerminator
+	NewlineInString       Code = 1021 // ⊢ a line terminator may not appear in an interpreted string
 	UnterminatedRawString Code = 1022
 	UnterminatedChar      Code = 1023
 	EmptyChar             Code = 1024
-	CharTooLong           Code = 1025 // A.1.5.2 ⊢ exactly one Unicode scalar value
+	CharTooLong           Code = 1025 // ⊢ exactly one Unicode scalar value
 	InvalidEscape         Code = 1026
 	InvalidHexEscape      Code = 1027 // \xHH
 	InvalidUnicodeEscape  Code = 1028 // \u{HexDigits}
 	UnicodeEscapeRange    Code = 1029 // > 10FFFF, or a surrogate
 
-	SeparatorLeads       Code = 1040 // A.1.5.1 ⊢ `_` may not lead a digit run
+	SeparatorLeads       Code = 1040 // ⊢ `_` may not lead a digit run
 	SeparatorTrails      Code = 1041 // ...nor trail one
 	SeparatorDoubled     Code = 1042 // ...nor be doubled
 	EmptyDigits          Code = 1043 // `0x` with no digits
 	DigitOutOfRange      Code = 1044 // `0b2`, `0o9`
-	HexFloatNoExponent   Code = 1045 // A.1.5.1 ⊢ `0xC.3` is not a literal
+	HexFloatNoExponent   Code = 1045 // ⊢ a hexadecimal float requires its binary exponent
 	MissingExponentDigit Code = 1046 // `1e`, `0x1p`
 	NumberJoinedToIdent  Code = 1047 // `123abc`
 )
 
-// ----------------------------------------------------------------- syntactic
+// ------------------------------------------------------------------ syntax
 
-// Syntactic diagnostics (A.2–A.5). The parser is the only producer.
+// Syntax errors. The parser is the only producer, and every code here is
+// decidable from the tree the parser has in hand — no resolution required.
 //
-// This range is deliberately small. Of the four context parameters in A.0.2,
-// only Lit is enforced during parsing; Await, Npu, and Own name constructs that
-// A.14 lists as parsing and being rejected later, so their diagnostics are
-// static-rule codes raised by the analyzer, not syntax errors raised here.
+// The range is deliberately small. Most of what grammar.md forbids is written
+// so that it parses and is rejected afterwards, precisely so the diagnostic can
+// name the construct instead of pointing at a token.
 const (
-	ExpectedToken   Code = 2001
-	ExpectedStmtEnd Code = 2002
-	ExpectedExpr    Code = 2003
-	ExpectedType    Code = 2004
-	ExpectedIdent   Code = 2005
-	ExpectedDecl    Code = 2006
-	ExpectedCase    Code = 2007
-	ExpectedCall    Code = 2008 // A.4.2 — a launch prefix modifies a call
+	ExpectedToken      Code = 2001
+	ExpectedTerminator Code = 2002
+	ExpectedExpr       Code = 2003
+	ExpectedType       Code = 2004
+	ExpectedIdent      Code = 2005
+	ExpectedDecl       Code = 2006
+	ExpectedCase       Code = 2007
+	ExpectedCall       Code = 2008 // ⊢ CallExpr: "a call and nothing else"
 
-	RangeNotAssociative Code = 2010 // A.4.5 ⊢ `a..b..c` is a compile error
-	LiteralInHeader     Code = 2011 // A.4.7 — parenthesize it
-	TupleNeedsComma     Code = 2012 // A.4.7 ⊢ one-element tuple literal
+	RangeNotAssociative Code = 2010 // ⊢ `a..b..c` is a compile error
+	LiteralInHeader     Code = 2011 // ⊢ parenthesize a literal used in a header
+	EmptyTuple          Code = 2012 // ⊢ a tuple has at least one element; there is no unit type
+	DuplicateDefault    Code = 2013 // ⊢ at most one `default` clause
 
-	MissingPackageClause Code = 2020 // A.2 ⊢ mandatory, first non-comment
-	MisplacedBuildClause Code = 2021 // A.2.2 — the second construct in the file
-	UnknownBuildTag      Code = 2022 // A.2.2 ⊢ an error, not a silent exclusion
-	ImportAfterDecl      Code = 2023 // A.2 — imports precede declarations
-	DeferNotCall         Code = 2024 // A.5.8 ⊢ defer takes a call and nothing else
-)
-
-// ------------------------------------------------- declarations and names
-
-// Declarations and names (A.6). The analyzer's resolve pass is the producer.
-//
-// Every code here answers "what does this name denote", which is the question
-// resolution exists to answer and the one several of A.0.2's deferred
-// ambiguities reduce to: A.3.6's Stack[int32] versus a[i], A.7.2's single
-// identifier as both a TypeSet and a ConstraintName.
-const (
-	UndeclaredName       Code = 3001
-	DuplicateDeclaration Code = 3002
-	ShadowedBuiltin      Code = 3003 // A.1.4 ⊢ a ReservedBuiltinName may not be shadowed
-	ReservedAsMember     Code = 3004 // A.1.4 ✗ func (w: var Widget) new() { }
-	NotAType             Code = 3005
-	ConstraintAsType     Code = 3006 // A.7.2 ✗ var c: Ordered
-	NotAConstraint       Code = 3007
-	TypeCycle            Code = 3008
-	BlankNotUsable       Code = 3009 // A.1.2 ⊢ `_` never introduces a binding
-
-	NotGeneric         Code = 3020 // A.3.6 — brackets on a non-generic name
-	WrongTypeArgCount  Code = 3021
-	MethodTypeParams   Code = 3022 // A.7.6 ⊢ a method may not declare its own
-	DuplicateTypeParam Code = 3023 // A.7.1 ⊢ names must be unique within a list
-
-	DuplicateField    Code = 3030
-	DuplicateVariant  Code = 3031
-	PayloadDiscrim    Code = 3032 // A.6.5 ⊢ explicit discriminant on a unit variant only
-	DiscrimNoType     Code = 3033 // A.6.5 ⊢ ...and only with a declared DiscriminantType
-	InitializerResult Code = 3034 // A.8.3 ⊢ an initializer must return its enclosing type
-
-	VariadicNotLast Code = 3040 // A.6.1 ⊢ a variadic parameter must be last
-	MultipleVariadic Code = 3041 // A.6.1 ⊢ ...and there may be at most one
-	IterationBinding Code = 3042 // A.5.6 — `mut a, b` has no production
+	MissingPackageClause Code = 2020 // ⊢ mandatory, first non-comment construct
+	MisplacedBuildClause Code = 2021 // ⊢ the second construct in the file
+	UnknownBuildTag      Code = 2022 // ⊢ an error, not a silent exclusion
+	ImportAfterDecl      Code = 2023 // ⊢ all imports precede all declarations
 )
 
 // ------------------------------------------------------------------- types
 
-// Types (A.3). Shape rules checked over an already-resolved type.
+// Types, and the signatures that are types. Shape rules checked over an
+// already-resolved type.
 const (
-	StackedOwnership   Code = 4001 // A.3.2 ⊢ qualifiers do not stack
-	MutOutsidePosition Code = 4002 // A.3.2 ⊢ mut/var only in a parameter or receiver
-	TildeOutsideSet    Code = 4003 // A.7.3 ✗ type X = ~int
-	AbstractInline     Code = 4004 // A.3.3 ⊢ abstract only as an alias target
-	ArrayLenNotConst   Code = 4005 // A.3.1 ⊢ ArrayLength must be compile-time
-	ArrayLenNegative   Code = 4006
-	NonComparableKey   Code = 4007 // A.3.1 ⊢ map[K]V requires K comparable
-	TensorOutsideNpu   Code = 4008 // A.3.5 ⊢ grammatical only under [+Npu]
-	NotRepresentable   Code = 4009 // A.1.5.1 ⊢ never a silent truncation
-	InfiniteType       Code = 4010 // a type that directly contains itself
+	NotAType         Code = 3001
+	TypeCycle        Code = 3002
+	InfiniteType     Code = 3003
+	NotRepresentable Code = 3004
+
+	StackedOwnership   Code = 3010 // ⊢ ownership qualifiers do not stack
+	MutOutsidePosition Code = 3011 // ⊢ mut/var only in a parameter or receiver position
+	NestedPointer      Code = 3012 // ⊢ a typed_ptr may not be the direct base of another
+	AbstractInline     Code = 3013 // ⊢ abstract only as an alias target
+
+	ArrayLenNotConst Code = 3020
+	ArrayLenNegative Code = 3021
+	NonComparableKey Code = 3022
+
+	TensorOutsideNpu    Code = 3030 // ⊢ tensor only inside an npu-marked function
+	TensorElemOutsideNpu Code = 3031 // ⊢ ...and its element type names are body-only
+	TensorElemInSignature Code = 3032 // ⊢ ...never in a signature
+
+	MixedParamNames  Code = 3040 // ⊢ names all present or all absent
+	VariadicNotLast  Code = 3041 // ⊢ a variadic parameter must be last
+	MultipleVariadic Code = 3042 // ⊢ ...and there may be at most one
+	MultipleMarkers  Code = 3043 // ⊢ a signature carries at most one FunctionMarker
 )
 
-// ---------------------------------------------------------------- ownership
+// ------------------------------------------------------------- expressions
 
-// Ownership and exclusivity (A.9). Listed now only because A.1.4 commits to
-// this fix-it by name, and the Fixit path needed a real user before the scanner
-// landed. The rest of A.14's ownership section belongs to the analyzer.
+// Expressions, including the ownership marker and the owning positions it may
+// occupy.
 const (
-	TransferMethodRemoved Code = 5001 // A.1.4 ✗ x.transfer()
+	TransferNotCallable  Code = 4001 // ⊢ `transfer` is bound to nothing, on purpose
+	TransferComputed     Code = 4002 // ⊢ the operand must be a binding or a field path
+	TransferOutsideOwning Code = 4003 // ⊢ six owning positions, and no others
+
+	MixedArguments Code = 4010 // ⊢ arguments are positional or named, not both
+
+	AwaitOutsideAsync   Code = 4020 // ⊢ parses unconditionally; licensed by the body
+	TupleIndexSpelling  Code = 4021 // ⊢ a decimal_lit containing no `_`
+	EnumShorthandNoType Code = 4022 // ⊢ legal only where the enum type is fixed by context
 )
 
-// ------------------------------------------------------- pointers and memory
+// -------------------------------------------------------------- statements
 
-// Pointers and memory (A.4.8). Same rationale as above: A.4.8 commits to the
-// addr → & fix-it by name.
+// Statements.
 const (
-	AddrOnNonPointer Code = 7001 // A.4.8 ⊢ addr accepts a typed_ptr operand only
-	AddrOnTemporary  Code = 7002 // A.4.8 ⊢ ...and only an addressable one
+	NotAssignable Code = 5001 // ⊢ which PrimaryExpr shapes are assignable is a static rule
+
+	IterationBindingMode Code = 5010 // ⊢ `mut a, b` does not combine
+
+	SelectCaseNotChannelOp Code = 5020 // ⊢ which calls are admissible in a ChannelCase
+	SelectMixedAwait       Code = 5021 // ⊢ entirely bare or entirely awaited
 )
 
-// ---------------------------------------------------------------- interop
+// ------------------------------------------- declarations and names
 
-// Interop (A.8). Only the forms the resolve pass can already see: A.8.3's ✗
-// members parse (ast.ForeignFunc keeps Modifiers and Body for exactly this)
-// and are rejected the moment a declare block is collected.
+// Declarations and names. Every code here answers "what does this name
+// denote", which is the question resolution exists to answer and the one
+// several of grammar.md's deferred ambiguities reduce to: an Index whose
+// operand denotes a generic declaration, a single identifier that is both a
+// one-term TypeSet and a constraint name.
 const (
-	ForeignModifier Code = 8001 // A.8.3 ✗ visibility modifiers are banned
-	ForeignBody     Code = 8002 // A.8.3 ✗ declarations cannot have bodies
-	ForeignField    Code = 8003 // A.8.3 ✗ fields describe foreign-side layout
-	FrameworkTag    Code = 8004 // A.8.2 ✗ framework blocks take no variant tag
-	DeclareNoTag    Code = 8005 // A.8.1 ⊢ legal only in a file with a BuildClause
-	NoFrameworks    Code = 8006 // A.8.1 ⊢ ...and only where the platform has them
+	UndeclaredName       Code = 6001
+	DuplicateDeclaration Code = 6002
+	ShadowedBuiltin      Code = 6003 // ⊢ a reserved builtin name may not be shadowed
+	ReservedAsMember     Code = 6004 // ⊢ ...nor declared as a member, method, field, local, or parameter
+
+	BlankNotUsable  Code = 6010 // ⊢ `_` introduces no binding
+	BlankNotAllowed Code = 6011 // ⊢ which positions accept it is a static rule
+
+	DuplicateField   Code = 6020
+	DuplicateVariant Code = 6021
+	PayloadDiscrim   Code = 6022 // ⊢ explicit discriminant on a unit variant only
+	DiscrimNoType    Code = 6023 // ⊢ ...and only with a declared DiscriminantType
+
+	TopLevelVarNotConst Code = 6030 // ⊢ a top-level initializer is compile-time-evaluable
+	TopLevelBareVar     Code = 6031 // ⊢ ...and the bare form is rejected there
+)
+
+// ---------------------------------------------------------------- generics
+
+// Generics and constraints.
+const (
+	NotGeneric        Code = 7001 // ⊢ brackets on a non-generic name
+	WrongTypeArgCount Code = 7002
+	MethodTypeParams  Code = 7003 // ⊢ a method may not declare its own
+	DuplicateTypeParam Code = 7004
+
+	TildeOutsideSet      Code = 7010 // ⊢ `~` outside a TypeSet is an error
+	ConstraintAsType     Code = 7011 // ⊢ legal only in a `[` ... `]` position
+	NotAConstraint       Code = 7012
+	ConstraintNotSatisfied Code = 7013
+)
+
+// ---------------------------------------------------------- declare blocks
+
+// Declare blocks. A declare block describes call shapes only; grammar.md lists
+// four forms that parse there and are rejected, so the diagnostic can name the
+// construct. Each has a code.
+const (
+	ForeignBody    Code = 8001 // ⊢ a Block on a ForeignFuncDecl
+	ForeignField   Code = 8002 // ⊢ a FieldDecl in a ForeignClassDecl
+	NestedDeclare  Code = 8003 // ⊢ a nested DeclareDecl
+	ForeignMarker  Code = 8004 // ⊢ a FunctionMarker on a ForeignFuncDecl
+
+	FrameworkTag     Code = 8010 // ⊢ a framework block takes no VariantTag
+	UnknownVariantTag Code = 8011 // ⊢ the tag set is closed
+
+	ForeignInitResult Code = 8020 // ⊢ an initializer returns its enclosing type
+)
+
+// ------------------------------------------------------ test result types
+
+// Test result types. An ExpectedType reaches the grammar only through
+// DeclResult, which is syntax; that it is further restricted to a file built
+// under the `test` tag is the static rule this range holds.
+const (
+	ExpectedOutsideTest Code = 9001
 )
 
 // ------------------------------------------------------------------ registry
@@ -185,9 +233,9 @@ type info struct {
 
 // registry maps each Code to its message template and severity.
 //
-// The template is the normative text. Changing one changes what
-// Expected(error, "...") tests match, and is therefore a language change rather
-// than an implementation detail — A.12.2 is explicit that this is the point.
+// The template is the normative text. Changing one changes what the error form
+// of ExpectedType matches, and is therefore a language change rather than an
+// implementation detail.
 //
 // Templates are written to read the same whether or not a span is shown, since
 // Diagnostic.Text() strips every position. That rules out deictic phrasing
@@ -197,10 +245,11 @@ var registry = map[Code]info{
 
 	// lexical
 	IllegalCharacter: {"illegal character %s in source", Error},
-	IllegalUTF8:      {"invalid UTF-8 encoding", Error},
+	IllegalUTF8:      {"source text is not valid UTF-8", Error},
+	NulCharacter:     {"the NUL character is not permitted in source text", Error},
 	DollarInIdent:    {"'$' is not an identifier character in Vertex", Error},
 
-	UnterminatedComment: {"comment is not terminated before end of file", Error},
+	UnterminatedComment: {"general comment is not terminated before end of file", Error},
 
 	UnterminatedString:    {"string literal is not terminated", Error},
 	NewlineInString:       {"string literal is not terminated before end of line", Error},
@@ -222,78 +271,110 @@ var registry = map[Code]info{
 	MissingExponentDigit: {"exponent requires at least one digit", Error},
 	NumberJoinedToIdent:  {"identifier characters may not directly follow a numeric literal", Error},
 
-	// syntactic
-	ExpectedToken:   {"expected %s, found %s", Error},
-	ExpectedStmtEnd: {"expected end of statement, found %s", Error},
-	ExpectedExpr:    {"expected an expression, found %s", Error},
-	ExpectedType:    {"expected a type, found %s", Error},
-	ExpectedIdent:   {"expected an identifier, found %s", Error},
-	ExpectedDecl:    {"expected a declaration, found %s", Error},
-	ExpectedCase:    {"expected 'case' or 'default', found %s", Error},
-	ExpectedCall:    {"the '%s' prefix must be applied to a call", Error},
+	// syntax
+	ExpectedToken:      {"expected %s, found %s", Error},
+	ExpectedTerminator: {"expected a line terminator, found %s", Error},
+	ExpectedExpr:       {"expected an expression, found %s", Error},
+	ExpectedType:       {"expected a type, found %s", Error},
+	ExpectedIdent:      {"expected an identifier, found %s", Error},
+	ExpectedDecl:       {"expected a declaration, found %s", Error},
+	ExpectedCase:       {"expected 'case' or 'default', found %s", Error},
+	ExpectedCall:       {"'%s' takes a call and nothing else", Error},
 
 	RangeNotAssociative: {"'..' is not associative; parenthesize one of the ranges", Error},
-	LiteralInHeader:     {"a composite literal may not appear unparenthesized in a %s header", Error},
-	TupleNeedsComma:     {"a one-element tuple literal requires its trailing comma", Error},
+	LiteralInHeader:     {"a composite literal may not appear unparenthesized in a '%s' header", Error},
+	EmptyTuple:          {"a tuple has at least one element; Vertex has no unit type", Error},
+	DuplicateDefault:    {"a '%s' statement may have at most one 'default' clause", Error},
 
 	MissingPackageClause: {"file must begin with a package clause", Error},
 	MisplacedBuildClause: {"a build clause must immediately follow the package clause", Error},
 	UnknownBuildTag:      {"unknown build tag %q", Error},
 	ImportAfterDecl:      {"imports must precede all declarations", Error},
-	DeferNotCall:         {"'defer' takes a call and nothing else", Error},
+
+	// types
+	NotAType:         {"%s is not a type", Error},
+	TypeCycle:        {"type %s refers to itself through its own definition", Error},
+	InfiniteType:     {"type %s has no finite size; it contains itself directly", Error},
+	NotRepresentable: {"%s is not representable by type %s", Error},
+
+	StackedOwnership:   {"ownership qualifiers do not stack: %s", Error},
+	MutOutsidePosition: {"'%s' is legal only in a parameter or receiver position", Error},
+	NestedPointer:      {"'typed_ptr' may not be the direct base of another; parenthesize the inner type", Error},
+	AbstractInline:     {"'abstract' is legal only as the target of a type alias", Error},
+
+	ArrayLenNotConst: {"array length must be a compile-time constant", Error},
+	ArrayLenNegative: {"array length must not be negative", Error},
+	NonComparableKey: {"%s is not comparable and cannot be a map key", Error},
+
+	TensorOutsideNpu:      {"'tensor' is legal only inside an npu-marked function", Error},
+	TensorElemOutsideNpu:  {"%s is a tensor element type and is legal only inside an npu-marked function body", Error},
+	TensorElemInSignature: {"%s is a tensor element type and may not appear in a signature", Error},
+
+	MixedParamNames:  {"parameter names must be either all present or all absent", Error},
+	VariadicNotLast:  {"a variadic parameter must be last in its parameter list", Error},
+	MultipleVariadic: {"a function may declare at most one variadic parameter", Error},
+	MultipleMarkers:  {"a signature carries at most one function marker", Error},
+
+	// expressions
+	TransferNotCallable:   {"'transfer' is not callable; ownership transfer is spelled with the 'var' prefix", Error},
+	TransferComputed:      {"'var' requires a binding or a field path, not a computed expression", Error},
+	TransferOutsideOwning: {"'var' is the transfer marker and is legal only in an owning position", Error},
+
+	MixedArguments: {"a call takes either named or positional arguments, not both", Error},
+
+	AwaitOutsideAsync:   {"'await' is legal only inside an async-marked function body", Error},
+	TupleIndexSpelling:  {"a tuple index must be written in decimal without '_'", Error},
+	EnumShorthandNoType: {"the enum type of a leading-dot shorthand is not fixed by context", Error},
+
+	// statements
+	NotAssignable: {"%s is not assignable", Error},
+
+	IterationBindingMode: {"'%s' does not combine with a two-name iteration binding", Error},
+
+	SelectCaseNotChannelOp: {"a 'select' case requires a channel operation", Error},
+	SelectMixedAwait:       {"a 'select' statement is either entirely bare or entirely awaited", Error},
 
 	// declarations and names
 	UndeclaredName:       {"undeclared name %s", Error},
 	DuplicateDeclaration: {"%s is already declared in this scope", Error},
 	ShadowedBuiltin:      {"%s is a reserved builtin name and may not be redeclared", Error},
 	ReservedAsMember:     {"%s is a reserved builtin name, not a declarable member", Error},
-	NotAType:             {"%s is not a type", Error},
-	ConstraintAsType:     {"%s is a constraint, not a type; a constraint is legal only in a '[...]' position", Error},
-	NotAConstraint:       {"%s does not satisfy the constraint", Error},
-	TypeCycle:            {"type %s refers to itself through its own definition", Error},
-	BlankNotUsable:       {"'_' introduces no binding and cannot be referred to", Error},
 
+	BlankNotUsable:  {"'_' introduces no binding and cannot be referred to", Error},
+	BlankNotAllowed: {"the blank identifier is not permitted as %s", Error},
+
+	DuplicateField:   {"field %s is already declared in %s", Error},
+	DuplicateVariant: {"variant %s is already declared in %s", Error},
+	PayloadDiscrim:   {"an explicit discriminant is legal only on a unit variant", Error},
+	DiscrimNoType:    {"an explicit discriminant requires a declared discriminant type", Error},
+
+	TopLevelVarNotConst: {"a top-level variable's initializer must be compile-time-evaluable", Error},
+	TopLevelBareVar:     {"the bare 'var' declaration form is not permitted at the top level", Error},
+
+	// generics
 	NotGeneric:         {"%s is not generic and takes no type arguments", Error},
 	WrongTypeArgCount:  {"%s takes %d type argument(s), but %d were given", Error},
 	MethodTypeParams:   {"a method may not declare its own type parameters; %s is generic over its receiver", Error},
 	DuplicateTypeParam: {"type parameter %s is already declared in this list", Error},
 
-	DuplicateField:    {"field %s is already declared in %s", Error},
-	DuplicateVariant:  {"variant %s is already declared in %s", Error},
-	PayloadDiscrim:    {"an explicit discriminant is legal only on a unit variant", Error},
-	DiscrimNoType:     {"an explicit discriminant requires a declared discriminant type", Error},
-	InitializerResult: {"an initializer must return its enclosing type %s", Error},
+	TildeOutsideSet:        {"'~' is legal only inside a type set", Error},
+	ConstraintAsType:       {"%s is a constraint, not a type; a constraint is legal only in a '[' ']' position", Error},
+	NotAConstraint:         {"%s is not a constraint", Error},
+	ConstraintNotSatisfied: {"%s does not satisfy the constraint %s", Error},
 
-	VariadicNotLast:  {"a variadic parameter must be last in its parameter list", Error},
-	MultipleVariadic: {"a function may declare at most one variadic parameter", Error},
-	IterationBinding: {"'%s' does not combine with a two-name iteration binding", Error},
+	// declare blocks
+	ForeignBody:   {"a foreign declaration cannot have a body", Error},
+	ForeignField:  {"a declare block describes call shape only; %s declares foreign-side layout", Error},
+	NestedDeclare: {"a declare block may not contain another declare block", Error},
+	ForeignMarker: {"a function marker is not permitted on a foreign declaration", Error},
 
-	// types
-	StackedOwnership:   {"ownership qualifiers do not stack: %s", Error},
-	MutOutsidePosition: {"'%s' is legal only in a parameter or receiver position", Error},
-	TildeOutsideSet:    {"'~' is legal only inside a type set", Error},
-	AbstractInline:     {"'abstract' is legal only as the target of a type alias", Error},
-	ArrayLenNotConst:   {"array length must be a compile-time constant", Error},
-	ArrayLenNegative:   {"array length must not be negative", Error},
-	NonComparableKey:   {"%s is not comparable and cannot be a map key", Error},
-	TensorOutsideNpu:   {"'tensor' is legal only inside an npu-marked function", Error},
-	NotRepresentable:   {"%s is not representable by type %s", Error},
-	InfiniteType:       {"type %s has no finite size; it contains itself directly", Error},
+	FrameworkTag:      {"a framework block takes no variant tag", Error},
+	UnknownVariantTag: {"unknown variant tag %q", Error},
 
-	// ownership
-	TransferMethodRemoved: {"'.transfer()' is not a method; ownership transfer is spelled with the 'var' prefix", Error},
+	ForeignInitResult: {"a foreign initializer must return its enclosing type %s", Error},
 
-	// pointers and memory
-	AddrOnNonPointer: {"'addr' accepts a typed_ptr operand only; '&' is already the address of %s", Error},
-	AddrOnTemporary:  {"'addr' requires an addressable operand: a var binding or a field path", Error},
-
-	// interop
-	ForeignModifier: {"a visibility modifier is not permitted on a foreign declaration", Error},
-	ForeignBody:     {"a foreign declaration cannot have a body", Error},
-	ForeignField:    {"a declare block describes call shape only; %s declares foreign-side layout", Error},
-	FrameworkTag:    {"a framework block takes no variant tag", Error},
-	DeclareNoTag:    {"a declare block requires the file to carry a build clause", Error},
-	NoFrameworks:    {"build tag %q has no notion of a bundled framework", Error},
+	// test result types
+	ExpectedOutsideTest: {"an Expected result requires the file to carry a 'build test' clause", Error},
 }
 
 // declaredCodes lists every Code constant in this file.
@@ -307,7 +388,7 @@ var registry = map[Code]info{
 var declaredCodes = []Code{
 	Internal,
 
-	IllegalCharacter, IllegalUTF8, DollarInIdent,
+	IllegalCharacter, IllegalUTF8, NulCharacter, DollarInIdent,
 	UnterminatedComment,
 	UnterminatedString, NewlineInString, UnterminatedRawString,
 	UnterminatedChar, EmptyChar, CharTooLong,
@@ -316,29 +397,38 @@ var declaredCodes = []Code{
 	EmptyDigits, DigitOutOfRange, HexFloatNoExponent,
 	MissingExponentDigit, NumberJoinedToIdent,
 
-	ExpectedToken, ExpectedStmtEnd, ExpectedExpr, ExpectedType,
+	ExpectedToken, ExpectedTerminator, ExpectedExpr, ExpectedType,
 	ExpectedIdent, ExpectedDecl, ExpectedCase, ExpectedCall,
-	RangeNotAssociative, LiteralInHeader, TupleNeedsComma,
+	RangeNotAssociative, LiteralInHeader, EmptyTuple, DuplicateDefault,
 	MissingPackageClause, MisplacedBuildClause, UnknownBuildTag,
-	ImportAfterDecl, DeferNotCall,
+	ImportAfterDecl,
+
+	NotAType, TypeCycle, InfiniteType, NotRepresentable,
+	StackedOwnership, MutOutsidePosition, NestedPointer, AbstractInline,
+	ArrayLenNotConst, ArrayLenNegative, NonComparableKey,
+	TensorOutsideNpu, TensorElemOutsideNpu, TensorElemInSignature,
+	MixedParamNames, VariadicNotLast, MultipleVariadic, MultipleMarkers,
+
+	TransferNotCallable, TransferComputed, TransferOutsideOwning,
+	MixedArguments,
+	AwaitOutsideAsync, TupleIndexSpelling, EnumShorthandNoType,
+
+	NotAssignable,
+	IterationBindingMode,
+	SelectCaseNotChannelOp, SelectMixedAwait,
 
 	UndeclaredName, DuplicateDeclaration, ShadowedBuiltin, ReservedAsMember,
-	NotAType, ConstraintAsType, NotAConstraint, TypeCycle, BlankNotUsable,
-	NotGeneric, WrongTypeArgCount, MethodTypeParams, DuplicateTypeParam,
+	BlankNotUsable, BlankNotAllowed,
 	DuplicateField, DuplicateVariant, PayloadDiscrim, DiscrimNoType,
-	InitializerResult,
-	VariadicNotLast, MultipleVariadic, IterationBinding,
+	TopLevelVarNotConst, TopLevelBareVar,
 
-	StackedOwnership, MutOutsidePosition, TildeOutsideSet, AbstractInline,
-	ArrayLenNotConst, ArrayLenNegative, NonComparableKey, TensorOutsideNpu,
-	NotRepresentable, InfiniteType,
+	NotGeneric, WrongTypeArgCount, MethodTypeParams, DuplicateTypeParam,
+	TildeOutsideSet, ConstraintAsType, NotAConstraint, ConstraintNotSatisfied,
 
-	TransferMethodRemoved,
+	ForeignBody, ForeignField, NestedDeclare, ForeignMarker,
+	FrameworkTag, UnknownVariantTag, ForeignInitResult,
 
-	AddrOnNonPointer, AddrOnTemporary,
-
-	ForeignModifier, ForeignBody, ForeignField, FrameworkTag,
-	DeclareNoTag, NoFrameworks,
+	ExpectedOutsideTest,
 }
 
 // String renders the stable identifier, e.g. "V1003". This is what a test that
@@ -357,7 +447,8 @@ func (c Code) Severity() Severity {
 
 // Template exposes the raw format string. Intended for the test runner and for
 // tooling that enumerates the normative surface, not for call sites — a call
-// site that formats its own text is exactly what the registry exists to prevent.
+// site that formats its own text is exactly what the registry exists to
+// prevent.
 func (c Code) Template() string { return registry[c].tmpl }
 
 // Registered reports whether c has a registry entry.

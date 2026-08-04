@@ -3,13 +3,14 @@ package types
 import "github.com/vertex-language/vertex/token"
 
 // Object is a named entity: a variable, constant, function, type name, builtin,
-// or package name. Resolution maps each *ast.Ident to one of these.
+// or package qualifier. Resolution maps each *ast.Ident to one of these.
 //
-// Type() may return nil during checking. That is not an error state — A.2 ⊢
-// "top-level declarations are order-independent: a declaration may refer to any
-// other declaration in the same package regardless of textual position", so
-// every package-scope name is inserted before any type is resolved. A nil type
-// means "not yet resolved"; Typ[Invalid] means "resolution failed".
+// Type may return nil during checking. That is not an error state — §1.1 ⊢
+// "top-level declarations are order-independent: a declaration may reference
+// any other in its package regardless of position or file" — so every
+// package-scope name is inserted before any type is resolved. A nil type means
+// "not yet resolved"; Typ[Invalid] means "resolution failed", and predicates
+// treat the second as already-diagnosed.
 type Object interface {
 	Name() string
 	Type() Type
@@ -30,25 +31,24 @@ type object struct {
 	pkg  *Package
 }
 
-func (o *object) Name() string    { return o.name }
-func (o *object) Type() Type      { return o.typ }
-func (o *object) Pos() token.Pos  { return o.pos }
-func (o *object) Pkg() *Package   { return o.pkg }
-func (o *object) SetType(t Type)  { o.typ = t }
-func (o *object) objectNode()     {}
+func (o *object) Name() string   { return o.name }
+func (o *object) Type() Type     { return o.typ }
+func (o *object) Pos() token.Pos { return o.pos }
+func (o *object) Pkg() *Package  { return o.pkg }
+func (o *object) SetType(t Type) { o.typ = t }
+func (o *object) objectNode()    {}
 
 // ------------------------------------------------------------------- var
 
 // Var is a variable, parameter, receiver, struct field, or tuple element.
 //
-// Mode carries A.3.2's `mut` and `var` qualifiers, which are "legal only in a
-// parameter or receiver position" and are therefore not part of the Type — see
-// Mode in type.go for why the split is load-bearing.
+// Mode carries `mut` and `var`, which §3.2 makes "a parameter or receiver only"
+// and therefore not part of the Type — see type.go for why the split is
+// load-bearing.
 //
-// Mutable distinguishes A.5.1's two binding forms: ⊢ "let is immutable and not
-// guaranteed to be addressable — it may be a register, an SSA value, or folded
-// away entirely. var is mutable and owns a real stack slot for its whole
-// lifetime." That is what makes Addressable answerable at all.
+// Mutable distinguishes §6.1's two binding forms: ⊢ "`let` requires an
+// initializer and fixes the binding; `var` may be rebound and is required by
+// anything taking exclusive access or transferring."
 type Var struct {
 	object
 	mode    Mode
@@ -74,28 +74,25 @@ func (v *Var) IsField() bool     { return v.field }
 func (v *Var) SetMutable(b bool) { v.mutable = b }
 func (v *Var) SetMode(m Mode)    { v.mode = m }
 
-// Addressable reports whether this binding has a real storage slot.
-//
-// A.3.2 ⊢ a `mut` argument "must be an addressable var binding or field path",
-// and A.4.8 ⊢ addr "requires an addressable operand: a var binding or a field
-// path". Both read this, and A.5.1 ⊢ is why a `let` answers false: it "may not
-// physically exist anywhere to point at."
-func (v *Var) Addressable() bool { return v.mutable || v.field }
+// Assignable reports the first two entries of §6.2's list: ⊢ an AssignTarget is
+// assignable when it is "a `var` binding" or "a field of an assignable value".
+// The remaining entries are questions about the base expression's type rather
+// than about one object, and live in predicates.go as InteriorAssignable.
+func (v *Var) Assignable() bool { return v.mutable || v.field }
 
 // Owning reports whether this parameter takes ownership of its argument.
 //
-// A.3.2 ⊢ `var T` "denotes the owning convention; whether the callee receives
-// the caller's original or a fresh deep copy is decided at the call site by the
-// presence or absence of the var marker (A.4.6), never by the declaration." So
-// this answers only that the position is owning — A.9.1's question — and never
-// which of the two happens.
+// §8.1 ⊢ "the convention lives in the signature; only the owning one has a
+// choice at the call." So this answers that the position is owning, and never
+// which of copy or move happens — §8.2 makes that the marker's question at the
+// call site.
 func (v *Var) Owning() bool { return v.mode == ModeVar }
 
 // ----------------------------------------------------------------- const
 
-// Const is a compile-time constant: an explicit enum discriminant, an
-// ArrayLength identifier, or a top-level binding whose initializer A.2 requires
-// to be compile-time-evaluable.
+// Const is a compile-time constant: an explicit enum discriminant, a constant
+// used as an ArrayLength, or a top-level binding, whose initializer §6.1
+// requires to be one.
 type Const struct {
 	object
 	val Value
@@ -108,18 +105,19 @@ func NewConst(pos token.Pos, pkg *Package, name string, typ Type, v Value) *Cons
 	return &Const{object{name, typ, pos, pkg}, v}
 }
 
-func (c *Const) Val() Value       { return c.val }
-func (c *Const) SetVal(v Value)   { c.val = v }
+func (c *Const) Val() Value     { return c.val }
+func (c *Const) SetVal(v Value) { c.val = v }
 
 // ------------------------------------------------------------------ func
 
 // Func is a function, method, initializer, deinitializer, foreign declaration,
 // or MethodRequirement.
 //
-// A.6.4's init and deinit get no distinct object kind, matching ast.FuncDecl:
-// A.1.3 makes them ContextualKeywords that are ordinary method names in a
-// receiver declaration. Whether a Func is an initializer is a question about
-// its name and receiver, answered by whoever asks.
+// `init` and `deinit` get no distinct object kind, matching ast.FuncDecl: they
+// are contextual keywords that are ordinary method names in a receiver
+// declaration. §7.2 ⊢ they are "ordinary method names recognized by spelling",
+// so whether a Func is one is a question about its name and receiver, answered
+// by whoever asks.
 type Func struct {
 	object
 }
@@ -139,38 +137,52 @@ func (f *Func) Signature() *Signature {
 	return sig
 }
 
-// IsMethod reports whether this function declares a receiver (A.6.1).
 func (f *Func) IsMethod() bool {
 	sig := f.Signature()
 	return sig != nil && sig.Recv() != nil
 }
 
-// IsInit reports A.6.4's InitializerDeclaration shape: the ContextualKeyword
-// `init` in a receiver declaration.
-func (f *Func) IsInit() bool { return f.name == token.CtxInit && f.IsMethod() }
-
-// IsDeinit reports A.6.4's DeinitializerDeclaration shape.
+func (f *Func) IsInit() bool   { return f.name == token.CtxInit && f.IsMethod() }
 func (f *Func) IsDeinit() bool { return f.name == token.CtxDeinit && f.IsMethod() }
 
-// IsEntry reports whether this is the program entry point.
+// IsEntry reports whether this is the program's entry point.
 //
-// A.6.1 ⊢ "a function named main must take no parameters, return nothing, and
-// acts as the program entry point." It also sets [+Await] in its body, which is
-// the one place outside an async-marked function where await is licensed.
+// §1.4 ⊢ "a program has exactly one package named `main` declaring exactly one
+// `func main()` — no parameters, no result, no marker." All four conditions are
+// checked here; that the package is named `main`, and that there is exactly
+// one, are the loader's and the checker's questions rather than this object's.
+//
+// §1.4 also makes it "the one non-`async` function in which `await` is legal",
+// which is why the marker check matters beyond tidiness.
 func (f *Func) IsEntry() bool {
 	sig := f.Signature()
-	return f.name == "main" && sig != nil && sig.Recv() == nil &&
-		sig.Params().Len() == 0 && sig.Results().IsUnit()
+	return f.name == "main" && sig != nil &&
+		sig.Recv() == nil &&
+		sig.Params().Len() == 0 &&
+		sig.IsVoid() &&
+		sig.Marker() == MarkerNone
+}
+
+// IsTest reports §7.4's test-function shape: ⊢ "a `test` function takes no
+// parameters, carries an `Expected` result or none, and exists only in a
+// `build test` file." The build tag is the file's and is checked by the
+// analyzer against token.LicensesTest.
+func (f *Func) IsTest() bool {
+	sig := f.Signature()
+	return sig != nil && sig.Marker() == MarkerTest &&
+		sig.Params().Len() == 0 &&
+		(sig.Expected() != nil || sig.Results().Len() == 0)
 }
 
 // -------------------------------------------------------------- typename
 
 // TypeName binds a name to a type or to a constraint: a struct, class, enum,
-// abstract alias, type parameter, predeclared name, or ConstraintDeclaration.
+// abstract alias, transparent alias, type parameter, predeclared name, or
+// ConstraintDecl.
 //
-// One object kind serves both because A.7.2 ⊢ "a single identifier in a
-// constraint body parses as both a TypeSet of one term and a ConstraintName; it
-// is resolved by what the name denotes." A separate kind would make that
+// One object kind serves both because grammar.md ⊢ "a ConstraintElem that is a
+// single identifier parses as both a one-term TypeSet and a constraint name;
+// resolution is by what the name denotes." A separate kind would make that
 // resolution a two-map lookup instead of one field test.
 type TypeName struct {
 	object
@@ -185,24 +197,20 @@ func NewTypeName(pos token.Pos, pkg *Package, name string, typ Type) *TypeName {
 // c may be nil during collection and filled in by SetConstraint, matching the
 // nil-type convention Object documents.
 func NewConstraintName(pos token.Pos, pkg *Package, name string, c *Constraint) *TypeName {
-	return &TypeName{
-		object:     object{name: name, pos: pos, pkg: pkg},
-		constraint: c,
-	}
+	return &TypeName{object: object{name: name, pos: pos, pkg: pkg}, constraint: c}
 }
 
 // IsConstraint reports whether this name denotes a constraint.
 //
-// It is what rejects A.14's `var c: Ordered`: A.7.2 ⊢ a constraint "is never a
-// value type and is legal only in a [...] position." Because Constraint does
-// not implement Type, a checker that forgets to call this cannot accidentally
-// let one through — it has no Type to return.
+// It is what rejects `var c: Ordered`. Because Constraint does not implement
+// Type, a checker that forgets to call this cannot let one through anyway — it
+// has no Type to return.
 func (t *TypeName) IsConstraint() bool { return t.constraint != nil }
 
 func (t *TypeName) Constraint() *Constraint { return t.constraint }
 
 // SetConstraint fills in a constraint after collection. A name minted by
-// NewConstraintName remains a constraint name even before this is called, so
+// NewConstraintName is already a constraint name before this is called, so
 // IsConstraint's answer never changes mid-check.
 func (t *TypeName) SetConstraint(c *Constraint) {
 	if c != nil {
@@ -211,10 +219,10 @@ func (t *TypeName) SetConstraint(c *Constraint) {
 }
 
 // IsAlias reports whether this name was introduced by a transparent
-// TypeAliasDeclaration.
+// TypeAliasDecl.
 //
-// A.6.6 ⊢ "an alias to a Type is transparent: it names the same type and
-// satisfies a ~T type-set element", so no Named is minted and the name points
+// §3.1 ⊢ such an alias "introduces a second name for one type, interchangeable
+// with the first in both directions", so no Named is minted and the name points
 // straight at its target. An alias to `abstract` is nominal and does mint one,
 // which is why that case answers false.
 func (t *TypeName) IsAlias() bool {
@@ -227,17 +235,18 @@ func (t *TypeName) IsAlias() bool {
 
 // --------------------------------------------------------------- builtin
 
-// Builtin is a ReservedBuiltinName (A.1.4).
+// Builtin is a reserved builtin name.
 //
-// It has no meaningful Type: A.4.8 makes each builtin's shape arity- and
-// type-argument-specific rather than expressible as a Signature — `new[T]`
-// takes a count plus optional named arguments, `sizeof` takes a Type, and
-// `resize` has two arities. The checker special-cases each by Id.
+// It has no meaningful Type: each builtin's shape is arity- and
+// type-argument-specific rather than expressible as a Signature — `sizeof`
+// takes a Type, `new` takes a count plus named arguments, `resize` has two
+// arities — so the checker special-cases each by Id.
 //
-// A.1.4 ⊢ "a ReservedBuiltinName may not be shadowed, and may not be declared
-// as a member, method, or field name." That guarantee is what makes the
-// parser's recognition of sizeof/alignof/reinterpret by name sound rather than
-// a hack, and it is enforced by Reserved (scope.go) rather than by Insert.
+// §2.3 ⊢ "reserved builtin names may not be shadowed — not as a local,
+// parameter, type parameter, field, method, or top-level declaration, and not
+// as a parameter label." That guarantee is what makes the parser's recognition
+// of sizeof/alignof/reinterpret by name sound, and it is enforced by Reserved
+// (scope.go) rather than by Insert.
 type Builtin struct {
 	object
 	id BuiltinId
@@ -249,59 +258,52 @@ func NewBuiltin(name string, id BuiltinId) *Builtin {
 
 func (b *Builtin) Id() BuiltinId { return b.id }
 
+// BuiltinId enumerates §2.3's reserved builtin names, and nothing else.
+// `unique`, `shared`, and `weak` are absent on purpose: grammar.md ⊢ they "are
+// keywords, not reserved builtin names; they get the HeapConstructor
+// production", so they never resolve to an object at all.
 type BuiltinId int
 
 const (
-	_Sizeof BuiltinId = iota
-	_Alignof
-	_Reinterpret
-	_Addr
-	_New
-	_Delete
-	_Resize
-	_Copy
-	_Zero
-	_Unique
-	_Shared
-	_Weak
-	_Upgrade
-	_Drop
+	NewId BuiltinId = iota
+	DeleteId
+	ResizeId
+	CopyId
+	ZeroId
+	AddrId
+	SizeofId
+	AlignofId
+	ReinterpretId
+	UpgradeId
+	DropId
+	PanicId
+	BlendId
+	MinId
+	MaxId
+	ClampId
 
-	// _Transfer exists only so A.1.4's `.transfer()` diagnostic can carry its
-	// fix-it rather than degrading into "no such method". ⊢ "the name stays
-	// reserved so the diagnostic can carry a fix-it." It is never callable.
-	_Transfer
-)
-
-// Exported ids, for the analyzer's builtin dispatch.
-const (
-	SizeofId      = _Sizeof
-	AlignofId     = _Alignof
-	ReinterpretId = _Reinterpret
-	AddrId        = _Addr
-	NewId         = _New
-	DeleteId      = _Delete
-	ResizeId      = _Resize
-	CopyId        = _Copy
-	ZeroId        = _Zero
-	UniqueId      = _Unique
-	SharedId      = _Shared
-	WeakId        = _Weak
-	UpgradeId     = _Upgrade
-	DropId        = _Drop
-	TransferId    = _Transfer
+	// TransferId is bound to nothing. §2.3 ⊢ "`transfer` is reserved and bound
+	// to nothing, so `x.transfer()` and `transfer(x)` diagnose against
+	// ownership §3.3 rather than as unknown names" — the object exists only so
+	// the diagnostic can carry diag's fix-it to the `var` prefix. Calling it is
+	// always an error.
+	TransferId
 )
 
 // -------------------------------------------------------------- pkgname
 
 // PkgName is an imported package's qualifier in one file's scope.
 //
-// A.2.3 ⊢ "the imported package's declared name (its PackageClause) is the
-// qualifier under which its symbols are reached; the import path is a locator,
-// not a name." So Name() is the imported package's own name and never derived
-// from Path — and since A.2.3 also says "there is no aliasing form, no
-// dot-import, and no blank import", there is exactly one name to bind and no
-// choice about what it is.
+// §1.3 ⊢ "imports are file-scoped: an `import` in one file of a package does
+// not bring the qualifier into the others. The qualifier is the imported
+// package's own PackageName, never the path." So Name is the imported
+// package's own name and is never derived from Path — and since there is no
+// aliasing form, no dot-import, and no blank import, there is exactly one name
+// to bind and no choice about what it is.
+//
+// §1.3 also makes two imports whose packages declare the same name a compile
+// error, "there is no aliasing form to resolve the clash with" — which is a
+// duplicate Insert into the file scope and needs nothing here.
 type PkgName struct {
 	object
 	imported *Package
@@ -310,12 +312,7 @@ type PkgName struct {
 
 func NewPkgName(pos token.Pos, pkg *Package, imported *Package, path string) *PkgName {
 	return &PkgName{
-		object: object{
-			name: imported.name,
-			typ:  Typ[Invalid],
-			pos:  pos,
-			pkg:  pkg,
-		},
+		object:   object{name: imported.name, typ: Typ[Invalid], pos: pos, pkg: pkg},
 		imported: imported,
 		path:     path,
 	}
@@ -329,10 +326,14 @@ func (p *PkgName) Path() string       { return p.path }
 // Package is a checked package: its declared name, its resolved path, and its
 // package scope.
 //
-// One package is one compilation unit, matching ast.Package. The scope's parent
-// is Universe, so A.1.4's predeclared names are found by any lookup that walks
-// out far enough — which is what makes them "ordinary identifiers pre-bound in
-// an implicit outermost scope" rather than keywords.
+// §1.1 ⊢ "a package is the set of selected files carrying the same
+// PackageName", which matches ast.Package. The scope's parent is Universe, so
+// §2.3's predeclared names are found by any lookup that walks out far enough —
+// which is what makes them ordinary identifiers pre-bound in an implicit scope
+// rather than keywords.
+//
+// There is no visibility modifier in Vertex (§1.1), so a package scope has no
+// exported subset and every top-level declaration is reachable by any importer.
 type Package struct {
 	name     string
 	path     string
@@ -355,10 +356,10 @@ func (p *Package) Imports() []*Package { return p.imports }
 func (p *Package) SetImports(l []*Package) { p.imports = l }
 
 // Complete reports whether this package finished checking. An importer must
-// only hand out complete packages, since A.2.3 makes the qualifier come from
-// the imported package's own clause and a half-checked scope would answer a
-// lookup with a nil type.
-func (p *Package) Complete() bool     { return p.complete }
-func (p *Package) MarkComplete()      { p.complete = true }
+// only hand out complete packages: §1.3 makes the qualifier come from the
+// imported package's own clause, and a half-checked scope would answer a lookup
+// with a nil type.
+func (p *Package) Complete() bool { return p.complete }
+func (p *Package) MarkComplete()  { p.complete = true }
 
 func (p *Package) String() string { return "package " + p.path }

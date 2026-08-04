@@ -1,30 +1,22 @@
 package types
 
-// intBits fixes the width of `int` and `uint`.
-//
-// A.1.4 lists them as distinct from int64/uint64 but never pins a width. They
-// are fixed at 64 bits on every build tag, including js and wasm, rather than
-// tracking the pointer width:
-//
-//   - A.15's invariant is that "every value has a statically known layout".
-//     A width that varies by target makes `sizeof(int)` a per-target answer and
-//     makes a struct's layout non-portable across a `build` split, which is
-//     exactly the class of bug the build tag is supposed to contain.
-//   - A.1.5.1 ⊢ "a literal that does not fit the destination type is a compile
-//     error." A target-varying width would make that a target-varying error,
-//     so a file could compile under one tag and fail under another for a reason
-//     invisible in the source.
-//
-// wasm32 therefore pays a two-instruction cost on `int` arithmetic. That is the
-// right side of the trade for a language whose whole premise is that cost is
-// visible and layout is fixed.
-const intBits = 64
+import (
+	"math/big"
 
-// Sizes answers layout questions for a target. Only the pointer width varies;
-// see intBits.
+	"github.com/vertex-language/vertex/token"
+)
+
+// Sizes answers layout questions for one target.
+//
+// §2.3 ⊢ "`int` and `uint` are the target's pointer width and are distinct
+// types from `int64`/`uint64` even where the widths agree", so WordSize drives
+// both the pointer width and the width of those two types. Everything that
+// depends on it — Sizeof, Alignof, and Representable — is therefore a method
+// here rather than a free function: a caller cannot ask a layout question
+// without saying which target it is asking about.
 type Sizes struct {
-	WordSize int64 // pointer and word width in bytes
-	MaxAlign int64 // maximum alignment of any type
+	WordSize int64 // pointer, and `int`/`uint`, width in bytes
+	MaxAlign int64 // maximum alignment of a scalar or aggregate
 }
 
 var (
@@ -32,20 +24,66 @@ var (
 	Sizes32 = &Sizes{WordSize: 4, MaxAlign: 8}
 )
 
-// SizesFor returns the layout rules for a build tag (A.2.2).
-func SizesFor(tag string) *Sizes {
+// SizesFor returns the layout rules for a build tag. §1.2 makes the tag a
+// whole-file selection rule, so one compilation has one answer.
+func SizesFor(tag token.BuildTag) *Sizes {
 	switch tag {
-	case "js", "wasm":
+	case token.TagJS, token.TagWasm:
 		return Sizes32
 	}
 	return Sizes64
+}
+
+// intWidth reports a sized integer kind's width in bits and its signedness.
+func (s *Sizes) intWidth(k BasicKind) (bits uint, signed, ok bool) {
+	switch k {
+	case Int4:
+		return 4, true, true
+	case Int8:
+		return 8, true, true
+	case Int16:
+		return 16, true, true
+	case Int32:
+		return 32, true, true
+	case Int64:
+		return 64, true, true
+	case Uint8:
+		return 8, false, true
+	case Uint16:
+		return 16, false, true
+	case Uint32:
+		return 32, false, true
+	case Uint64:
+		return 64, false, true
+	case Int:
+		return uint(s.WordSize) * 8, true, true
+	case Uint:
+		return uint(s.WordSize) * 8, false, true
+	}
+	return 0, false, false
+}
+
+// intRange returns the inclusive bounds of a sized integer kind. It is computed
+// rather than tabled because the bounds of `int` and `uint` are the target's.
+func (s *Sizes) intRange(k BasicKind) (lo, hi *big.Int, ok bool) {
+	bits, signed, ok := s.intWidth(k)
+	if !ok {
+		return nil, nil, false
+	}
+	if signed {
+		h := new(big.Int).Lsh(big.NewInt(1), bits-1)
+		l := new(big.Int).Neg(h)
+		return l, h.Sub(h, big.NewInt(1)), true
+	}
+	h := new(big.Int).Lsh(big.NewInt(1), bits)
+	return big.NewInt(0), h.Sub(h, big.NewInt(1)), true
 }
 
 // Alignof returns t's alignment in bytes.
 func (s *Sizes) Alignof(t Type) int64 {
 	switch u := Underlying(t).(type) {
 	case *Basic:
-		if a := basicSize(u.kind, s.WordSize); a > 0 {
+		if a := s.basicSize(u.kind); a > 0 {
 			if a > s.MaxAlign {
 				return s.MaxAlign
 			}
@@ -54,8 +92,14 @@ func (s *Sizes) Alignof(t Type) int64 {
 		return 1
 
 	case *Array:
-		// A.3.1 ⊢ [N]T is inline storage with no header, so it aligns as T.
+		// Inline storage with no header, so it aligns as its element does.
 		return s.Alignof(u.elem)
+
+	case *Vector:
+		// The sources fix no vector ABI. A lane-wise load wants the whole
+		// vector naturally aligned, so this aligns to its own size rather than
+		// clamping to MaxAlign — an implementation choice, not a stated rule.
+		return roundPow2(s.Sizeof(u))
 
 	case *Struct:
 		var max int64 = 1
@@ -85,48 +129,43 @@ func (s *Sizes) Alignof(t Type) int64 {
 			}
 		}
 		return max
+
+	case *Predicate:
+		return 1
 	}
 	return s.WordSize
 }
 
 // Sizeof returns t's size in bytes.
+//
+// §3.4 ⊢ "every type has a size known at compile time", and it fixes one layout
+// fact directly: the seven indirections are "all one word". Everything else
+// below — the string header, the closure representation, the enum layout — is
+// this implementation's choice, because neither source document fixes it.
 func (s *Sizes) Sizeof(t Type) int64 {
 	switch u := Underlying(t).(type) {
 	case *Basic:
-		return basicSize(u.kind, s.WordSize)
+		return s.basicSize(u.kind)
 
 	case *Array:
-		if u.len == 0 {
+		if u.len <= 0 {
 			return 0
 		}
 		return u.len * s.arrayStride(u.elem)
 
-	case *Slice:
-		// A.3.1 ⊢ []T is a three-word {ptr, len, cap} header.
-		return 3 * s.WordSize
-
-	case *Map:
-		return s.WordSize
-
-	case *Chan:
-		// A.3.5 ⊢ an implicitly heap-resident refcounted handle.
-		return s.WordSize
-
-	case *Pointer:
-		return s.WordSize
-
-	case *Ownership:
-		// A.3.2 ⊢ unique, shared, and weak "are ordinary one-word value types".
+	// §3.4's one-word indirections.
+	case *Slice, *Map, *Chan, *Pointer, *Ownership:
 		return s.WordSize
 
 	case *Abstract:
+		// A handle, one word, like the indirections it sits beside.
 		return s.WordSize
 
 	case *Signature:
-		// A.3.4 ⊢ "a non-capturing function value is one word — a bare code
-		// pointer. A capturing closure is two words, {code, env}." The type
-		// alone does not say which, so this is the conservative answer; lower
-		// narrows it from the expression that produced the value.
+		// A function value is at most {code, env}. The sources fix no
+		// representation and §7.3's capture-by-value is a property of the
+		// expression rather than of the type, so this is the conservative
+		// answer and lower narrows it from what produced the value.
 		return 2 * s.WordSize
 
 	case *Struct:
@@ -143,19 +182,28 @@ func (s *Sizes) Sizeof(t Type) int64 {
 	case *Enum:
 		return s.enumSize(u)
 
+	case *Vector:
+		return u.lanes * s.Sizeof(u.elem)
+
 	case *Tensor:
-		n := int64(1)
-		for _, d := range u.shape {
-			n *= d
-		}
-		return n * s.Sizeof(u.elem)
+		// Element widths are taken in bits, because int4 is sub-byte and only
+		// ever exists packed inside one of these.
+		bits := u.Elems() * s.elemBits(u.elem)
+		return align(bits, 8) / 8
+
+	case *Predicate:
+		// §5.1 keeps it out of every storage position, so it never has a
+		// layout to report. A backend may give the lane mask whatever
+		// representation it likes.
+		return 0
 	}
 	return 0
 }
 
-// Offsetsof returns each field's byte offset. A.6.2 ⊢ "fields laid out in
-// declaration order with ABI padding" — there is no reordering, so a reader
-// can predict the layout from the source.
+// Offsetsof returns each field's byte offset. Fields are laid out in
+// declaration order with padding and no reordering, so a reader can predict the
+// layout from the source; §7.2 makes declaration order observable anyway,
+// through destruction order.
 func (s *Sizes) Offsetsof(fields []*Field) []int64 {
 	offs := make([]int64, len(fields))
 	var cur int64
@@ -185,8 +233,11 @@ func (s *Sizes) structSize(fields []*Field) int64 {
 	return align(size, maxAlign)
 }
 
-// enumSize implements A.6.5: a unit-only enum *is* its discriminant integer; a
-// payload enum is "a tagged union sized to the largest variant plus the tag".
+// enumSize lays a unit-only enum out as its discriminant and a payload enum as
+// a tag plus the largest variant. The sources fix no enum layout; this is the
+// implementation's choice and is not normative. What is normative is only that
+// the size exists at compile time (§3.4) and that the zero value is the first
+// variant with any payload zeroed (§3.3).
 func (s *Sizes) enumSize(e *Enum) int64 {
 	if e.UnitOnly() {
 		return s.Sizeof(e.discrim)
@@ -222,10 +273,47 @@ func (s *Sizes) enumSize(e *Enum) int64 {
 	return align(total, maxAlign)
 }
 
-// arrayStride is the per-element extent inside a fixed array, which is the
-// element size rounded up to its own alignment.
+// arrayStride is the per-element extent inside a fixed array: the element size
+// rounded up to its own alignment.
 func (s *Sizes) arrayStride(elem Type) int64 {
 	return align(s.Sizeof(elem), s.Alignof(elem))
+}
+
+// elemBits is a tensor element's width in bits. int4 has no byte size of its
+// own, which is why tensor sizing goes through here and Sizeof(Typ[Int4])
+// answers zero.
+func (s *Sizes) elemBits(elem Type) int64 {
+	if b := AsBasic(elem); b != nil && b.kind == Int4 {
+		return 4
+	}
+	return s.Sizeof(elem) * 8
+}
+
+func (s *Sizes) basicSize(k BasicKind) int64 {
+	switch k {
+	case Bool, Int8, Uint8, FP8E4M3, FP8E5M2:
+		return 1
+	case Int16, Uint16, BF16:
+		return 2
+	case Int32, Uint32, Float32:
+		return 4
+	case Int64, Uint64, Float64:
+		return 8
+	case Int, Uint:
+		return s.WordSize
+	case Char:
+		// One Unicode scalar value needs 21 bits; four bytes is the natural
+		// carrier, and the sources fix no width.
+		return 4
+	case String:
+		// grammar.md ⊢ "a string is UTF-8 bytes with a length and no NUL
+		// terminator", so a length is stored: {ptr, len}.
+		return 2 * s.WordSize
+	case Int4:
+		// Sub-byte, and only meaningful packed inside a tensor. See elemBits.
+		return 0
+	}
+	return 0
 }
 
 func align(x, a int64) int64 {
@@ -235,24 +323,74 @@ func align(x, a int64) int64 {
 	return (x + a - 1) &^ (a - 1)
 }
 
-func basicSize(k BasicKind, word int64) int64 {
-	switch k {
-	case Bool, Int8, Uint8:
-		return 1
-	case Int16, Uint16:
-		return 2
-	case Int32, Uint32, Float32:
-		return 4
-	case Int64, Uint64, Float64:
-		return 8
-	case Int, Uint:
-		return intBits / 8
-	case Char:
-		// A.1.5.2 ⊢ "exactly one Unicode scalar value, held in 4 bytes."
-		return 4
-	case String:
-		// A.1.5.2 ⊢ UTF-8 bytes with a length and no NUL terminator: {ptr, len}.
-		return 2 * word
+func roundPow2(x int64) int64 {
+	p := int64(1)
+	for p < x {
+		p <<= 1
 	}
-	return 0
+	return p
+}
+
+// ------------------------------------------------------------------- cost
+
+// CopyKind is what a bare copy of a value costs.
+//
+// §8.5 prices every copy and every transfer. The transfer column is uniformly
+// O(1), so only the bare copy needs a classification:
+//
+//	scalars, typed_ptr        register move
+//	struct, class, [N]T       fieldwise copy
+//	string, []T, map[K]V      deep-copies the payload
+//	unique T                  allocates and deep-copies the pointee
+//	shared T, chan T          refcount increment
+//	weak T                    weak-count increment
+//
+// §8.5 ⊢ "under generics the cost is fixed by the concrete type at
+// instantiation, so a lint on large owned types fires per instantiation, not
+// per declaration" — which is why this takes a Type and not a declaration.
+type CopyKind uint8
+
+const (
+	CopyRegister CopyKind = iota
+	CopyFieldwise
+	CopyDeep
+	CopyAlloc
+	CopyRefcount
+	CopyWeakcount
+)
+
+// CopyCost classifies a bare copy of t.
+//
+// CopyFieldwise is recursive: a struct holding a `[]T` still deep-copies that
+// field, because the fieldwise copy copies each field at that field's own cost.
+func CopyCost(t Type) CopyKind {
+	switch u := Underlying(t).(type) {
+	case *Basic:
+		if u.is(InfoString) {
+			return CopyDeep
+		}
+		return CopyRegister
+
+	case *Pointer, *Signature, *Abstract, *Predicate:
+		return CopyRegister
+
+	case *Slice, *Map:
+		return CopyDeep
+
+	case *Chan:
+		return CopyRefcount
+
+	case *Ownership:
+		switch u.kind {
+		case Unique:
+			return CopyAlloc
+		case Weak:
+			return CopyWeakcount
+		}
+		return CopyRefcount
+
+	case *Array, *Struct, *Tuple, *Enum, *Vector, *Tensor:
+		return CopyFieldwise
+	}
+	return CopyFieldwise
 }
