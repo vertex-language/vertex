@@ -27,7 +27,7 @@ func (fb *funcBuilder) copyOf(v Value, t types.Type) Value {
 		return v
 
 	case types.CopyRefcount:
-		if types.IsChan(t) {
+		if isChan(t) {
 			fb.l.need(builtins.FeatChan)
 			return fb.callBuiltin(builtins.ChanRetain, Ptr, v)
 		}
@@ -65,17 +65,17 @@ func (fb *funcBuilder) deepCopy(v Value, t types.Type) Value {
 		dst := fb.alloca(ht, "str")
 		fb.callBuiltin(builtins.StringCopy, Void, dst, v)
 		return dst
-	case types.IsSlice(t):
+	case isSlice(t):
 		ht := fb.typ(t)
 		dst := fb.alloca(ht, "sl")
-		elem := types.AsSlice(t).Elem()
+		elem := asSlice(t).Elem()
 		fb.callBuiltin(builtins.SliceAlloc, Void, dst,
 			Int(fb.l.sizeOf(fb.typ(elem)), I64), Int(0, I64))
 		// todo: the element loop. A []T of non-trivial T copies each element
 		// at that element's own cost; today only the header is duplicated,
 		// which is wrong for []string and right for []int32.
 		return dst
-	case types.IsMap(t):
+	case isMap(t):
 		fb.l.need(builtins.FeatMap)
 		return fb.callBuiltin(builtins.MapNew, Ptr)
 	}
@@ -133,7 +133,7 @@ func (fb *funcBuilder) needsDrop(t types.Type) bool {
 			}
 		}
 	}
-	if a := types.AsArray(t); a != nil {
+	if a := asArray(t); a != nil {
 		return fb.needsDrop(a.Elem())
 	}
 	return false
@@ -185,7 +185,7 @@ func (fb *funcBuilder) dropInPlace(p Value, t types.Type) {
 func (fb *funcBuilder) dropValue(v Value, t types.Type) {
 	switch types.CopyCost(t) {
 	case types.CopyRefcount:
-		if types.IsChan(t) {
+		if isChan(t) {
 			fb.callBuiltin(builtins.ChanRelease, Void, v)
 			return
 		}
@@ -200,9 +200,9 @@ func (fb *funcBuilder) dropValue(v Value, t types.Type) {
 		switch {
 		case types.IsString(t):
 			fb.callBuiltin(builtins.StringFree, Void, v)
-		case types.IsSlice(t):
+		case isSlice(t):
 			fb.callBuiltin(builtins.SliceFree, Void, v)
-		case types.IsMap(t):
+		case isMap(t):
 			fb.callBuiltin(builtins.MapFree, Void, v)
 		}
 	}
@@ -222,4 +222,34 @@ func moduleNameOf(target *Func, from *Module) string {
 	}
 	from.Import(target.Module.Path)
 	return target.Module.Name
+}
+
+// ------------------------------------------------------------- predicates
+//
+// types exports AsNamed, AsStruct, AsEnum, and the scalar Is* family, but no
+// predicate for the four composite shapes this file asks about. They are
+// asked here the way type.go's own switch asks — an assertion on Underlying,
+// which is what makes a named type over a []T answer the same as the bare
+// spelling. Kept unexported: these are questions hir has, not gaps in types.
+
+func asSlice(t types.Type) *types.Slice {
+	s, _ := types.Underlying(t).(*types.Slice)
+	return s
+}
+
+func asArray(t types.Type) *types.Array {
+	a, _ := types.Underlying(t).(*types.Array)
+	return a
+}
+
+func isSlice(t types.Type) bool { return asSlice(t) != nil }
+
+func isMap(t types.Type) bool {
+	_, ok := types.Underlying(t).(*types.Map)
+	return ok
+}
+
+func isChan(t types.Type) bool {
+	_, ok := types.Underlying(t).(*types.Chan)
+	return ok
 }
