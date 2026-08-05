@@ -82,7 +82,7 @@ func DiscoverTests(pkg *Package) []TestCase {
 			if !ok || fd.Recv != nil || fd.Type == nil {
 				continue
 			}
-			if fd.Type.Marker == nil || fd.Type.Marker.Name != token.CtxTest {
+			if !hasMarker(fd.Type, token.CtxTest) {
 				continue
 			}
 			tc := TestCase{
@@ -95,6 +95,26 @@ func DiscoverTests(pkg *Package) []TestCase {
 		}
 	}
 	return out
+}
+
+// hasMarker reports whether a signature carries the named FunctionMarker.
+//
+// ast.FuncType keeps every marker written rather than one, because the
+// repetition parses so that a doubled marker can be diagnosed as itself —
+// so this is a scan, not a field read. Name is what's compared: `test` is a
+// contextual keyword that scans as an identifier, so Kind is IDENT for it
+// and carries no distinction, which is exactly why ast.Marker declares Name
+// authoritative.
+func hasMarker(ft *ast.FuncType, name string) bool {
+	if ft == nil {
+		return false
+	}
+	for _, m := range ft.Markers {
+		if m != nil && m.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyExpected reads the `-> Expected(...)` clause. It is a plain
