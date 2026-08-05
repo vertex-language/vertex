@@ -101,10 +101,14 @@ func (fb *funcBuilder) render(v Value, t types.Type) {
 		sym = builtins.FmtBool
 	case types.IsChar(t):
 		sym = builtins.FmtChar
-	case types.IsInteger(t) && types.IsUnsigned(t):
-		sym = builtins.FmtUint
 	case types.IsInteger(t):
-		sym = builtins.FmtInt
+		// Signedness is a property of the lowered type, so it is read there
+		// rather than asked of types twice.
+		if fb.typ(t).Signed {
+			sym = builtins.FmtInt
+		} else {
+			sym = builtins.FmtUint
+		}
 	default:
 		fb.l.todoAt(fb.fn.Pos, "rendering "+types.TypeString(t))
 	}

@@ -169,8 +169,15 @@ func (fb *funcBuilder) identValue(x *ast.Ident) Value {
 		_ = fn
 		fb.l.todoAt(x.Pos(), "function used as a value")
 	}
-	// A package-scope global.
-	return fb.globalRef(obj)
+	// A package-scope global. globalRef is an address — the same thing
+	// address() wants — so a scalar use is that address plus a load, and an
+	// aggregate use is the address itself, exactly as a slot binding is.
+	ref := fb.globalRef(obj)
+	t := fb.typ(obj.Type())
+	if IsAggregate(t) {
+		return ref
+	}
+	return fb.emit(OpLoad, t, ref)
 }
 
 // binary lowers one binary operator, paying for the gap between vir and
@@ -294,8 +301,10 @@ func (fb *funcBuilder) unary(x *ast.UnaryExpr) Value {
 	case token.AND:
 		// Address-of on a value, dereference on a typed_ptr — read from the
 		// operand's statically written type, which is the one fork the
-		// analyzer left open for exactly this reason.
-		if types.IsPointer(fb.l.info.TypeOf(x.X)) {
+		// analyzer left open for exactly this reason. It must be asked of
+		// the types.Type and not of the lowered type: ownership, map, and
+		// chan all lower to ptr and none of them dereferences.
+		if _, isPtr := types.Underlying(fb.l.info.TypeOf(x.X)).(*types.Pointer); isPtr {
 			p := fb.expr(x.X)
 			t := fb.typ(fb.l.info.TypeOf(x))
 			if IsAggregate(t) {

@@ -16,6 +16,13 @@ type funcBuilder struct {
 	seq  *Seq   // where instructions currently land
 	top  *scope // innermost open scope
 	sret string // the sret parameter's name, "" for a thin or void result
+
+	// binds is flat and function-wide, not per-scope: the analyzer already
+	// settled scoping, so two locals with one spelling are two objects and
+	// hir needs identity, never name lookup. stmt.go's bindings() fills it
+	// lazily, which is why every funcBuilder literal in this package can
+	// leave it nil.
+	binds map[types.Object]*binding
 }
 
 // scope is one lexical block's worth of teardown obligation.
@@ -25,10 +32,10 @@ type funcBuilder struct {
 // is read, which is the whole reason conditional transfer is a compile
 // error upstream.
 type scope struct {
-	parent  *scope
-	kind    scopeKind
-	locals  []*binding
-	defers  []*deferred
+	parent *scope
+	kind   scopeKind
+	locals []*binding
+	defers []*deferred
 }
 
 type scopeKind uint8
