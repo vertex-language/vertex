@@ -1,3 +1,4 @@
+// func.go
 package vir
 
 import (
@@ -5,190 +6,228 @@ import (
 
 	"github.com/vertex-language/vertex/lower/hir"
 	"github.com/vertex-language/vertex/token"
-	ir "github.com/vertex-language/vvm/ir/vir"
+	vir "github.com/vertex-language/vvm/ir/vir"
 )
 
-// func.go emits the function section: signatures, blocks, terminators.
-//
-// Like the struct section, the order is recomputed rather than preserved.
-// hir's worklist appends a shell when a call site is *discovered*, so its
-// Funcs slice runs caller-before-callee — exactly backwards for §2.2's
-// declare-before-use.
-
-func (l *lowerer) funcs(m *ir.Module, hm *hir.Module) {
-	for _, f := range l.orderFuncs(hm) {
-		l.function(m, hm, f)
+// functions emits the function section, callee-first.
+func (ml *moduleLowerer) functions() {
+	for _, f := range ml.orderFuncs() {
+		ml.function(f)
 	}
 }
 
-// orderFuncs returns hm's functions with every callee before its caller.
-// §2.2 exempts direct self-recursion and nothing else, so a mutual
-// recursion cycle has no vir spelling at all; it is reported here, where
-// the cycle is actually known, rather than surfacing as an undeclared-name
-// error out of ir/verify.
-func (l *lowerer) orderFuncs(hm *hir.Module) []*hir.Func {
-	byName := make(map[string]*hir.Func, len(hm.Funcs))
-	for _, f := range hm.Funcs {
+// orderFuncs reverses hir's discovery order.
+//
+// hir's worklist appends a shell when a call site is *discovered*, so its
+// Funcs slice runs caller-before-callee — exactly backwards for vir §2.2,
+// which has no forward references. A plain reversal is right for a tree of
+// calls and wrong for a diamond, so this is a real post-order walk with the
+// reversal used only as the visit order, which keeps the emitted text
+// stable against hir's ordering.
+//
+// vir §2.2 exempts *direct* self-recursion and nothing else, so mutual
+// recursion has no vir spelling at all. It is reported here, where the
+// cycle is known, rather than reaching ir/verify as an undeclared-name
+// error. That is a language-level limitation, not a gap in this package:
+// vir has no fnsig for a defined function to forward-declare it with, so
+// either vir grows forward declarations for fn, or Vertex does not have
+// mutually recursive functions.
+func (ml *moduleLowerer) orderFuncs() []*hir.Func {
+	byName := make(map[string]*hir.Func, len(ml.src.Funcs))
+	for _, f := range ml.src.Funcs {
 		byName[f.Name] = f
 	}
-	const (
-		open = 1
-		done = 2
-	)
-	state := make(map[*hir.Func]int, len(hm.Funcs))
-	out := make([]*hir.Func, 0, len(hm.Funcs))
 
-	var visit func(f *hir.Func, stack []*hir.Func)
-	visit = func(f *hir.Func, stack []*hir.Func) {
+	state := make(map[*hir.Func]int, len(ml.src.Funcs))
+	out := make([]*hir.Func, 0, len(ml.src.Funcs))
+	var stack []*hir.Func
+
+	var visit func(f *hir.Func)
+	visit = func(f *hir.Func) {
 		switch state[f] {
-		case done:
+		case visited:
 			return
-		case open:
-			l.errorf(f.Pos, "mutual recursion (%s) has no vir spelling — §2.2 exempts only direct self-recursion from declare-before-use", cycleText(stack, f))
-			return
+		case visiting:
+			ml.bug("mutually recursive functions have no vir spelling: " +
+				funcCycle(stack, f) + " (vir §2.2 exempts direct self-recursion only)")
 		}
-		state[f] = open
-		for _, callee := range localCallees(f, byName) {
-			if callee != f {
-				visit(callee, append(stack, f))
+		state[f] = visiting
+		stack = append(stack, f)
+		for _, c := range ml.calleesOf(f, byName) {
+			if c == f {
+				continue // direct self-recursion is exempt
 			}
+			visit(c)
 		}
-		state[f] = done
+		stack = stack[:len(stack)-1]
+		state[f] = visited
 		out = append(out, f)
 	}
-	for _, f := range hm.Funcs {
-		visit(f, nil)
+
+	for i := len(ml.src.Funcs) - 1; i >= 0; i-- {
+		visit(ml.src.Funcs[i])
 	}
 	return out
 }
 
-// localCallees lists the same-module functions f calls, in first-call
-// order so the emitted order is byte-reproducible. A qualified call names
-// another module and is resolved by vvm's importer, not by declaration
-// order here.
-func localCallees(f *hir.Func, byName map[string]*hir.Func) []*hir.Func {
+// calleesOf collects this module's own callees. A qualified call names
+// another module and is resolved by the importer, not by section order.
+func (ml *moduleLowerer) calleesOf(f *hir.Func, byName map[string]*hir.Func) []*hir.Func {
 	var out []*hir.Func
 	seen := map[*hir.Func]bool{}
+	add := func(name string) {
+		if c, ok := byName[name]; ok && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
 	for _, b := range f.Blocks {
-		for _, in := range b.Instr {
-			if in.Op != hir.OpCall || in.Call == nil || in.Call.Module != "" {
-				continue
+		for _, in := range b.Lines {
+			if in.Op == hir.OpCall && in.Module == "" && in.Callee != "" {
+				add(in.Callee)
 			}
-			g, ok := byName[in.Call.Name]
-			if !ok || seen[g] {
-				continue
-			}
-			seen[g] = true
-			out = append(out, g)
 		}
 	}
 	return out
 }
 
-func cycleText(stack []*hir.Func, f *hir.Func) string {
+func funcCycle(stack []*hir.Func, f *hir.Func) string {
 	names := make([]string, 0, len(stack)+1)
-	for _, s := range stack {
-		names = append(names, s.Name)
+	start := 0
+	for i, x := range stack {
+		if x == f {
+			start = i
+			break
+		}
+	}
+	for _, x := range stack[start:] {
+		names = append(names, x.Name)
 	}
 	return strings.Join(append(names, f.Name), " -> ")
 }
 
-func (l *lowerer) function(m *ir.Module, hm *hir.Module, f *hir.Func) {
-	var attrs []ir.FunctionAttribute
-	if f.Entry {
-		attrs = append(attrs, ir.AttributeEntry)
-	}
-	if f.NoReturn {
-		attrs = append(attrs, ir.AttributeNoReturn)
-	}
-	// §2.2: both `entry` and `extern_c` require `export`.
-	export := f.Export || f.Entry
+// ---------------------------------------------------------------- one body
 
-	fb := m.DeclareFunction(f.Name, l.params(hm, f.Params), l.typ(hm, f.Result), export, attrs...)
-
+func (ml *moduleLowerer) function(f *hir.Func) {
 	if f.Body != nil {
-		l.errorf(f.Pos, "internal: %s still carries structured Body — hir.Flatten did not run", f.Name)
-		return
+		// Flatten is hir's to run, and Lower runs it. A structured body
+		// reaching here means the pass order changed and nothing said so.
+		ml.bug("function " + f.Name + " reached lowering unflattened")
 	}
 	if len(f.Blocks) == 0 {
-		// A foreign declaration or an error-recovery shell reaches here
-		// with nothing to emit; the extern group already named it.
+		// A shell with no body: a foreign declaration, or an object the
+		// worklist enqueued and monomorphization found no syntax for.
+		// Foreign ones were already emitted into an extern group; emitting
+		// an empty fn here would produce a block with no terminator.
 		return
 	}
 
-	e := &emitter{l: l, hm: hm, fb: fb, line: -1}
-	for i, b := range f.Blocks {
-		switch {
-		case i == 0 && b.Label != "":
-			l.errorf(f.Pos, "internal: %s's first block is labeled %q — vir's entry block is implicit and unbranchable-to", f.Name, b.Label)
-		case i > 0 && b.Label == "":
-			l.errorf(f.Pos, "internal: %s has an unlabeled non-entry block", f.Name)
-		case i > 0:
-			fb.Label(b.Label)
-			e.line = -1 // a new block, so re-anchor the loc run
+	var attrs []vir.FunctionAttribute
+	if f.Entry {
+		// entry forces a bare symbol even in a namespaced module, which is
+		// why hir names the shim _Ventry and lets the symbol come out as
+		// main without colliding with the user's own ident.
+		attrs = append(attrs, vir.AttributeEntry)
+	}
+	if f.NoReturn {
+		attrs = append(attrs, vir.AttributeNoReturn)
+	}
+
+	// An aggregate result left through the sret parameter, so Result is nil
+	// and the vir return type is void.
+	b := ml.out.DeclareFunction(f.Name, ml.params(f.Params), ml.typ(f.Result), f.Export, attrs...)
+	if f.Variadic {
+		b.SetVariadic()
+	}
+
+	fl := &funcLowerer{ml: ml, fn: f, b: b}
+	fl.body()
+}
+
+type funcLowerer struct {
+	ml *moduleLowerer
+	fn *hir.Func
+	b  *vir.FunctionBuilder
+
+	// last is the most recently emitted loc, so a run of instructions from
+	// one source line costs one line of text rather than twenty.
+	last position
+}
+
+type position struct {
+	file string
+	line int
+	col  int
+}
+
+func (fl *funcLowerer) body() {
+	blocks := fl.fn.Blocks
+	if blocks[0].Label != "" {
+		// vir's entry block is implicit, unlabeled, and unbranchable-to.
+		fl.ml.bug("entry block of " + fl.fn.Name + " carries a label")
+	}
+
+	fl.loc(fl.fn.Pos)
+	fl.block(blocks[0])
+
+	for _, blk := range blocks[1:] {
+		if blk.Label == "" {
+			fl.ml.bug("unlabeled non-entry block in " + fl.fn.Name)
 		}
-		for _, in := range b.Instr {
-			e.instr(in)
-		}
-		if b.Term == nil {
-			l.errorf(f.Pos, "internal: block %q of %s has no terminator", b.Label, f.Name)
-			fb.Unreachable()
-			continue
-		}
-		e.terminator(b.Term)
+		fl.b.Label(blk.Label)
+		fl.block(blk)
 	}
 }
 
-// emitter carries the per-function state instruction emission needs: the
-// builder, and the last source line a `loc` was written for.
-type emitter struct {
-	l    *lowerer
-	hm   *hir.Module
-	fb   *ir.FunctionBuilder
-	line int
+func (fl *funcLowerer) block(b *hir.FlatBlock) {
+	for _, in := range b.Lines {
+		fl.loc(in.Pos)
+		fl.instr(in)
+	}
+	fl.term(b)
 }
 
-func (e *emitter) terminator(t hir.Terminator) {
-	switch x := t.(type) {
-	case hir.TermBranch:
-		e.fb.Branch(x.Label)
-	case hir.TermBranchIf:
-		e.fb.BranchIf(e.l.value(e.hm, x.Cond), x.Then, x.Else)
-	case hir.TermSwitch:
-		cases := make([]ir.SwitchCase, 0, len(x.Cases))
-		for _, c := range x.Cases {
-			cases = append(cases, ir.SwitchCase{Value: c.Value, Label: c.Label})
+func (fl *funcLowerer) term(b *hir.FlatBlock) {
+	switch t := b.Term.(type) {
+	case hir.Br:
+		fl.b.Branch(t.Label)
+	case hir.BrIf:
+		fl.b.BranchIf(fl.ml.operand(t.Cond), t.Then, t.Else)
+	case hir.SwitchTerm:
+		cases := make([]vir.SwitchCase, 0, len(t.Cases))
+		for _, c := range t.Cases {
+			cases = append(cases, vir.SwitchCase{Value: c.Value, Label: c.Label})
 		}
-		// vir's switch takes a uniform operand/label list regardless of
-		// density: jump-table-vs-compare-chain is cpu/lower/<arch>'s call.
-		e.fb.Switch(e.l.value(e.hm, x.Value), x.Default, cases...)
-	case hir.TermReturn:
-		if x.Value == nil {
-			e.fb.Return()
+		fl.b.Switch(fl.ml.operand(t.Value), t.Default, cases...)
+	case hir.Ret:
+		if t.Value != nil {
+			fl.b.Return(fl.ml.operand(*t.Value))
 			return
 		}
-		e.fb.Return(e.l.value(e.hm, *x.Value))
-	case hir.TermTrap:
-		e.fb.Trap()
-	case hir.TermUnreachable:
-		e.fb.Unreachable()
+		fl.b.Return()
+	case hir.TrapTerm:
+		fl.b.Trap()
+	case hir.UnreachTerm:
+		fl.b.Unreachable()
+	case nil:
+		fl.ml.bug("block " + b.Label + " in " + fl.fn.Name + " has no terminator")
 	default:
-		e.l.errorf(0, "internal: no vir terminator for %T", t)
-		e.fb.Unreachable()
+		fl.ml.bug("terminator with no vir spelling in " + fl.fn.Name)
 	}
 }
 
-// loc emits one debug line per source line, not per instruction. §2.3
-// makes loc a body-line like any other, so it participates in ordering and
-// costs nothing at runtime.
-func (e *emitter) loc(pos token.Pos) {
-	if !e.l.conf.Debug || e.l.conf.Fset == nil || !pos.IsValid() {
+// loc emits a debug line. hir resolves no positions itself — it carries
+// token.Pos and hands the FileSet down, which is the whole reason Config
+// takes one.
+func (fl *funcLowerer) loc(pos token.Pos) {
+	if fl.ml.conf.Fset == nil || pos == token.NoPos {
 		return
 	}
-	p := e.l.conf.Fset.Position(pos)
-	if p.Line == e.line {
+	p := fl.ml.conf.Fset.Position(pos)
+	cur := position{file: p.Filename, line: p.Line, col: p.Column}
+	if cur == fl.last {
 		return
 	}
-	e.line = p.Line
-	e.fb.Location(p.Filename, p.Line, p.Column)
+	fl.last = cur
+	fl.b.Location(cur.file, cur.line, cur.col)
 }

@@ -35,6 +35,19 @@ type Target struct {
 	Note   string // shown by `vertex targets`
 }
 
+// forTag re-derives the layout model for a different build tag.
+//
+// Tag and Sizes must move together: types.SizesFor answers from the tag,
+// and the packages are checked under that same tag, so changing one
+// without the other would hand hir a Sizes the checker never used. The
+// test runner is the only caller — `build test` is the one tag that
+// changes what is grammatical.
+func (t Target) forTag(tag token.BuildTag) Target {
+	t.Tag = tag
+	t.Sizes = types.SizesFor(tag)
+	return t
+}
+
 type targetSpec struct {
 	arch, os, abi string
 	tag           token.BuildTag
@@ -120,9 +133,21 @@ func ResolveTarget(req targetRequest) (Target, error) {
 	}
 
 	t := Target{
-		Name:   name,
-		Tag:    spec.tag,
-		Sizes:  types.SizesFor(spec.arch),
+		Name: name,
+		Tag:  spec.tag,
+
+		// Sizes comes from the build tag, not from the arch. types.SizesFor
+		// splits on TagJS/TagWasm (32-bit word) and answers 64-bit for
+		// everything else, because §2.3 ties `int`/`uint` to the target's
+		// pointer width and a file's width answer must come from its own
+		// tag. That the split happens to be invisible across this table —
+		// every cell here is 64-bit, and the 32-bit cells are the absent
+		// ones listed above — is a property of today's table, not a reason
+		// to derive layout from spec.arch: the tag is also what the
+		// packages are checked under, and hir.Config.Sizes has to match
+		// that, not the machine word.
+		Sizes: types.SizesFor(spec.tag),
+
 		Linked: spec.linked,
 		Note:   spec.note,
 		VVM: vvm.Target{

@@ -16,7 +16,8 @@
 //	     │  load.go: parser + analyzer (via importer for a package,
 //	     │           directly for a single file)
 //	     ▼
-//	[]*driver.Package  (checked, topologically ordered)
+//	*driver.Loaded  (one FileSet, checked packages in topological order,
+//	     │           every diagnostic collected)
 //	     │  lower.go: hir.Lower  — every decision made here
 //	     ▼
 //	*hir.Program
@@ -140,14 +141,16 @@ func (o *Options) logf(format string, args ...any) {
 	fmt.Fprintf(o.Stderr, "vertex: "+format+"\n", args...)
 }
 
-// Result is what a completed Compile hands back. Modules are kept, not
-// just the bytes, so a caller (the test runner, a future language server)
-// can inspect what was lowered without re-running the pipeline.
+// Result is what a completed Compile hands back. The modules and the
+// checked packages are both kept, not just the bytes, so a caller (the
+// test runner, a future language server) can inspect what was lowered
+// without re-running the pipeline.
 type Result struct {
-	Target  Target
-	Root    string
-	Modules []*virmod.Module
-	Outputs []string
+	Target   Target
+	Root     string
+	Packages []*Package
+	Modules  []*virmod.Module
+	Outputs  []string
 }
 
 // Compile runs the full pipeline and writes whatever Options.Emit selects.
@@ -163,15 +166,16 @@ func Compile(opts *Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts.logf("target %s -> %s", t.Name, t.VVM)
+	opts.logf("target %s -> %s (tag %s)", t.Name, t.VVM, t.Tag)
 
-	pkgs, err := Load(opts, t.Tag)
+	ld, err := Load(opts, t.Tag)
 	if err != nil {
 		return nil, err
 	}
-	opts.logf("checked %d package(s)", len(pkgs))
+	opts.logf("checked %d package(s): %s",
+		len(ld.Packages), strings.Join(sortedPaths(ld.Packages), ", "))
 
-	modules, root, err := Lower(opts, t, pkgs, LowerOptions{})
+	modules, root, err := Lower(opts, t, ld, LowerOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +185,7 @@ func Compile(opts *Options) (*Result, error) {
 		root = opts.RootModule
 	}
 
-	res := &Result{Target: t, Root: root, Modules: modules}
+	res := &Result{Target: t, Root: root, Packages: ld.Packages, Modules: modules}
 	if err := emit(opts, res); err != nil {
 		return nil, err
 	}
@@ -225,11 +229,11 @@ func RunProgram(opts *Options, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	pkgs, err := Load(&ropts, t.Tag)
+	ld, err := Load(&ropts, t.Tag)
 	if err != nil {
 		return 1, err
 	}
-	modules, root, err := Lower(&ropts, t, pkgs, LowerOptions{})
+	modules, root, err := Lower(&ropts, t, ld, LowerOptions{})
 	if err != nil {
 		return 1, err
 	}

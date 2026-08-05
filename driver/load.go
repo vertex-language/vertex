@@ -21,6 +21,11 @@ import (
 // wants. It is deliberately the driver's own type rather than
 // *importer.Package: the single-file path below never builds one of those,
 // and lower.go should have exactly one input shape to convert from.
+//
+// Path and Dir are carried for diagnostics and verbose output only. hir
+// reads neither — hir.Unit takes the *types.Package, and §1.3's qualifier
+// is that package's own declared Name, never something derived from a
+// locator.
 type Package struct {
 	Path  string
 	Dir   string
@@ -29,6 +34,31 @@ type Package struct {
 	Types *types.Package
 	Info  *types.Info
 }
+
+// Loaded is one load's whole result: the packages in dependency-first
+// order, the single FileSet their positions live in, and every diagnostic
+// collected along the way.
+//
+// The FileSet is the reason this type exists rather than a bare
+// []*Package. hir.Config takes one (for loc lines; hir resolves no
+// positions itself) and so does lower/vir.Config, and a compilation has
+// exactly one — so it travels with the packages instead of being rebuilt
+// or threaded separately.
+type Loaded struct {
+	Fset     *token.FileSet
+	Packages []*Package
+
+	lc *loadContext
+}
+
+// Diagnostics is everything reported during the load, in report order.
+// The test runner partitions these by test-function extent; an ordinary
+// build never looks at them, because Load already turned them into an
+// error.
+func (l *Loaded) Diagnostics() []*diag.Diagnostic { return l.lc.list.Items() }
+
+// Renderer builds the caret-and-excerpt renderer over this load's sources.
+func (l *Loaded) Renderer(color bool) *diag.Renderer { return l.lc.renderer(color) }
 
 // loadContext carries the pieces every load path shares: one FileSet for
 // the whole compilation (so a diagnostic can span two files in two
@@ -96,16 +126,45 @@ func (lc *loadContext) diagnosticsError(opts *Options) error {
 	return fmt.Errorf("%d errors", n)
 }
 
-// Load resolves, parses, and checks whatever Options.Input names, and
-// returns every package involved in topological order — dependencies
-// first, which is the order lower/hir expects and the order lower/vir
-// preserves for vvm's importer.
+// Load resolves, parses, and checks whatever Options.Input names, renders
+// any diagnostics, and fails if any of them was an error. This is the
+// entry point for a build.
+//
+// The load itself (see load, below) is deliberately *not* the thing that
+// decides a diagnostic is fatal: importer's own contract is "partial
+// results always", and the test runner needs exactly that — an
+// Expected(error) test is supposed to fail to check, and a runner handed
+// nil packages could never discover it. So collection and judgement are
+// two steps, and only this one judges.
+func Load(opts *Options, tag token.BuildTag) (*Loaded, error) {
+	ld, err := load(opts, tag)
+	if err != nil {
+		// A load-level failure (an unresolvable import, a cycle) still
+		// wants any diagnostics collected so far rendered first: they're
+		// usually what explains it.
+		if ld != nil {
+			if derr := ld.lc.diagnosticsError(opts); derr != nil {
+				return nil, fmt.Errorf("%v (%v)", err, derr)
+			}
+		}
+		return nil, err
+	}
+	if derr := ld.lc.diagnosticsError(opts); derr != nil {
+		return nil, derr
+	}
+	return ld, nil
+}
+
+// load is Load minus the judgement: it returns whatever finished, with
+// every diagnostic on the returned *Loaded, and errors only on what has no
+// file to point at as the fix — a missing input, an unresolvable import
+// path, a cycle, a build tag that excludes everything.
 //
 // Two paths, because a file and a directory are genuinely different
 // requests:
 //
 //   - A directory is a package. importer.Load does the whole job: resolve,
-//     parse (with A.2.2's two-pass build-tag filter), check, in
+//     parse (with §1.3's two-pass build-tag filter), check, in
 //     dependency-first order.
 //   - A single .vs file is *that file*, not its directory. importer has no
 //     spelling for that — parser.ParseDir is directory-granular by
@@ -114,13 +173,14 @@ func (lc *loadContext) diagnosticsError(opts *Options) error {
 //     delegates each declared import back to importer.Load. Compiling
 //     `main.vs` must not silently pull in a sibling `scratch.vs`, which
 //     is exactly what reusing the directory path would do.
-func Load(opts *Options, tag token.BuildTag) ([]*Package, error) {
+func load(opts *Options, tag token.BuildTag) (*Loaded, error) {
 	opts.defaults()
 	lc := newLoadContext()
+	ld := &Loaded{Fset: lc.fset, lc: lc}
 
 	info, err := os.Stat(opts.Input)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", opts.Input, err)
+		return ld, fmt.Errorf("reading %s: %w", opts.Input, err)
 	}
 
 	var pkgs []*Package
@@ -128,28 +188,20 @@ func Load(opts *Options, tag token.BuildTag) ([]*Package, error) {
 		pkgs, err = loadDir(opts, lc, tag, opts.Input)
 	} else {
 		if !strings.HasSuffix(opts.Input, ".vs") {
-			return nil, fmt.Errorf("%s is not a .vs source file or a package directory", opts.Input)
+			return ld, fmt.Errorf("%s is not a .vs source file or a package directory", opts.Input)
 		}
 		pkgs, err = loadFile(opts, lc, tag, opts.Input)
 	}
+	ld.Packages = pkgs
 	if err != nil {
-		// A load-level failure (an unresolvable import, a cycle) still
-		// wants any diagnostics collected so far rendered first: they're
-		// usually what explains it.
-		if derr := lc.diagnosticsError(opts); derr != nil {
-			return nil, fmt.Errorf("%v (%v)", err, derr)
-		}
-		return nil, err
-	}
-	if derr := lc.diagnosticsError(opts); derr != nil {
-		return nil, derr
+		return ld, err
 	}
 	if len(pkgs) == 0 {
-		return nil, fmt.Errorf(
+		return ld, fmt.Errorf(
 			"%s holds no package for build tag %q — every file's `build` clause selects another target",
 			opts.Input, tag)
 	}
-	return pkgs, nil
+	return ld, nil
 }
 
 // resolverFor builds the import-path resolver: the packages root (from
@@ -193,6 +245,11 @@ func importerConfig(opts *Options, lc *loadContext, tag token.BuildTag) (*import
 // loadDir loads a directory as a package via importer, mapping the given
 // directory to a synthetic root path so a build of `./cmd/app` doesn't
 // require that directory to already be reachable from a packages root.
+//
+// A check error is not a failure here. importer marks every package
+// complete unconditionally and keeps partial results on purpose; returning
+// them is what lets `Load` render one summarizing error and lets the test
+// runner see the tree an Expected(error) test lives in.
 func loadDir(opts *Options, lc *loadContext, tag token.BuildTag, dir string) ([]*Package, error) {
 	conf, err := importerConfig(opts, lc, tag)
 	if err != nil {
@@ -207,7 +264,7 @@ func loadDir(opts *Options, lc *loadContext, tag token.BuildTag, dir string) ([]
 
 	// The root's own path resolves to the directory the caller named; every
 	// other path falls through to the ordinary resolver. A locator is not a
-	// name (A.2.3), so inventing one for the root is exactly the kind of
+	// name (§1.3), so inventing one for the root is exactly the kind of
 	// thing a build system is expected to decide.
 	base := conf.Resolver
 	conf.Resolver = importer.ResolverFunc(func(path, from string) (string, error) {
@@ -218,15 +275,10 @@ func loadDir(opts *Options, lc *loadContext, tag token.BuildTag, dir string) ([]
 	})
 
 	res, err := importer.Load(conf, rootPath)
-	if err != nil {
+	if res == nil {
 		return nil, err
 	}
-	if res.HasErrors() {
-		// Diagnostics are already on lc; returning nil here lets Load's own
-		// diagnosticsError produce the single summarizing error.
-		return nil, nil
-	}
-	return fromImporterResult(res), nil
+	return fromImporterResult(res), err
 }
 
 func fromImporterResult(res *importer.Result) []*Package {
@@ -244,7 +296,7 @@ func fromImporterResult(res *importer.Result) []*Package {
 	return out
 }
 
-// loadFile is the single-file path described in Load's doc comment.
+// loadFile is the single-file path described in load's doc comment.
 func loadFile(opts *Options, lc *loadContext, tag token.BuildTag, path string) ([]*Package, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -256,12 +308,15 @@ func loadFile(opts *Options, lc *loadContext, tag token.BuildTag, path string) (
 	}
 	lc.sources[abs] = src
 
+	// ParseFile always returns a non-nil *ast.File — recovery produces
+	// Bad* nodes rather than nothing — so a nil here means something
+	// structurally impossible happened, not a syntax error.
 	file, _ := parser.ParseFile(lc.fset, abs, src, lc, 0)
 	if file == nil {
 		return nil, fmt.Errorf("%s: could not be parsed", path)
 	}
 
-	// A.2.2: a file whose build clause names another target is excluded
+	// §1.3: a file whose build clause names another target is excluded
 	// whole. Naming the file explicitly doesn't override that — it makes it
 	// an error, since the caller clearly meant to build this file.
 	if bt := file.BuildTag(); bt != token.TagNone && bt != tag {
@@ -270,7 +325,13 @@ func loadFile(opts *Options, lc *loadContext, tag token.BuildTag, path string) (
 				"is excluded from the build entirely", path, bt, tag)
 	}
 
-	astPkg, err := ast.NewPackage(lc.fset, file.Name.Name, filepath.Dir(abs), tag, []*ast.File{file})
+	// ast.NewPackage is a validated container and nothing more: it checks
+	// one file minimum, package-clause agreement, and tag agreement. The
+	// locator is synthesized from the file's own directory, the same shape
+	// loadDir invents for its root.
+	dir := filepath.Dir(abs)
+	importPath := filepath.ToSlash(filepath.Clean(dir))
+	astPkg, err := ast.NewPackage(lc.fset, dir, importPath, tag, []*ast.File{file})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -289,13 +350,19 @@ func loadFile(opts *Options, lc *loadContext, tag token.BuildTag, path string) (
 	}
 	info := types.NewInfo()
 	checker := analyzer.NewChecker(acheck, astPkg.Path, astPkg.Name, info)
-	tpkg, cerr := checker.Files(astPkg.Files)
-	if cerr != nil {
-		// Diagnostics already streamed to lc; Load summarizes them.
-		return nil, nil
+
+	// Errors accumulate rather than abort, and Package() is valid after
+	// them — so a failed check still yields a scope worth handing on. The
+	// diagnostics are already on lc; Load summarizes them.
+	tpkg, _ := checker.Files(astPkg.Files)
+	if tpkg == nil {
+		tpkg = checker.Package()
 	}
-	if impErr := imp.err; impErr != nil {
-		return nil, impErr
+
+	// An import failure is the other kind: no file to point at, nothing
+	// downstream can be trusted.
+	if imp.err != nil {
+		return nil, imp.err
 	}
 
 	// Dependencies first — the same order importer.Result.Order guarantees,

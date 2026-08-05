@@ -1,171 +1,172 @@
 package hir
 
-// Flatten converts a Func's structured Body into flat Blocks in vir's Join
-// Convention shape: every block ends in exactly one terminator, values
-// merge across blocks by same-name reassignment, and there are no phi
-// nodes. This is what makes lower/vir legitimately mechanical afterward.
+// Flatten turns a Func's structured Body into flat Blocks in vir's Join
+// Convention shape: no phi nodes, values merge by same-name reassignment,
+// every block ends in exactly one terminator.
 //
-// Note what Flatten does *not* decide: vir's switch terminator takes a
-// uniform operand/label list regardless of density, so jump-table-versus-
-// compare-chain is cpu/lower/<arch>'s decision, not this package's.
+// It moves instructions; it never rewrites them. Every *Instr in Blocks is
+// the same pointer that was in Body, which is what makes the two shapes one
+// representation rather than two.
 func Flatten(f *Func) {
-	if f.Body == nil {
-		return
-	}
 	fl := &flattener{fn: f}
-	fl.open("") // the entry block is implicit, unlabeled, unbranchable-to
+	fl.open("") // the entry block is unlabeled and unbranchable-to
+
+	// Hoisted allocas land first, before anything can branch past them.
+	fl.cur.Lines = append(fl.cur.Lines, f.Allocas...)
+
 	fl.seq(f.Body)
-	fl.terminate(TermReturn{})
+	if fl.cur != nil {
+		// A body that fell out the bottom without a terminator. A void
+		// function returns; anything else is unreachable, and the analyzer
+		// already guaranteed every path returns.
+		fl.term(Ret{})
+	}
 	f.Blocks = fl.blocks
 	f.Body = nil
 }
 
 type flattener struct {
 	fn     *Func
-	blocks []*Block
-	cur    *Block
+	blocks []*FlatBlock
+	cur    *FlatBlock
 	n      int
-	loops  []loopCtx
+
+	// loops is the break/continue target stack. There are no loop labels, so
+	// the innermost entry is always the right one.
+	loops []loopTargets
 }
 
-type loopCtx struct{ head, exit string }
+type loopTargets struct{ head, exit string }
 
-func (f *flattener) label(base string) string {
-	f.n++
-	return base + "_" + itoa(f.n)
+func (fl *flattener) label(hint string) string {
+	fl.n++
+	return hint + itoa(fl.n)
 }
 
-func (f *flattener) open(label string) {
-	b := &Block{Label: label}
-	f.blocks = append(f.blocks, b)
-	f.cur = b
+func (fl *flattener) open(label string) {
+	b := &FlatBlock{Label: label}
+	fl.blocks = append(fl.blocks, b)
+	fl.cur = b
 }
 
-func (f *flattener) terminate(t Terminator) {
-	if f.cur == nil {
+// term closes the current block. A second terminator on one block would be a
+// verification error, so everything after it is dead and is dropped.
+func (fl *flattener) term(t Term) {
+	if fl.cur == nil {
 		return
 	}
-	f.cur.Term = t
-	f.cur = nil
+	fl.cur.Term = t
+	fl.cur = nil
 }
 
-// ensure opens a fresh unreachable block when code follows a terminator.
-// The block is dead by construction, but vir requires every instruction to
-// live in a terminated block, so it gets one.
-func (f *flattener) ensure() {
-	if f.cur == nil {
-		f.open(f.label("dead"))
-	}
-}
-
-func (f *flattener) branch(label string) {
-	if f.cur == nil {
+func (fl *flattener) emit(in *Instr) {
+	if fl.cur == nil {
+		// Unreachable code after a terminator. The analyzer permits it —
+		// there is no reachability rule in the language — so it is dropped
+		// rather than diagnosed.
 		return
 	}
-	f.terminate(TermBranch{Label: label})
+	fl.cur.Lines = append(fl.cur.Lines, in)
 }
 
-func (f *flattener) seq(s *Seq) {
+func (fl *flattener) seq(s *Seq) {
 	if s == nil {
 		return
 	}
 	for _, st := range s.List {
-		f.stmt(st)
+		fl.stmt(st)
 	}
 }
 
-func (f *flattener) stmt(s Stmt) {
-	switch s := s.(type) {
-	case *Seq:
-		f.seq(s)
-
-	case *Instrs:
-		f.ensure()
-		f.cur.Instr = append(f.cur.Instr, s.List...)
+func (fl *flattener) stmt(s Stmt) {
+	switch x := s.(type) {
+	case *Instr:
+		fl.emit(x)
 
 	case *If:
-		f.ensure()
-		then, els, join := f.label("then"), f.label("else"), f.label("join")
-		hasElse := s.Else != nil
-		target := join
-		if hasElse {
-			target = els
+		thenL := fl.label("then")
+		elseL := fl.label("else")
+		joinL := fl.label("join")
+		if x.Else == nil {
+			elseL = joinL
 		}
-		f.terminate(TermBranchIf{Cond: s.Cond, Then: then, Else: target})
+		fl.term(BrIf{Cond: x.Cond, Then: thenL, Else: elseL})
 
-		f.open(then)
-		f.seq(s.Then)
-		f.branch(join)
+		fl.open(thenL)
+		fl.seq(x.Then)
+		fl.term(Br{Label: joinL})
 
-		if hasElse {
-			f.open(els)
-			f.seq(s.Else)
-			f.branch(join)
+		if x.Else != nil {
+			fl.open(elseL)
+			fl.seq(x.Else)
+			fl.term(Br{Label: joinL})
 		}
-		f.open(join)
+		fl.open(joinL)
 
 	case *Loop:
-		f.ensure()
-		head, exit := f.label("loop"), f.label("endloop")
-		f.branch(head)
-		f.open(head)
-		f.loops = append(f.loops, loopCtx{head: head, exit: exit})
-		f.seq(s.Body)
-		f.loops = f.loops[:len(f.loops)-1]
-		f.branch(head) // fall-through re-enters the head, re-testing the condition
-		f.open(exit)
+		headL := fl.label("loop")
+		exitL := fl.label("done")
+		fl.term(Br{Label: headL})
 
-	case *Switch:
-		f.ensure()
-		join := f.label("endswitch")
-		def := join
-		var cases []TermCase
-		type pending struct {
-			label string
-			body  *Seq
-		}
-		var bodies []pending
-		for _, c := range s.Cases {
-			lbl := f.label("case")
-			for _, v := range c.Values {
-				cases = append(cases, TermCase{Value: v, Label: lbl})
+		fl.open(headL)
+		fl.loops = append(fl.loops, loopTargets{head: headL, exit: exitL})
+		fl.seq(x.Body)
+		fl.loops = fl.loops[:len(fl.loops)-1]
+		fl.term(Br{Label: headL}) // the back edge
+
+		fl.open(exitL)
+
+	case *SwitchStmt:
+		defL := fl.label("default")
+		joinL := fl.label("join")
+		cases := make([]SwitchTermCase, 0, len(x.Cases))
+		bodies := make([]*Seq, 0, len(x.Cases))
+		labels := make([]string, 0, len(x.Cases))
+
+		// One label per distinct body: two case values sharing a clause
+		// share a block, which is what a comma-separated PatternList means.
+		seen := map[*Seq]string{}
+		for _, c := range x.Cases {
+			lbl, ok := seen[c.Body]
+			if !ok {
+				lbl = fl.label("case")
+				seen[c.Body] = lbl
+				bodies = append(bodies, c.Body)
+				labels = append(labels, lbl)
 			}
-			bodies = append(bodies, pending{lbl, c.Body})
+			cases = append(cases, SwitchTermCase{Value: c.Value, Label: lbl})
 		}
-		if s.Default != nil {
-			def = f.label("default")
-			bodies = append(bodies, pending{def, s.Default})
+		fl.term(SwitchTerm{Value: x.Value, Default: defL, Cases: cases})
+
+		for i, body := range bodies {
+			fl.open(labels[i])
+			fl.seq(body)
+			fl.term(Br{Label: joinL})
 		}
-		f.terminate(TermSwitch{Value: s.Tag, Default: def, Cases: cases})
-		for _, p := range bodies {
-			f.open(p.label)
-			f.seq(p.body)
-			f.branch(join)
-		}
-		f.open(join)
+		fl.open(defL)
+		fl.seq(x.Default)
+		fl.term(Br{Label: joinL})
+		fl.open(joinL)
 
 	case *Break:
-		if n := len(f.loops); n > 0 {
-			f.ensure()
-			f.terminate(TermBranch{Label: f.loops[n-1].exit})
+		if len(fl.loops) == 0 {
+			return
 		}
+		fl.term(Br{Label: fl.loops[len(fl.loops)-1].exit})
 
 	case *Continue:
-		if n := len(f.loops); n > 0 {
-			f.ensure()
-			f.terminate(TermBranch{Label: f.loops[n-1].head})
+		if len(fl.loops) == 0 {
+			return
 		}
+		fl.term(Br{Label: fl.loops[len(fl.loops)-1].head})
 
-	case *Return:
-		f.ensure()
-		f.terminate(TermReturn{Value: s.Value})
+	case *ReturnStmt:
+		fl.term(Ret{Value: x.Value})
 
-	case *Trap:
-		f.ensure()
-		f.terminate(TermTrap{})
+	case *TrapStmt:
+		fl.term(TrapTerm{})
 
-	case *Unreachable:
-		f.ensure()
-		f.terminate(TermUnreachable{})
+	case *UnreachableStmt:
+		fl.term(UnreachTerm{})
 	}
 }

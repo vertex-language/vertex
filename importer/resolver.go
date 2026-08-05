@@ -10,13 +10,13 @@ import (
 // Resolver maps an import path to the directory holding that package's .vs
 // files.
 //
-// It is an interface because A.2.3 ⊢ "the import path is a locator, not a
-// name" and says nothing about what it locates against. A build system, a
-// module cache, and a test fixture all answer differently, and none of them
-// belongs in this package.
+// It is an interface because the path is a locator rather than a name, and
+// nothing in the language says what it locates against. A build system, a
+// module cache, and a test fixture all answer differently, and none of those
+// answers belongs in this package.
 //
 // from is the directory of the importing package, or "" for a root. A resolver
-// that supports relative paths uses it; one that does not ignores it.
+// supporting relative paths uses it; one that does not ignores it.
 type Resolver interface {
 	Resolve(path, from string) (dir string, err error)
 }
@@ -30,15 +30,16 @@ func (f ResolverFunc) Resolve(path, from string) (string, error) { return f(path
 //
 // A path is a slash-separated locator interpreted relative to each root in
 // order; the first root holding a directory with at least one .vs file wins.
-// That is deliberately the simplest thing that works — there is no module
-// resolution, no version selection, and no vendor directory, because the
-// language annex does not describe any and inventing one here would fix a
-// policy the toolchain has not chosen yet.
+// That is deliberately the simplest thing that works — no module resolution, no
+// version selection, no vendor directory — because the language describes none
+// of those and inventing one here would fix a policy the toolchain has not
+// chosen.
 type DirResolver struct {
 	Roots []string
 }
 
-// NewDirResolver returns a resolver over the given roots, each made absolute.
+// NewDirResolver returns a resolver over the given roots, each made absolute so
+// a later working-directory change cannot move them.
 func NewDirResolver(roots ...string) (*DirResolver, error) {
 	if len(roots) == 0 {
 		roots = []string{"."}
@@ -58,24 +59,29 @@ func (r *DirResolver) Resolve(path, from string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("importer: empty import path")
 	}
+	if filepath.IsAbs(path) {
+		// An absolute path is not a locator relative to anything, so no root
+		// applies and no policy here could make one apply.
+		return "", fmt.Errorf("importer: import path %q must be relative", path)
+	}
 
-	// A relative path resolves against the importing package. This is not in
-	// the annex either way; it is here because a single-directory or
-	// two-directory project should not need a root configured.
+	// A relative path resolves against the importing package. Nothing in the
+	// language says whether one is even spelled; this is here so a project of
+	// one or two directories needs no root configured.
 	if strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
 		if from == "" {
-			return "", fmt.Errorf("importer: relative path %q has no importing package", path)
+			return "", fmt.Errorf(
+				"importer: relative path %q has no importing package", path)
 		}
-		dir := filepath.Join(from, filepath.FromSlash(path))
+		dir := filepath.Clean(filepath.Join(from, filepath.FromSlash(path)))
 		if hasSources(dir) {
 			return dir, nil
 		}
-		return "", &NotFoundError{Path: path, Searched: []string{dir}}
+		return "", notFound(path, []string{dir})
 	}
 
 	rel := filepath.FromSlash(path)
 	searched := make([]string, 0, len(r.Roots))
-
 	for _, root := range r.Roots {
 		dir := filepath.Join(root, rel)
 		if hasSources(dir) {
@@ -83,23 +89,11 @@ func (r *DirResolver) Resolve(path, from string) (string, error) {
 		}
 		searched = append(searched, dir)
 	}
-
-	// A directory that exists but holds no .vs file is a different mistake
-	// from one that does not exist, and the message should say which.
-	for _, dir := range searched {
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			return "", &NotFoundError{
-				Path:     path,
-				Searched: searched,
-				Reason:   "directory exists but contains no .vs files",
-			}
-		}
-	}
-	return "", &NotFoundError{Path: path, Searched: searched}
+	return "", notFound(path, searched)
 }
 
-// MapResolver resolves paths from a fixed table. Useful for a driver that has
-// already computed the layout, and for tests.
+// MapResolver resolves paths from a fixed table. For a driver that already
+// computed the layout, and for tests wanting no filesystem at all.
 type MapResolver map[string]string
 
 func (m MapResolver) Resolve(path, from string) (string, error) {
@@ -121,22 +115,35 @@ func (e *NotFoundError) Error() string {
 	if e.Reason != "" {
 		s += ": " + e.Reason
 	}
-	if len(e.Searched) > 0 {
-		s += "\n  searched:"
-		for _, d := range e.Searched {
-			s += "\n    " + d
+	for i, d := range e.Searched {
+		if i == 0 {
+			s += "\n  searched:"
 		}
+		s += "\n    " + d
 	}
 	return s
 }
 
+// notFound distinguishes a directory that exists but holds no source from one
+// that does not exist. They are different mistakes and the message should say
+// which.
+func notFound(path string, searched []string) *NotFoundError {
+	e := &NotFoundError{Path: path, Searched: searched}
+	for _, dir := range searched {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			e.Reason = "directory exists but contains no .vs files"
+			break
+		}
+	}
+	return e
+}
+
 // hasSources reports whether dir holds at least one .vs file.
 //
-// The check is by extension only. Whether a given file is actually in the
-// build is A.2.2's build-tag question, which parser.ParseDir answers in its
-// first pass — a directory whose every file is tagged for another target is
-// resolvable but yields no package, and that error belongs there rather than
-// here.
+// The check is by extension only. Whether a given file is in the build is the
+// build tag's question, which parser.ParseDir answers in its own first pass — a
+// directory whose every file is tagged for another target resolves successfully
+// and yields no package, and that error belongs there rather than here.
 func hasSources(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

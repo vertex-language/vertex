@@ -1,147 +1,96 @@
 # analyzer
 
-```
-github.com/vertex-language/vertex/analyzer
+```go
+import "github.com/vertex-language/vertex/analyzer"
 ```
 
-`analyzer` checks a parsed Vertex package (`ast.File`) against the static rules of the grammar annex and produces a `types.Package` plus a `types.Info` side table. It depends on `ast`, `token`, `diag`, and `types`; nothing depends on it back — it is the toolchain's terminal analysis stage, sitting after the parser and before anything that consumes checked types (a printer, a backend).
+Package `analyzer` checks a parsed Vertex package against the static rules and produces a `*types.Package` plus a `types.Info` side table. It depends on `ast`, `token`, `diag`, and `types`; nothing depends on it back.
 
-The package's governing constraint, stated in its own doc comment, is A.0.2: the parser tracks exactly one context-sensitive parameter, and "nothing else in Vertex is context-sensitive." Every other rejected form in A.14's index is a static rule enforced here, over an already-parsed tree that the parser accepted unconditionally.
+## Design philosophy
+
+The parser resolves exactly one thing by context — the literal-in-header ambiguity — and accepts everything else unconditionally. Every place grammar.md says **"static rule"** means the form derives, parses, and is checked afterwards over an already-parsed tree. This package is that check, and `diag`'s ranges outside 1xxx and 2xxx are its diagnostic surface.
+
+**Nothing here writes to the syntax tree.** Every result lands in a `types.Info` side table, which is what lets a printer round-trip a checked file and lets the checker run twice over one tree without residue.
+
+**The checker does not read back out of `Info`.** `Info`'s maps are optional by design (a nil map means "do not record this"), so the checker keeps its own `defs`/`uses`/`fileScopes`/`funcObj` maps and mirrors into `Info`. A caller that allocated only `Uses` still gets a full check.
+
+**Citation convention.** A bare `§` cites semantics.md; CamelCase names are grammar.md productions — the same scheme `types` uses. Where neither document fixes something (the variant-tag set, what an omitted enum discriminant continues from), the comment says so rather than dressing a choice as a rule.
+
+## Package layout
+
+| File | Contents |
+|---|---|
+| `check.go` | Package doc, `Config`, `Importer`, `Checker`, `Files`, scope helpers, `declare`/`lookup` |
+| `errors.go` | `report`/`errorAt`/`errorExpr`, and `invalid()` |
+| `decl.go` | Phase 1 (`collectObjects`, `collectImports`, `collectDecl`, `collectForeign`, `collectMethods`) and phase 2 (`objDecl` and one resolver per declaration kind) |
+| `typexpr.go` | `typ` and `constraintExpr`, the two entry points from an `ast.Expr` in type position |
+| `resolve.go` | Phase 3: the body walk, `expr`/`stmt`/`owning` |
+| `const.go` | The bounded constant folder for §5.3's constant-expression positions, plus literal decoding |
 
 ## Entry points
 
-### `Config`
-
 ```go
 type Config struct {
-    Fset     *token.FileSet
-    Tag      token.BuildTag
-    Reporter diag.Reporter
-    Importer Importer
+	Fset     *token.FileSet
+	Tag      token.BuildTag
+	Reporter diag.Reporter
+	Importer Importer // may be nil
 }
-```
 
-What checking a package needs beyond the files themselves. `Importer` may be `nil`, in which case every import is reported as an undeclared name — correct behavior for a single-package check, and the seam a loader fills in later.
-
-### `Importer`
-
-```go
 type Importer interface {
-    Import(path string) (*types.Package, error)
+	Import(path string) (*types.Package, error)
 }
+
+func NewChecker(conf *Config, path, name string, info *types.Info) *Checker
+func (*Checker) Files(files []*ast.File) (*types.Package, error)
+func (*Checker) Package() *types.Package
 ```
 
-What a loader satisfies. Per A.2.3, the imported package's own `PackageClause` supplies the qualifier a caller imports it under, so an implementation must have read the imported directory's package line before it can answer.
-
-### `Checker`
-
-```go
-type Checker struct { /* ... */ }
-```
-
-Holds one package's checking state: the package under construction, the `types.Info` side table, per-declaration bookkeeping (`objMap`), the innermost open scope during a body walk, and a couple of pieces of transient phase state (see [Context tracking](#context-tracking-npu) below).
-
-### `NewChecker(conf *Config, path, name string, info *types.Info) *Checker`
-
-Prepares a checker for one package. If `info` is `nil` a fresh `*types.Info` is allocated, so a caller that doesn't need the side table needn't construct one.
-
-### `(*Checker) Files(files []*ast.File) (*types.Package, error)`
-
-Runs all three phases (below) over a package's files and returns the resulting `*types.Package`. Errors accumulate rather than aborting the walk; the returned error is non-nil only if `errCount > 0`, and its `Error()` text does not enumerate — diagnostics themselves come through `Config.Reporter`.
-
-### `(*Checker) Package() *types.Package`
-
-Returns the package under construction, valid even after errors. Resolution deliberately produces a partial result on failure, so a caller like an editor's tooling can use whatever did resolve.
+A nil `Importer` reports every import as an undeclared name — correct for a single-package check, and the seam a loader fills. A nil `info` gets a fresh `types.NewInfo()`. Errors accumulate rather than aborting; `Package()` is valid even after them, so editor tooling can use whatever resolved. `Files` calls `MarkComplete` only on a clean check, since §1.3 requires an importer to hand out only complete packages.
 
 ## The three phases
 
-`Files` runs three passes in a fixed order, and the order is load-bearing rather than an optimization:
-
 ```go
 c.collectObjects()   // phase 1: names exist, types are nil
-c.resolveDeclTypes()  // phase 2: types filled in, cycles caught
-c.checkBodies()       // phase 3: bodies walked, uses recorded
+c.resolveDeclTypes() // phase 2: types filled in, cycles caught
+c.checkBodies()      // phase 3: bodies walked, uses recorded
 ```
 
-A.2 makes top-level declarations order-independent — any declaration may refer to any other regardless of textual position — and that guarantee is what forces the split: every package-scope name must exist before any declaration's type is resolved, and every declaration's type must be known before any body that calls it is walked. Collapsing two of these phases would reintroduce a forward-declaration requirement the language doesn't have.
+§1.1 makes top-level declarations order-independent, and that is what forces the split: every package-scope name must exist before any declaration's type resolves, and every type must be known before any body that calls it is walked. Collapsing two would reintroduce a forward-declaration form the language does not have.
 
-### Phase 1 — `collectObjects`
+- **Phase 1** inserts each package-scope name with a **nil type**. Imports bind into a *file* scope, since §1.3 gives a qualifier file scope while the declarations using it are package-scoped. Methods are collected separately in `collectMethods`, after every type name exists, because a receiver may name a type declared later or in another file. A top-level `let` mints a `*types.Const` and a top-level `var` a `*types.Var`.
+- **Phase 2** iterates `objMap` and calls `objDecl`. Order is unspecified and irrelevant: `objDecl` is idempotent (`obj.Type() != nil` short-circuits) and pulls in dependencies on demand. A `resolving` stack turns a self-reference into `diag.TypeCycle` instead of an overflow; because order-independence makes a cycle reachable from any entry point, the guard lives in `objDecl` rather than in a pre-pass. Resolution runs in *that object's declaring file's scope*.
+- **Phase 3** walks bodies, resolving names to objects. It computes no expression types — resolution alone settles the parser's deferred forks.
 
-Walks every file, inserting each package-scope name into `pkg.Scope()` with a **nil type**. The nil type is the point: it lets every name be visible everywhere before any of them commit to a shape. Imports are bound into a **file-scoped** scope (`collectImports`), since A.2.3 gives an import qualifier file scope while the declarations that use it are package-scoped — one file's imports never resolve a name in another file of the same package.
+## What resolution alone settles
 
-Methods are collected separately, in `collectMethods`, after every type name exists — a receiver may name a type declared later in the file or in another file, which A.6.3's "methods are declared outside the class body" permits.
-
-### Phase 2 — `resolveDeclTypes`
-
-Iterates `objMap` and calls `objDecl` on each object. Iteration order is unspecified and doesn't matter: `objDecl` is idempotent and resolves dependencies on demand (`obj.Type() != nil` short-circuits), so whichever object is reached first pulls in whatever it needs.
-
-A `resolving` stack guards against self-reference: an object reached a second time while still on the stack is a cycle, reported as `diag.TypeCycle` rather than overflowing. Because A.2's order-independence makes a cycle reachable from any entry point, the guard lives in `objDecl` itself rather than in a separate pre-pass over the dependency graph.
-
-Resolution for one object runs in *that object's declaring file's scope* (`d.fileScope`), so a qualified type resolves through the file that wrote it and no other.
-
-### Phase 3 — `checkBodies`
-
-Walks every function body, resolving identifiers to objects via `expr`/`stmt`/`typ`. This pass computes no expression types — resolution alone (what a name denotes) is enough to settle several of the parser's deferred ambiguities:
-
-- **A.3.6** — `a[i]` vs. `Stack[int32]`: an `IndexExpr` is a type instantiation if its operand denotes a type (`denotesType`), otherwise an index/slice.
-- **A.4.4** — `&` as address-of vs. dereference, resolved the same way, downstream of what the operand names.
-
-Scopes opened here (`openScope`/`block`) are recorded into `types.Info` via `RecordScope`, keyed by the `ast.Node` that owns the scope's extent.
-
-## What `types.Info` is for
-
-> Nothing here writes to the syntax tree. Every result lands in a `types.Info` side table.
-
-This is what lets a printer round-trip a checked file unchanged, and what lets the checker run twice over one tree without residue: `Defs`, `Uses`, `Scopes`, `RecordType`, `RecordSelection`, `RecordInstance`, and `Defers` are all populated by side effect as the tree is walked, never by mutating `ast` nodes.
-
-## Errors (`errors.go`)
-
-Every diagnostic funnels through three functions:
-
-- **`report(d *diag.Diagnostic)`** — the only place `errCount` is incremented and the only place `Config.Reporter` is invoked.
-- **`errorAt(pos, end token.Pos, code diag.Code, args ...any)`** — constructs and reports in one call.
-- **`errorExpr(x ast.Node, code diag.Code, args ...any)`** — reports over a whole node's `Pos()`/`End()` extent, since a type error should underline the construct, not just its first token.
-
-Call sites never format their own message text — `diag`'s registry keeps one rule's wording identical across every site that raises it, which is what makes A.12.2's `Expected(error, "...")` stable enough to appear in the spec itself.
-
-`invalid() types.Type` returns `types.Typ[types.Invalid]` as the universal recovery value: it's returned instead of `nil` so every consumer can keep going without a nil check, and `types`'s predicates treat it as compatible with everything, so one bad type produces exactly one diagnostic rather than a cascade. This mirrors the discipline `ast.BadExpr` follows on the parse side.
-
-## Type expressions (`typexpr.go`)
-
-Two entry points convert an `ast.Expr` written in type position to a `types.Type` or `*types.Constraint`, and the split is deliberate:
-
-- **`typ(e ast.Expr) types.Type`** — ordinary type positions. Also records the result into `types.Info` via `RecordType`.
-- **`constraintExpr(e ast.Expr) *types.Constraint`** — `[...]` constraint positions only. A.7.2 makes a constraint "never a value type," and `types.Constraint` deliberately does not implement `types.Type`, so a bare `var c: Ordered` falls out of `typ` as an ordinary `diag.ConstraintAsType` diagnostic rather than needing every caller to remember a predicate check.
-
-A single identifier in a `[...]` position is the fork A.7.2 names explicitly: it "parses as both a `TypeSet` of one term and a `ConstraintName`," and `constraintExpr` resolves it by what the name actually denotes (a lookup), not by shape.
-
-Several checks live here specifically because the parser was deliberately permissive and left the rejection to this phase (A.14's "forms that parse and are rejected here"):
-
-| Form | Rejected because |
+| Deferred by the parser | Settled by |
 |---|---|
-| `TensorType` outside an npu body | A.3.5 — grammatical only under `[+Npu]` |
-| `abstract` written inline | A.3.3 — legal only as a `TypeAliasDeclaration` target |
-| `~T` outside a type set | A.7.3 — `~` only valid inside a constraint |
-| stacked ownership (`mut var T`) | A.3.2 — qualifiers don't compose |
-| generic name used bare, no type args | A.7.5 — inference works from value arguments, and a type position has none |
+| `a[i]` vs. `Stack[int32]` | `denotesType` — whether the operand denotes a generic declaration |
+| `&x` as address-of vs. dereference | left open: the operand's *type* decides, not its name |
+| `~T` as bitwise-NOT vs. underlying-type | position — `typ` rejects it, `constraintExpr` accepts it |
+| single-identifier constraint element | a scope lookup: a constraint name embeds, anything else is a one-term set |
 
-## Declarations (`decl.go`)
+## Owning positions and the transfer marker
 
-Holds phase 1 and phase 2 proper: `collectObjects`/`collectImports`/`collectDecl`/`collectMethods` (phase 1), and `objDecl` plus one resolver per declaration kind — `recordDecl`, `enumDecl`, `aliasDecl`, `constraintDecl`, `funcDecl`, `varDecl`, `foreignDecl` (phase 2).
+`ast` marks exactly six positions as owning: a `VarDecl`'s values, an `AssignStmt`'s values, an `ArrayLit`'s elements, a `CallExpr`'s arguments, a composite literal's field values, and a tuple element. `resolve.go` mirrors that with two functions — `owning(e)` accepts a `*ast.TransferExpr`, and `expr(e)` reports one as `TransferOutsideOwning`. An accepted marker is recorded into `Info.Transfers` against the binding that dies, which is the one analysis result that changes generated code rather than merely licensing it.
 
-Notable shapes:
+## Context tracking
 
-- **`recordDecl`** binds the `*types.Named` to its `TypeName` *before* resolving any field, which is what lets a field like `next: typed_ptr Node` reach its own enclosing type without tripping the cycle guard — the guard only fires on an object whose type is still nil, and by the time fields are walked it no longer is.
-- **`aliasDecl`** branches on whether the alias target is `abstract`: a transparent alias mints no `*types.Named` and is invisible to `Identical`, while an `abstract` alias mints one keyed on the alias object itself, so two abstract aliases never unify "however identical their provenance."
-- **`declare` blocks** (`collectForeign`, `foreignDecl`, `foreignFunc`, `foreignClassMembers`) check A.8's linkage-boundary rules: no bodies, no visibility modifiers, no fields, and family-dependent rules like `abstract → typed_ptr T` being legal only for memory-flat import families (`familyForBlock`).
-- **`typeParams`** performs constraint distribution the parser deliberately punted: A.7.1's "a constraint written after a name applies to that name and every immediately preceding unconstrained name" is computed here, walking the list backwards, rather than in the tree — doing it in `ast` would erase the written form a formatter needs to reprint.
+`bodyCtx{npu, async}` is established at every function boundary from the signature's marker and cleared for a `FuncLit`, because a literal "begins with all enclosing parse context cleared" — a closure inside an async body may not `await` unless itself marked. `main` sets `async` too, per §1.4. `npu` gates `TensorOutsideNpu` and the tensor-element rules; `async` gates `AwaitOutsideAsync`.
 
-## Scopes and resolution (`check.go`)
+`inSignature` and `inTensorElem` separate the two tensor-element rules, which differ by position rather than shape: a bare `bf16` is illegal in a signature and outside an npu body, while the element slot of a `tensor[...]` is exempt from both. That exemption is this implementation's reading and is marked as such in the code.
 
-- **`openScope`/`closeScope`** push and pop `c.scope`, recording the new scope's extent and its owning node into `types.Info` when the node is non-nil.
-- **`declare(scope, id, obj)`** inserts a binding, handling three special cases before an ordinary `Scope.Insert`: a blank identifier (`_`) is recorded as a definition but never inserted (A.1.2); a `types.Reserved` name is rejected as `diag.ShadowedBuiltin` (A.1.4's builtins, as opposed to the shadowable predeclared type names); and a genuine collision is reported as `diag.DuplicateDeclaration` with a note pointing at the earlier declaration.
-- **`lookup(id)`** resolves outward from the innermost open scope via `Scope.LookupParent`, falling back to package scope if none is open, and records the resulting use.
+## The constant folder (`const.go`)
 
-## Context tracking (`npu`)
+Bounded on purpose. It folds literals, named constants, unary `-`/`!`, and binary arithmetic/shift/comparison in `types.Value` at unbounded precision, because §4.1 makes a non-fitting literal a compile error rather than a wraparound and the check is lost once the value is narrowed. It serves an `ArrayLength`, a `ShapeList` entry, a vector lane count, an enum discriminant, and a top-level initializer — and `Sizes.Representable` is applied to the last two, since whether a literal fits is a question about the target.
 
-A.0.2 names exactly one context parameter the parser itself does not track: `npu`. `Checker.npu` is the field that closes that gap — set on entry to an npu-marked function body or literal (`funcBody`, `funcLit`) and restored on exit via `defer`, so it resets at every function boundary the way A.0.3 requires ("an anonymous closure written inside an async body may not await unless it is itself marked async"). It's consulted exactly once, in `typInternal`'s `TensorType` case, to reject a tensor type reached outside an npu body.
+Anything richer returns `Unknown` and the caller diagnoses, so widening this later cannot change a program that compiles today. Integer literals are decoded with an explicit base rather than base-0, since there is no prefix-free octal form — `0600` is decimal 600.
+
+## Codes not raised here
+
+Deliberate gaps, each for a stated reason:
+
+- `InfiniteType` — needs a value-containment walk over resolved types; not yet written.
+- `UnknownVariantTag` — the variant-tag set is closed, but nothing in `token` holds its membership. The check belongs wherever that set eventually lives, beside `LookupBuildTag`.
+- `SelectCaseNotChannelOp`, `EnumShorthandNoType`, `NotRepresentable` in bodies, and most of 4xxx — these need expression types, which this pass deliberately does not compute.

@@ -6,481 +6,519 @@ import (
 	"github.com/vertex-language/vertex/types"
 )
 
-func (b *funcBuilder) stmtList(list []ast.Stmt) {
-	for _, s := range list {
-		b.stmt(s)
+// ------------------------------------------------------------------- scopes
+
+func (fb *funcBuilder) openScope(k scopeKind) {
+	fb.top = &scope{parent: fb.top, kind: k}
+}
+
+func (fb *funcBuilder) closeScope() {
+	fb.top = fb.top.parent
+}
+
+func (fb *funcBuilder) bind(obj types.Object, b *binding) {
+	fb.bindings()[obj] = b
+}
+
+// bindings is a flat object->binding map for the whole function. Scoping was
+// already settled by the analyzer — two locals with one spelling are two
+// objects — so hir needs no name lookup, only identity.
+func (fb *funcBuilder) bindings() map[types.Object]*binding {
+	if fb.binds == nil {
+		fb.binds = map[types.Object]*binding{}
+	}
+	return fb.binds
+}
+
+func (fb *funcBuilder) lookup(obj types.Object) *binding {
+	return fb.binds[obj]
+}
+
+// epilogueTo emits teardown for every scope from the innermost out to and
+// including `stop`, or to the function scope when stop is nil.
+//
+// Order within one scope: deferred calls first, in reverse registration
+// order, then locals in reverse declaration order. Neither source document
+// resolves the interleaving at a shared exit edge; this is the pin.
+//
+// Everything is emitted before *every* terminator leaving the scope —
+// fall-through, return, break, continue. With no unwinder the edge set is
+// finite and static, which is what makes duplication rather than a runtime
+// list the right shape.
+func (fb *funcBuilder) epilogueTo(stop *scope) {
+	for s := fb.top; s != nil; s = s.parent {
+		for i := len(s.defers) - 1; i >= 0; i-- {
+			d := s.defers[i]
+			fb.seq.add(&Instr{
+				Op: OpCall, Type: Void,
+				Callee: d.callee, Module: d.module, Args: d.args,
+			})
+		}
+		for i := len(s.locals) - 1; i >= 0; i-- {
+			b := s.locals[i]
+			if b.dead {
+				// Transferred away: already dead, not destroyed again.
+				continue
+			}
+			fb.dropBinding(b)
+		}
+		if s == stop || (stop == nil && s.kind == scopeFunc) {
+			return
+		}
 	}
 }
 
-func (b *funcBuilder) stmt(s ast.Stmt) {
-	switch s := s.(type) {
+// ------------------------------------------------------------------ statements
+
+func (fb *funcBuilder) block(b *ast.BlockStmt) {
+	if b == nil {
+		return
+	}
+	fb.openScope(scopeBlock)
+	for _, s := range b.List {
+		fb.stmt(s)
+		if fb.terminated() {
+			break
+		}
+	}
+	if !fb.terminated() {
+		fb.epilogueTo(fb.top)
+	}
+	fb.closeScope()
+}
+
+func (fb *funcBuilder) stmt(s ast.Stmt) {
+	switch x := s.(type) {
+	case nil, *ast.BadStmt:
+		return
+
 	case *ast.BlockStmt:
-		b.push(scopeBlock)
-		b.stmtList(s.List)
-		b.pop()
+		fb.block(x)
 
 	case *ast.DeclStmt:
-		if vd, ok := s.Decl.(*ast.VarDecl); ok {
-			b.varDecl(vd)
+		if vd, ok := x.Decl.(*ast.VarDecl); ok {
+			fb.varDecl(vd)
 		}
 
 	case *ast.ExprStmt:
-		b.expr(s.X)
+		fb.expr(x.X)
 
 	case *ast.AssignStmt:
-		b.assign(s)
+		fb.assign(x)
 
 	case *ast.IfStmt:
-		b.ifStmt(s)
+		fb.ifStmt(x)
 
 	case *ast.WhileStmt:
-		b.whileStmt(s)
+		fb.whileStmt(x)
 
 	case *ast.ForStmt:
-		b.forStmt(s)
+		fb.forStmt(x)
 
 	case *ast.SwitchStmt:
-		b.switchStmt(s)
-
-	case *ast.ReturnStmt:
-		b.returnStmt(s)
-
-	case *ast.DeferStmt:
-		b.deferStmt(s)
-
-	case *ast.BranchStmt:
-		// There are no loop labels (A.5.9), so a multi-level exit was
-		// already written as a flag or an extracted function.
-		switch s.Tok.String() {
-		case "break":
-			b.unwind(scopeLoop)
-			b.seq.add(&Break{})
-		case "continue":
-			b.unwind(scopeLoop)
-			b.seq.add(&Continue{})
-		case "fallthrough":
-			// Handled structurally by switchStmt.
-		}
+		fb.switchStmt(x)
 
 	case *ast.SelectStmt:
-		b.l.todo(s.Pos(), "select lowering — every case is a channel receive (A.10.2), so this becomes a builtins/chan select over the case set")
+		// select is entirely a runtime construct: a descriptor array plus
+		// one of two entry points, chosen statically by whether the
+		// statement is awaited. Both need async.
+		fb.l.todoAt(x.Pos(), "select")
 
-	case *ast.BadStmt:
-		// A diagnostic was already reported at parse time.
+	case *ast.ReturnStmt:
+		fb.returnStmt(x)
 
-	default:
-		b.l.todo(s.Pos(), "statement %T", s)
+	case *ast.DeferStmt:
+		fb.deferStmt(x)
+
+	case *ast.BranchStmt:
+		switch x.Tok {
+		case token.BREAK:
+			fb.epilogueTo(fb.enclosingLoop())
+			fb.seq.add(&Break{})
+		case token.CONTINUE:
+			fb.epilogueTo(fb.enclosingLoop())
+			fb.seq.add(&Continue{})
+		case token.FALLTHROUGH:
+			// vir's switch cases do not fall through, so this needs the
+			// following clause's body duplicated into this one.
+			fb.l.todoAt(x.Pos(), "fallthrough")
+		}
 	}
 }
 
-// varDecl lowers `let`/`var`. The two differ in representation, not in
-// storage class: a let is a named value, a var is a slot.
-func (b *funcBuilder) varDecl(d *ast.VarDecl) {
-	isVar := d.Kw.String() == "var"
+func (fb *funcBuilder) enclosingLoop() *scope {
+	for s := fb.top; s != nil; s = s.parent {
+		if s.kind == scopeLoop {
+			return s
+		}
+	}
+	return fb.top
+}
 
-	// A multi-binding declaration with a single initializer is a tuple
-	// destructure; with a matching count it is parallel declaration.
-	if len(d.Bindings) > 1 && len(d.Values) == 1 {
-		b.destructure(d, isVar)
-		return
+// varDecl introduces a local. `let` is a value, `var` is a slot — rule 2 of
+// the package doc — unless something forces a slot anyway.
+func (fb *funcBuilder) varDecl(d *ast.VarDecl) {
+	// Initializers are lowered first: a binding is not in scope inside its
+	// own initializer.
+	vals := make([]Value, 0, len(d.Values))
+	for _, v := range d.Values {
+		vals = append(vals, fb.owning(v))
 	}
 
-	for i, bind := range d.Bindings {
-		obj := b.info().Defs[bind.Name]
-		if obj == nil || bind.Name.IsBlank() {
-			if i < len(d.Values) {
-				b.expr(d.Values[i]) // still evaluated for effect
-			}
-			continue
+	for i, bnd := range d.Bindings {
+		obj := fb.l.info.Defs[bnd.Name]
+		if obj == nil || bnd.Name.IsBlank() {
+			continue // evaluated and discarded
 		}
-		src := obj.Type()
-		ht := b.l.hirType(src)
+		t := fb.typ(obj.Type())
 
 		var init Value
-		if i < len(d.Values) {
-			init = b.owningExpr(d.Values[i], src)
-		} else {
-			// Bare `var x: T` yields the type's zero value (A.5.1).
-			init = b.zeroValue(bind.Pos(), ht)
+		if i < len(vals) {
+			init = vals[i]
 		}
 
-		bd := &binding{Type: ht, Src: src, Owning: b.l.classify(src).owning()}
-		if isVar || IsAggregate(ht) {
-			slot := b.alloca(bind.Pos(), ht)
-			b.store(bind.Pos(), ht, slot, init)
-			bd.Value, bd.Slot = slot, true
-		} else {
-			bd.Value = init
+		b := &binding{obj: obj, typ: t, vt: obj.Type()}
+		switch {
+		case fb.forcesSlot(obj, t):
+			b.slot = true
+			b.val = fb.alloca(t, "s")
+			if init.IsZero() {
+				// A var with a type and no initializer is that type's zero
+				// value. Every type has one, so there is no
+				// definite-assignment analysis anywhere in the language.
+				fb.zero(b.val, t)
+			} else {
+				fb.storeInto(b.val, init, t)
+			}
+		default:
+			if init.IsZero() {
+				init = fb.zeroValue(t)
+			}
+			b.val = init
 		}
-		b.declareBinding(obj, bd)
+
+		fb.bind(obj, b)
+		if fb.needsDrop(obj.Type()) {
+			fb.top.locals = append(fb.top.locals, b)
+		}
 	}
 }
 
-func (b *funcBuilder) destructure(d *ast.VarDecl, isVar bool) {
-	tupleType := b.info().TypeOf(d.Values[0])
-	v := b.expr(d.Values[0])
-	st, ok := b.l.hirType(tupleType).(StructType)
-	if !ok {
-		b.l.errorf(d.Pos(), "internal: destructuring a non-tuple %s", types.TypeString(tupleType))
+// forcesSlot is lowering.md §5's list. The join convention carries a
+// reassigned name across blocks without memory, so a slot is needed only
+// when an *address* is — unobservable except through `===`, which is why
+// `===` is on the list.
+//
+// todo: three of the six entries need information hir does not have yet —
+// "passed to a mut parameter", "operand of addr", and "captured by a closure
+// that outlives it" are all uses, discovered after the declaration. Today
+// every `var` gets a slot, which is correct and wasteful; narrowing it wants
+// a use-collecting pre-pass over the body.
+func (fb *funcBuilder) forcesSlot(obj types.Object, t *Type) bool {
+	if IsAggregate(t) {
+		return true
+	}
+	v, ok := obj.(*types.Var)
+	return ok && v.Mutable()
+}
+
+func (fb *funcBuilder) assign(s *ast.AssignStmt) {
+	if s.Op != token.ASSIGN {
+		// The compound form takes exactly one target and one value.
+		lhs := fb.expr(s.Targets[0])
+		rhs := fb.expr(s.Values[0])
+		op := binaryOpFor(compoundBase(s.Op), lhs.Type)
+		res := fb.checkedBinary(op, lhs, rhs, s.OpPos)
+		fb.assignTo(s.Targets[0], res)
 		return
 	}
-	for i, bind := range d.Bindings {
-		if bind.Name.IsBlank() || i >= len(st.Def.Fields) {
-			continue
+
+	// Right-hand sides are all evaluated before any target is written: a
+	// swap `a, b = b, a` must not observe a half-written pair.
+	vals := make([]Value, 0, len(s.Values))
+	for _, v := range s.Values {
+		vals = append(vals, fb.owning(v))
+	}
+	for i, t := range s.Targets {
+		if i < len(vals) {
+			fb.assignTo(t, vals[i])
 		}
-		obj := b.info().Defs[bind.Name]
-		if obj == nil {
-			continue
-		}
-		f := st.Def.Fields[i]
-		val := b.load(bind.Pos(), f.Type, b.fieldPtr(bind.Pos(), st.Def, v, f.Name))
-		bd := &binding{Type: f.Type, Src: obj.Type(), Owning: b.l.classify(obj.Type()).owning()}
-		if isVar || IsAggregate(f.Type) {
-			slot := b.alloca(bind.Pos(), f.Type)
-			b.store(bind.Pos(), f.Type, slot, val)
-			bd.Value, bd.Slot = slot, true
-		} else {
-			bd.Value = val
-		}
-		b.declareBinding(obj, bd)
 	}
 }
 
-func (b *funcBuilder) assign(s *ast.AssignStmt) {
-	if s.Op.IsCompoundAssign() {
-		t := b.info().TypeOf(s.Targets[0])
-		lhs := b.addressOf(s.Targets[0])
-		cur := b.load(s.Pos(), b.l.hirType(t), lhs)
-		rhs := b.expr(s.Values[0])
-		op := b.l.binaryOpFor(compoundBase(s.Op), t)
-		res := b.op(s.OpPos, op, b.l.hirType(t), cur, rhs)
-		b.store(s.Pos(), b.l.hirType(t), lhs, res)
+func (fb *funcBuilder) assignTo(target ast.Expr, v Value) {
+	if id, ok := target.(*ast.Ident); ok {
+		if id.IsBlank() {
+			return // evaluated and discarded
+		}
+		obj := fb.l.info.ObjectOf(id)
+		b := fb.lookup(obj)
+		if b == nil {
+			fb.l.bugAt(id.Pos(), "assignment to an unbound name "+id.Name)
+		}
+		if b.slot {
+			// The old value dies here. A struct field holding a []T is not
+			// leaked by an overwrite.
+			fb.dropInPlace(b.val, b.vt)
+			fb.storeInto(b.val, v, b.typ)
+			return
+		}
+		// Join Convention: reassigning the name is the merge. No memory
+		// involved, no phi to reconstruct.
+		fb.seq.add(&Instr{Result: b.val.Name, Op: OpBitcast, Type: b.typ, Args: []Value{v}})
 		return
 	}
-	for i, tgt := range s.Targets {
-		if i >= len(s.Values) {
-			break
-		}
-		if id, ok := tgt.(*ast.Ident); ok && id.IsBlank() {
-			b.expr(s.Values[i])
-			continue
-		}
-		dstType := b.info().TypeOf(tgt)
-		val := b.owningExpr(s.Values[i], dstType)
-		ht := b.l.hirType(dstType)
 
-		// Assigning over a live owning binding tears down what was there.
-		if bd := b.bindingFor(tgt); bd != nil && bd.Owning && !bd.Dead {
-			b.l.own.emitDeinit(b, s.Pos(), bd)
-		}
-		b.store(s.Pos(), ht, b.addressOf(tgt), val)
-	}
+	// A field path, an index, or a dereference: all resolve to an address.
+	p := fb.address(target)
+	t := fb.typ(fb.l.info.TypeOf(target))
+	fb.dropInPlace(p, fb.l.info.TypeOf(target))
+	fb.storeInto(p, v, t)
 }
 
-func (b *funcBuilder) ifStmt(s *ast.IfStmt) {
-	cond := b.expr(s.Cond)
-	n := &If{Cond: cond}
-	n.Then = b.into(func() {
-		b.push(scopeBlock)
-		b.stmtList(s.Body.List)
-		b.pop()
-	})
+func (fb *funcBuilder) ifStmt(s *ast.IfStmt) {
+	cond := fb.expr(s.Cond)
+	n := &If{Cond: fb.narrowBool(cond), Then: &Seq{}}
+
+	outer := fb.seq
+	fb.seq = n.Then
+	fb.block(s.Body)
 	if s.Else != nil {
-		n.Else = b.into(func() {
-			b.push(scopeBlock)
-			b.stmt(s.Else)
-			b.pop()
-		})
+		n.Else = &Seq{}
+		fb.seq = n.Else
+		fb.stmt(s.Else)
 	}
-	b.seq.add(n)
+	fb.seq = outer
+	fb.seq.add(n)
 }
 
-// whileStmt is the only loop primitive. The condition sits at the head of
-// the body, so `continue` re-evaluates it without a second edge shape.
-func (b *funcBuilder) whileStmt(s *ast.WhileStmt) {
-	loop := &Loop{}
-	loop.Body = b.into(func() {
-		b.push(scopeLoop)
-		cond := b.expr(s.Cond)
-		not := b.op(s.Cond.Pos(), OpNot, I1, cond)
-		b.seq.add(&If{Cond: not, Then: &Seq{List: []Stmt{&Break{}}}})
-		b.stmtList(s.Body.List)
-		b.pop()
-	})
-	b.seq.add(loop)
+func (fb *funcBuilder) whileStmt(s *ast.WhileStmt) {
+	loop := &Loop{Body: &Seq{}}
+	outer := fb.seq
+	fb.seq = loop.Body
+	fb.openScope(scopeLoop)
+
+	// The head test is inside the loop: `while c { … }` is
+	// `loop { if !c { break }; … }`. One shape for every loop primitive,
+	// which is what lets flatten.go stay short.
+	cond := fb.narrowBool(fb.expr(s.Cond))
+	brk := &If{Cond: cond, Then: &Seq{}, Else: &Seq{}}
+	brk.Else.add(&Break{})
+	fb.seq.add(brk)
+
+	inner := fb.seq
+	fb.seq = brk.Then
+	fb.block(s.Body)
+	fb.seq = inner
+
+	fb.closeScope()
+	fb.seq = outer
+	fb.seq.add(loop)
 }
 
-// forStmt lowers A.5.6's single shape. The iterable decides the desugaring;
-// the marker on the binding decides whether each element is shared, mutated
-// in place, or consumed.
-func (b *funcBuilder) forStmt(s *ast.ForStmt) {
-	src := b.info().TypeOf(s.X)
-	switch b.l.classify(src) {
-	case kInt: // a range: A.4.5's `..`, always half-open
-		b.forRange(s)
-	case kArray, kSlice:
-		b.forIndexed(s, src)
-	case kMap:
-		b.l.todo(s.Pos(), "map iteration — builtins/map iter_init+iter_next, order unspecified (A.5.6)")
-	case kString:
-		b.l.todo(s.Pos(), "string iteration — builtins/string decode at variable stride (A.5.6)")
-	default:
-		b.l.todo(s.Pos(), "for over %s", types.TypeString(src))
-	}
-}
+// forStmt lowers the single loop shape over an iterable.
+//
+// Only the range and fixed-array/slice forms are here. The mode marker sits
+// on the binding rather than the iterable, because what transfers is each
+// element, one per iteration.
+func (fb *funcBuilder) forStmt(s *ast.ForStmt) {
+	it := fb.l.info.TypeOf(s.X)
 
-func (b *funcBuilder) forRange(s *ast.ForStmt) {
-	rng, ok := s.X.(*ast.BinaryExpr)
-	if !ok {
-		b.l.errorf(s.Pos(), "internal: integer for-iterable is not a range")
+	if rng, ok := s.X.(*ast.BinaryExpr); ok && rng.Op == token.DOTDOT {
+		fb.forRange(s, rng)
 		return
 	}
-	t := b.l.hirType(b.info().TypeOf(rng.X))
-	lo, hi := b.expr(rng.X), b.expr(rng.Y)
-	slot := b.alloca(s.Pos(), t)
-	b.store(s.Pos(), t, slot, lo)
-
-	loop := &Loop{}
-	loop.Body = b.into(func() {
-		b.push(scopeLoop)
-		cur := b.load(s.Pos(), t, slot)
-		done := b.op(s.Pos(), b.l.cmpOp(true, "ge", b.info().TypeOf(rng.X)), I1, cur, hi)
-		b.seq.add(&If{Cond: done, Then: &Seq{List: []Stmt{&Break{}}}})
-		if len(s.Names) > 0 && !s.Names[0].IsBlank() {
-			if obj := b.info().Defs[s.Names[0]]; obj != nil {
-				b.declareBinding(obj, &binding{Value: cur, Type: t, Src: obj.Type()})
-			}
-		}
-		b.stmtList(s.Body.List)
-		next := b.op(s.Pos(), OpAdd, t, cur, IntVal(t, 1))
-		b.store(s.Pos(), t, slot, next)
-		b.pop()
-	})
-	b.seq.add(loop)
-}
-
-func (b *funcBuilder) forIndexed(s *ast.ForStmt, src types.Type) {
-	elemT := b.l.hirType(b.l.elem(src))
-	base, length := b.sequenceParts(s.X, src)
-
-	slot := b.alloca(s.Pos(), I64)
-	b.store(s.Pos(), I64, slot, IntVal(I64, 0))
-
-	loop := &Loop{}
-	loop.Body = b.into(func() {
-		b.push(scopeLoop)
-		i := b.load(s.Pos(), I64, slot)
-		done := b.op(s.Pos(), OpUge, I1, i, length)
-		b.seq.add(&If{Cond: done, Then: &Seq{List: []Stmt{&Break{}}}})
-
-		ep := b.indexPtr(s.Pos(), elemT, base, i)
-		names := s.Names
-		if len(names) == 2 {
-			if obj := b.info().Defs[names[0]]; obj != nil && !names[0].IsBlank() {
-				b.declareBinding(obj, &binding{Value: i, Type: I64, Src: obj.Type()})
-			}
-			names = names[1:]
-		}
-		if len(names) == 1 && !names[0].IsBlank() {
-			if obj := b.info().Defs[names[0]]; obj != nil {
-				// The bare form iterates by shared access; `mut` iterates
-				// by exclusive access; `var` consumes each element, and
-				// the container is dead after the loop.
-				bd := &binding{Type: elemT, Src: obj.Type()}
-				switch s.Mode.String() {
-				case "mut":
-					bd.Value, bd.Slot = ep, true
-				case "var":
-					bd.Value, bd.Slot = ep, true
-					bd.Owning = true
-				default:
-					bd.Value = b.load(s.Pos(), elemT, ep)
-					bd.Slot = IsAggregate(elemT)
-					if bd.Slot {
-						bd.Value = ep
-					}
-				}
-				b.declareBinding(obj, bd)
-			}
-		}
-		b.stmtList(s.Body.List)
-		b.store(s.Pos(), I64, slot, b.op(s.Pos(), OpAdd, I64, i, IntVal(I64, 1)))
-		b.pop()
-	})
-	b.seq.add(loop)
-}
-
-// sequenceParts yields (base pointer, length) for an array or slice.
-func (b *funcBuilder) sequenceParts(x ast.Expr, src types.Type) (Value, Value) {
-	v := b.expr(x)
-	switch b.l.classify(src) {
-	case kArray:
-		_, n := b.l.arrayParts(src)
-		return v, IntVal(I64, n)
-	case kSlice:
-		st := b.l.hirType(src).(StructType)
-		return b.loadField(x.Pos(), st.Def, v, "ptr"), b.loadField(x.Pos(), st.Def, v, "len")
+	switch types.Underlying(it).(type) {
+	case *types.Array, *types.Slice:
+		fb.forIndexed(s, it)
+	default:
+		// map iteration needs the runtime cursor; string iteration needs
+		// UTF-8 decode at variable stride.
+		fb.l.todoAt(s.Pos(), "for over "+types.TypeString(it))
 	}
-	return v, IntVal(I64, 0)
 }
 
-func (b *funcBuilder) switchStmt(s *ast.SwitchStmt) {
-	tagType := b.info().TypeOf(s.Tag)
-	tag := b.expr(s.Tag)
+// forRange is one counter and nothing else. A range is never materialized —
+// it has no type and cannot be bound, returned, passed, or stored, so it
+// becomes the counter's bounds.
+func (fb *funcBuilder) forRange(s *ast.ForStmt, rng *ast.BinaryExpr) {
+	lo := fb.expr(rng.X)
+	hi := fb.expr(rng.Y)
+	t := lo.Type
 
-	// A payload enum's discriminant is its tag field; a unit-only enum
-	// *is* its discriminant integer, so nothing is loaded.
-	if b.l.classify(tagType) == kEnum {
-		if st, ok := b.l.hirType(tagType).(StructType); ok {
-			tag = b.loadField(s.Pos(), st.Def, tag, "tag")
-		}
+	i := fb.alloca(t, "i")
+	fb.emitVoid(OpStore, t, i, lo)
+
+	loop := &Loop{Body: &Seq{}}
+	outer := fb.seq
+	fb.seq = loop.Body
+	fb.openScope(scopeLoop)
+
+	cur := fb.emit(OpLoad, t, i)
+	// Always exclusive of the upper bound, and empty when lo >= hi.
+	cmp := fb.emit(cmpOp(OpSlt, t), I1, cur, hi)
+	brk := &If{Cond: cmp, Then: &Seq{}, Else: &Seq{}}
+	brk.Else.add(&Break{})
+	fb.seq.add(brk)
+
+	inner := fb.seq
+	fb.seq = brk.Then
+	if obj := fb.l.info.Defs[s.Names[0]]; obj != nil && !s.Names[0].IsBlank() {
+		fb.bind(obj, &binding{obj: obj, val: cur, typ: t, vt: obj.Type()})
+	}
+	fb.block(s.Body)
+	next := fb.emit(OpAdd, t, cur, Int(1, t))
+	fb.emitVoid(OpStore, t, i, next)
+	fb.seq = inner
+
+	fb.closeScope()
+	fb.seq = outer
+	fb.seq.add(loop)
+}
+
+// forIndexed is counter plus index.ptr, for [N]T and []T.
+//
+// todo: the consuming form (`for var x in xs`) moves each element out and
+// emits no per-element drop, leaving the container's teardown to drop the
+// unvisited tail [i, len) — which is exactly what a break out of a consuming
+// loop leaves behind. Not implemented; a consuming for currently lowers as
+// the shared form and double-drops.
+func (fb *funcBuilder) forIndexed(s *ast.ForStmt, it types.Type) {
+	if s.Mode == token.VAR {
+		fb.l.todoAt(s.Pos(), "consuming for loop")
+	}
+	fb.l.todoAt(s.Pos(), "for over an array or slice")
+	_ = it
+}
+
+func (fb *funcBuilder) switchStmt(s *ast.SwitchStmt) {
+	tag := fb.expr(s.Tag)
+
+	// An enum subject dispatches on the tag, not the value.
+	if e := types.AsEnum(fb.l.info.TypeOf(s.Tag)); e != nil && !e.UnitOnly() {
+		p := fb.address(s.Tag)
+		tag = fb.emit(OpLoad, fb.l.basic(e.Discriminant()), p)
 	}
 
-	n := &Switch{Tag: tag}
-	for _, c := range s.Cases {
-		body := b.into(func() {
-			b.push(scopeBlock)
-			b.caseBody(c, tagType, tag)
-			b.pop()
-		})
-		if c.Patterns == nil {
+	n := &SwitchStmt{Value: tag, Default: &Seq{}}
+	outer := fb.seq
+	sawDefault := false
+
+	for _, cl := range s.Cases {
+		body := &Seq{}
+		fb.seq = body
+		fb.openScope(scopeBlock)
+		for _, st := range cl.Body {
+			fb.stmt(st)
+			if fb.terminated() {
+				break
+			}
+		}
+		if !fb.terminated() {
+			fb.epilogueTo(fb.top)
+		}
+		fb.closeScope()
+
+		if cl.Patterns == nil {
 			n.Default = body
+			sawDefault = true
 			continue
 		}
-		var vals []int64
-		for _, p := range c.Patterns {
-			v, ok := b.patternTag(p, tagType)
+		for _, p := range cl.Patterns {
+			v, ok := fb.patternValue(p)
 			if !ok {
-				b.l.todo(p.Pos(), "non-constant switch pattern — vir's switch takes int-literal cases")
-				continue
+				fb.l.todoAt(p.Pos(), "non-constant switch pattern")
 			}
-			vals = append(vals, v)
+			n.Cases = append(n.Cases, SwitchCase{Value: v, Body: body})
 		}
-		n.Cases = append(n.Cases, SwitchCase{Values: vals, Body: body})
 	}
-	b.seq.add(n)
+
+	if !sawDefault {
+		// An exhaustive enum switch emits no default edge of its own, but
+		// vir's switch terminator requires a default label — so it targets a
+		// block ending in unreachable.
+		n.Default.add(&UnreachableStmt{})
+	}
+
+	fb.seq = outer
+	fb.seq.add(n)
 }
 
-// caseBody binds an enum pattern's payload before the clause runs. A
-// payload binding is a *view* into the payload, not a copy (A.5.7).
-func (b *funcBuilder) caseBody(c *ast.CaseClause, tagType types.Type, tag Value) {
-	for _, p := range c.Patterns {
-		ep, ok := p.(*ast.EnumPattern)
-		if !ok || len(ep.Binds) == 0 {
-			continue
+func (fb *funcBuilder) patternValue(p ast.Expr) (int64, bool) {
+	if ep, ok := p.(*ast.EnumPattern); ok {
+		if len(ep.Binds) > 0 {
+			// Payload bindings are field.ptr plus a reinterpretation into
+			// the payload — views, not copies, and not assignable through.
+			return 0, false
 		}
-		b.l.todo(ep.Pos(), "enum payload binding — a view into the tagged union's payload bytes")
-	}
-	b.stmtList(c.Body)
-	for _, st := range c.Body {
-		if br, ok := st.(*ast.BranchStmt); ok && br.Tok.String() == "fallthrough" {
-			b.l.todo(br.Pos(), "fallthrough — duplicate the following clause's body, since vir's switch cases do not fall through")
+		e := types.AsEnum(fb.l.info.TypeOf(p))
+		if e == nil {
+			return 0, false
 		}
-	}
-}
-
-func (b *funcBuilder) patternTag(p ast.Expr, tagType types.Type) (int64, bool) {
-	if tv, ok := b.info().Types[p]; ok && tv.Value != nil {
-		if v, isInt := types.Int64Val(tv.Value); isInt {
-			return v, true
+		if v := e.LookupVariant(ep.Name.Name); v != nil {
+			return v.Value, true
 		}
+		return 0, false
 	}
-	switch p := p.(type) {
-	case *ast.EnumPattern:
-		return b.l.variantTag(tagType, p.Name.Name)
-	case *ast.EnumShorthand:
-		return b.l.variantTag(tagType, p.Name.Name)
+	if tv, ok := fb.l.info.Types[p]; ok && tv.Value != nil {
+		return types.Int64Val(tv.Value)
 	}
 	return 0, false
 }
 
-func (b *funcBuilder) returnStmt(s *ast.ReturnStmt) {
-	var out *Value
-	switch len(s.Results) {
-	case 0:
-	case 1:
-		v := b.owningExpr(s.Results[0], b.resultType())
-		out = &v
-	default:
-		// A multi-value return is a bare comma list that unbuilds a tuple
-		// (A.5.3); the tuple is what actually travels, through sret.
-		v := b.tupleFromValues(s.Pos(), s.Results)
-		out = &v
-	}
+func (fb *funcBuilder) returnStmt(s *ast.ReturnStmt) {
+	switch {
+	case len(s.Results) == 0:
+		fb.epilogueTo(nil)
+		fb.seq.add(&ReturnStmt{})
 
-	// If the result is an aggregate, it is written into the caller's sret
-	// destination and the vir function returns void.
-	if len(b.fn.Params) > 0 && b.fn.Params[0].SRet != nil && out != nil {
-		dst := Ref(b.fn.Params[0].Name, StructType{b.fn.Params[0].SRet})
-		b.store(s.Pos(), StructType{b.fn.Params[0].SRet}, dst, *out)
-		out = nil
-	}
-
-	b.unwind(scopeFunc)
-	b.seq.add(&Return{Value: out})
-}
-
-func (b *funcBuilder) resultType() types.Type {
-	sig, _ := b.fn.Origin.(*types.Func)
-	if sig == nil {
-		return nil
-	}
-	s, _ := sig.Type().(*types.Signature)
-	if s == nil || s.Results() == nil || s.Results().Len() == 0 {
-		return nil
-	}
-	if s.Results().Len() == 1 {
-		return s.Results().At(0).Type()
-	}
-	return s.Results()
-}
-
-// deferStmt records a call whose arguments are evaluated now and whose call
-// is postponed to every exit edge of the enclosing scope.
-func (b *funcBuilder) deferStmt(s *ast.DeferStmt) {
-	saved := b.seq
-	b.seq = &Seq{}
-	call := b.expr(s.Call) // arguments evaluated at registration
-	pending := b.seq
-	b.seq = saved
-
-	// Everything but the call itself stays where it was written.
-	var last *Instr
-	for _, st := range pending.List {
-		run, ok := st.(*Instrs)
-		if !ok {
-			continue
-		}
-		for i, in := range run.List {
-			if i == len(run.List)-1 && in.Op == OpCall {
-				last = in
-				continue
+	case fb.sret != "":
+		// An aggregate result is written through the sret pointer, then the
+		// epilogue runs, then a bare return. Failure costs exactly what
+		// success costs: the same stores into the same slot.
+		dst := Name(fb.sret, Ptr)
+		if len(s.Results) == 1 {
+			v := fb.owning(s.Results[0])
+			fb.storeInto(dst, v, fb.fn.SRet)
+		} else {
+			st := fb.fn.SRet.Struct
+			for i, r := range s.Results {
+				v := fb.owning(r)
+				p := fb.fieldPtr(dst, st, i)
+				fb.storeInto(p, v, st.Fields[i].Type)
 			}
-			b.emit(in)
 		}
+		fb.epilogueTo(nil)
+		fb.seq.add(&ReturnStmt{})
+
+	default:
+		v := fb.owning(s.Results[0])
+		// The epilogue runs after the value is computed and before the
+		// return, which is why a returned local is not dropped: owning() on
+		// a transferred binding already marked it dead, and a returned
+		// non-transferred local is copied.
+		fb.epilogueTo(nil)
+		fb.seq.add(&ReturnStmt{Value: &v})
 	}
-	_ = call
-	if last == nil {
-		b.l.errorf(s.Pos(), "internal: defer's operand did not lower to a call")
-		return
-	}
-	sc := b.scopes[len(b.scopes)-1]
-	sc.defers = append(sc.defers, last)
 }
 
-// compoundBase strips a compound assignment down to its base operator:
-// += -> +, <<= -> <<, and so on.
-//
-// It yields a spelling rather than a token.Kind because token offers no
-// reverse lookup from a spelling to a Kind, and reconstructing one by
-// arithmetic on the enum would be a guess about an ordering token never
-// promised. The spelling is the source of truth either way — binaryOp
-// switches on it — so the base travels as a string and binaryOpFor answers
-// the same question expr.go asks. The analyzer already validated the pair.
-func compoundBase(k token.Kind) string {
-	s := k.String()
-	if len(s) > 1 && s[len(s)-1] == '=' {
-		return s[:len(s)-1]
+// deferStmt registers a call. Its callee and arguments are evaluated at the
+// defer statement, so registration is static: no runtime defer list, no
+// mask, just duplication of the deferred call onto each exit edge with the
+// evaluated arguments held in slots.
+func (fb *funcBuilder) deferStmt(s *ast.DeferStmt) {
+	callee, mod, args := fb.callTarget(s.Call)
+	held := make([]Value, 0, len(args))
+	for _, a := range args {
+		slot := fb.alloca(a.Type, "d")
+		fb.emitVoid(OpStore, a.Type, slot, a)
+		held = append(held, fb.emit(OpLoad, a.Type, slot))
 	}
-	return s
+	// A deferred call runs when the enclosing *function* returns, not the
+	// enclosing block — so it registers against the function scope.
+	fn := fb.top
+	for fn.parent != nil {
+		fn = fn.parent
+	}
+	fn.defers = append(fn.defers, &deferred{callee: callee, module: mod, args: held})
 }

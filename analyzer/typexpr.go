@@ -7,14 +7,14 @@ import (
 	"github.com/vertex-language/vertex/types"
 )
 
-// typ converts a type expression to a types.Type.
-//
 // There are two entry points into this file, not one, and the split is
-// load-bearing. A.7.2 ⊢ "a constraint is never a value type and is legal only
-// in a [...] position", and types.Constraint deliberately does not implement
+// load-bearing. A constraint is never a value type and is legal only in a
+// bracket position, and types.Constraint deliberately does not implement
 // types.Type. So a constraint position calls constraintExpr and a type position
-// calls typ, and A.14's `var c: Ordered` falls out as a diagnostic from typ
+// calls typ, and `var c: Ordered` falls out of typ as an ordinary diagnostic
 // rather than needing a predicate someone must remember to call.
+
+// typ converts a type expression to a types.Type, recording the result.
 func (c *Checker) typ(e ast.Expr) types.Type {
 	t := c.typInternal(e)
 	c.info.RecordType(e, types.NewTypeAndValue(types.TypeMode, t, nil))
@@ -28,7 +28,8 @@ func (c *Checker) typInternal(e ast.Expr) types.Type {
 		return c.invalid()
 
 	case *ast.ParenExpr:
-		return c.typInternal(x.X)
+		// A parenthesized single type is that type — one node serves both.
+		return c.typ(x.X)
 
 	case *ast.Ident:
 		return c.typeFromName(x, x)
@@ -46,15 +47,16 @@ func (c *Checker) typInternal(e ast.Expr) types.Type {
 		if x.Len == nil {
 			return types.NewSlice(c.typ(x.Elem))
 		}
-		n, ok := c.arrayLen(x.Len)
+		n, ok := c.constInt(x.Len)
 		if !ok {
 			return c.invalid()
 		}
+		// §3.1 ⊢ `[N]T` carries N in its identity, which is why the length is
+		// resolved here and never kept as an expression.
 		return types.NewArray(c.typ(x.Elem), n)
 
 	case *ast.MapType:
 		key := c.typ(x.Key)
-		// A.3.1 ⊢ map[K]V requires K to satisfy `comparable` (A.7.4).
 		if !types.IsInvalid(key) && !types.IsComparable(key) {
 			c.errorExpr(x.Key, diag.NonComparableKey, types.TypeString(key))
 		}
@@ -64,36 +66,44 @@ func (c *Checker) typInternal(e ast.Expr) types.Type {
 		return types.NewChan(c.typ(x.Elem))
 
 	case *ast.PointerType:
+		// §3.2 ⊢ a typed_ptr may not be the direct base of another; the nested
+		// form is written parenthesized. The parser recurses unguarded so the
+		// unparenthesized form parses and is named here.
+		if _, nested := x.Elem.(*ast.PointerType); nested {
+			c.errorExpr(x, diag.NestedPointer)
+		}
 		return types.NewPointer(c.typ(x.Elem))
 
 	case *ast.FuncType:
-		// A.3.4 ⊢ a bare FunctionType has no receiver; the marker comes from
-		// the node itself, which signature reads.
-		return c.signature(nil, x)
+		// A bare FunctionType has no receiver and no Expected result: that form
+		// reaches the grammar only through a declaration.
+		return c.signature(nil, x, false)
 
 	case *ast.TupleExpr:
 		return c.tupleType(x)
 
 	case *ast.TensorType:
-		// A.3.5 ⊢ TensorType is grammatical only under [+Npu]. The parser
-		// accepts it everywhere on purpose (A.14 lists it among the forms that
-		// parse and are rejected later), so the rejection is here.
-		if !c.npu {
+		// Legal only inside an npu-marked function body or that function's own
+		// signature. The parser accepts it everywhere on purpose, so the
+		// rejection is here and can name the construct.
+		if !c.ctx.npu {
 			c.errorExpr(x, diag.TensorOutsideNpu)
 		}
 		return c.tensorType(x)
 
+	case *ast.VectorType:
+		return c.vectorType(x)
+
 	case *ast.AbstractType:
-		// A.3.3 ⊢ `abstract` appears only on the right-hand side of a
-		// TypeAliasDeclaration. Reaching it through typ means it was written
-		// inline; the alias path never calls this.
+		// Legal only as an alias target. Reaching it through typ means it was
+		// written inline; the alias path never calls this.
 		c.errorExpr(x, diag.AbstractInline)
 		return c.invalid()
 
 	case *ast.UnaryExpr:
 		if x.Op == token.TILDE {
-			// A.7.3 ✗ `type X = ~int` — `~T` is valid only inside a type set.
-			// The parser produces the same node for both readings, so the
+			// `~T` is underlying-type inside a TypeSet and bitwise-NOT
+			// everywhere else. The parser produces one node for both, so the
 			// position is what separates them.
 			c.errorExpr(x, diag.TildeOutsideSet)
 			return c.invalid()
@@ -106,10 +116,9 @@ func (c *Checker) typInternal(e ast.Expr) types.Type {
 
 // typeFromName resolves an identifier in type position.
 //
-// This is where three of the parser's punts land at once: a PredeclaredTypeName
-// is an ordinary identifier (A.1.4), a ConstraintName looks identical to a
-// TypeName (A.7.2), and a generic name without arguments is an error rather
-// than a type.
+// Three of the parser's punts land here at once: a predeclared type name is an
+// ordinary identifier, a constraint name looks identical to a type name, and a
+// generic name without arguments is an error rather than a type.
 func (c *Checker) typeFromName(id *ast.Ident, at ast.Node) types.Type {
 	obj := c.lookup(id)
 	if obj == nil {
@@ -121,17 +130,14 @@ func (c *Checker) typeFromName(id *ast.Ident, at ast.Node) types.Type {
 		c.errorExpr(at, diag.NotAType, id.Name)
 		return c.invalid()
 	}
-
-	// A.7.2 ⊢ a constraint "is never a value type and is legal only in a [...]
-	// position." A.14 lists `var c: Ordered` among the rejected forms.
 	if tn.IsConstraint() {
 		c.errorExpr(at, diag.ConstraintAsType, id.Name)
 		return c.invalid()
 	}
 
 	// Phase 2 may reach a name whose own type is not yet resolved. Resolving it
-	// on demand is what makes A.2's order-independence work, and the resolving
-	// stack is what turns a self-reference into a diagnostic instead of a hang.
+	// on demand is what makes order-independence work, and the resolving stack
+	// is what turns a self-reference into a diagnostic instead of a hang.
 	c.objDecl(tn)
 
 	t := tn.Type()
@@ -139,7 +145,25 @@ func (c *Checker) typeFromName(id *ast.Ident, at ast.Node) types.Type {
 		return c.invalid()
 	}
 
-	// A generic name used bare is an error: A.7.5 ⊢ inference works from value
+	// §2.3's tensor element names carry their own legality rule, and it is a
+	// rule about position rather than shape. Two of them:
+	//
+	//   - a bare tensor element name is legal only inside an npu body;
+	//   - and never in a signature at all.
+	//
+	// The element slot of a TensorType is exempt from both, since `tensor[bf16,
+	// 4]` is precisely the form the npu signature rule licenses. That reading
+	// is this implementation's, not a stated one.
+	if types.IsTensorElem(t) && !c.inTensorElem {
+		switch {
+		case c.inSignature:
+			c.errorExpr(at, diag.TensorElemInSignature, id.Name)
+		case !c.ctx.npu:
+			c.errorExpr(at, diag.TensorElemOutsideNpu, id.Name)
+		}
+	}
+
+	// A generic name used bare is an error: inference works from value
 	// arguments, and a type position has none.
 	if n := types.AsNamed(t); n != nil && len(n.TypeParams()) > 0 && len(n.TypeArgs()) == 0 {
 		c.errorExpr(at, diag.WrongTypeArgCount, id.Name, len(n.TypeParams()), 0)
@@ -148,7 +172,7 @@ func (c *Checker) typeFromName(id *ast.Ident, at ast.Node) types.Type {
 	return t
 }
 
-// qualifiedType resolves `pkg.Type` (A.2.3's QualifiedTypeName).
+// qualifiedType resolves `pkg.Type`.
 func (c *Checker) qualifiedType(x *ast.SelectorExpr) types.Type {
 	id, ok := x.X.(*ast.Ident)
 	if !ok {
@@ -165,30 +189,37 @@ func (c *Checker) qualifiedType(x *ast.SelectorExpr) types.Type {
 		return c.invalid()
 	}
 
-	// A.2.3 ⊢ "the imported package's declared name is the qualifier under
-	// which its symbols are reached; the import path is a locator, not a name."
+	// §1.3 ⊢ the qualifier is the imported package's own name; the path is a
+	// locator, not a name.
 	member := pkgName.Imported().Scope().Lookup(x.Sel.Name)
 	if member == nil {
 		c.errorExpr(x.Sel, diag.UndeclaredName, x.Sel.Name)
 		return c.invalid()
 	}
-	c.info.RecordUse(x.Sel, member)
+	c.recordUse(x.Sel, member)
+	c.info.RecordSelection(x, &types.Selection{Kind: types.PackageMember, Obj: member})
 
 	tn, ok := member.(*types.TypeName)
-	if !ok || tn.IsConstraint() {
+	if !ok {
 		c.errorExpr(x, diag.NotAType, x.Sel.Name)
 		return c.invalid()
 	}
-	return tn.Type()
+	if tn.IsConstraint() {
+		c.errorExpr(x, diag.ConstraintAsType, x.Sel.Name)
+		return c.invalid()
+	}
+	if t := tn.Type(); t != nil {
+		return t
+	}
+	return c.invalid()
 }
 
 // instantiate resolves `Stack[int32]` in type position.
 //
-// A.3.6 ⊢ this shape and `a[i]` "share bracket syntax and are distinguished by
-// whether the operand names a generic declaration. This is the one syntactic
-// overlap resolved by the operand's meaning rather than by shape." In type
-// position only the instantiation reading is grammatical, so the ambiguity does
-// not arise here — it arises in expression position, which typecheck handles.
+// Index and TypeArgs are one node, distinguished by whether the operand denotes
+// a generic declaration. In type position only the instantiation reading is
+// grammatical, so the ambiguity does not arise here — it arises in expression
+// position, which resolve.go settles by the same question.
 func (c *Checker) instantiate(x *ast.IndexExpr) types.Type {
 	base := c.typInternal(x.X)
 	if types.IsInvalid(base) {
@@ -212,14 +243,17 @@ func (c *Checker) instantiate(x *ast.IndexExpr) types.Type {
 		return c.invalid()
 	}
 
-	// A.7.5 ⊢ "constraint satisfaction is checked once per instantiation, at
-	// the instantiation site, never at runtime."
+	// §9.2 ⊢ constraint satisfaction is checked per instantiation, at the
+	// instantiation site, and a failure is a compile error there. There is no
+	// runtime counterpart.
 	for i, arg := range args {
 		if types.IsInvalid(arg) {
 			continue
 		}
-		if cst := params[i].Constraint(); cst != nil && !cst.Satisfies(arg) {
-			c.errorExpr(x.Indices[i], diag.NotAConstraint, types.TypeString(arg))
+		cst := params[i].Constraint()
+		if cst != nil && !cst.Satisfies(arg) {
+			c.errorExpr(x.Indices[i], diag.ConstraintNotSatisfied,
+				types.TypeString(arg), types.ConstraintString(cst))
 		}
 	}
 
@@ -233,12 +267,12 @@ func (c *Checker) instantiate(x *ast.IndexExpr) types.Type {
 	return inst
 }
 
-// ownershipType resolves A.3.2's five qualifiers.
+// ownershipType resolves the five qualifiers.
 //
-// Only unique/shared/weak produce a Type. A.3.2 ⊢ mut and var are "legal only
-// in a parameter or receiver position", so reaching them through typ means they
+// Only unique/shared/weak produce a Type. §3.2 ⊢ mut and var are legal in a
+// parameter or receiver position only, so reaching them through typ means they
 // were written somewhere else — types.Mode is where the legal ones live, set by
-// paramVar below.
+// splitMode.
 func (c *Checker) ownershipType(x *ast.OwnershipType) types.Type {
 	var kind types.OwnKind
 	switch x.Kw {
@@ -249,31 +283,33 @@ func (c *Checker) ownershipType(x *ast.OwnershipType) types.Type {
 	case token.WEAK:
 		kind = types.Weak
 	case token.MUT, token.VAR:
-		c.errorExpr(x, diag.MutOutsidePosition, x.Kw.String())
+		c.errorExpr(x, diag.MutOutsidePosition, x.Kw.Spelling())
 		return c.typ(x.X)
 	default:
 		return c.invalid()
 	}
 
-	// A.3.2 ⊢ "qualifiers do not stack: mut var T, mut mut T, and
-	// shared unique T are compile errors." The parser recurses unguarded
-	// (A.14 lists the stacked form as parsing), so the check is here.
+	// §3.2 ⊢ qualifiers do not stack. The parser recurses unguarded so the
+	// stacked form parses and is diagnosed as itself.
 	if inner, ok := stripParens(x.X).(*ast.OwnershipType); ok {
 		c.errorExpr(x, diag.StackedOwnership,
-			x.Kw.String()+" "+inner.Kw.String())
+			x.Kw.Spelling()+" "+inner.Kw.Spelling())
 	}
 	return types.NewOwnership(kind, c.typ(x.X))
 }
 
+// tupleType resolves a TupleType. A named element arrives as a KeyValueExpr,
+// since TupleElem is `[ identifier ":" ] Type`.
+//
+// grammar.md ⊢ a tuple has at least one element and there is no unit type, so
+// an empty one is not a TupleType at all — the parser already reported it, and
+// there is nothing here to build.
 func (c *Checker) tupleType(x *ast.TupleExpr) types.Type {
-	// A.3.1 ⊢ `()` is the unit type: zero bytes, one value.
 	if len(x.Elems) == 0 {
-		return types.Unit
+		return c.invalid()
 	}
 	vars := make([]*types.Var, 0, len(x.Elems))
 	for _, e := range x.Elems {
-		// A.3.1's TupleElement is `Type | Identifier : Type`, so a named
-		// element arrives as a KeyValueExpr.
 		if kv, ok := e.(*ast.KeyValueExpr); ok {
 			name := ""
 			if id, ok := kv.Key.(*ast.Ident); ok {
@@ -288,10 +324,14 @@ func (c *Checker) tupleType(x *ast.TupleExpr) types.Type {
 }
 
 func (c *Checker) tensorType(x *ast.TensorType) types.Type {
+	saved := c.inTensorElem
+	c.inTensorElem = true
 	elem := c.typ(x.Elem)
+	c.inTensorElem = saved
+
 	shape := make([]int64, 0, len(x.Shape))
 	for _, d := range x.Shape {
-		n, ok := c.arrayLen(d)
+		n, ok := c.constInt(d)
 		if !ok {
 			return c.invalid()
 		}
@@ -300,60 +340,25 @@ func (c *Checker) tensorType(x *ast.TensorType) types.Type {
 	return types.NewTensor(elem, shape)
 }
 
-// arrayLen evaluates an ArrayLength (A.3.1) or a tensor shape entry (A.3.5).
-//
-// A.3.1 ⊢ "ArrayLength must be a compile-time constant." Only a literal and a
-// constant identifier are handled here; a constant *expression* needs the full
-// evaluator, which belongs to typecheck. Anything else is diagnosed rather than
-// silently accepted, so widening this later cannot change a passing program.
-func (c *Checker) arrayLen(e ast.Expr) (int64, bool) {
-	switch x := stripParens(e).(type) {
-	case *ast.BasicLit:
-		if x.Kind != token.INT {
-			break
-		}
-		v, ok := parseIntLit(x.Value)
-		if !ok {
-			break
-		}
-		if v < 0 {
-			c.errorExpr(e, diag.ArrayLenNegative)
-			return 0, false
-		}
-		return v, true
-
-	case *ast.Ident:
-		obj := c.lookup(x)
-		if obj == nil {
-			return 0, false
-		}
-		cn, ok := obj.(*types.Const)
-		if !ok {
-			break
-		}
-		if n, ok := types.Int64Val(cn.Val()); ok {
-			if n < 0 {
-				c.errorExpr(e, diag.ArrayLenNegative)
-				return 0, false
-			}
-			return n, true
-		}
+func (c *Checker) vectorType(x *ast.VectorType) types.Type {
+	elem := c.typ(x.Elem)
+	n, ok := c.constInt(x.Len)
+	if !ok {
+		return c.invalid()
 	}
-	c.errorExpr(e, diag.ArrayLenNotConst)
-	return 0, false
+	return types.NewVector(elem, n)
 }
 
 // ------------------------------------------------------------- constraints
 
-// constraintExpr converts a ConstraintExpression (A.7.3) to a *Constraint.
+// constraintExpr converts a constraint element to a *Constraint.
 //
-// It is the second entry point into this file. A single identifier here is the
-// case A.7.2 calls out: it "parses as both a TypeSet of one term and a
-// ConstraintName; it is resolved by what the name denotes." That resolution is
-// a scope lookup, and it happens below.
+// A single identifier here is the fork grammar.md calls out: it parses as both a
+// one-term TypeSet and a constraint name, and is resolved by what the name
+// denotes. That resolution is a scope lookup, and it happens below.
 func (c *Checker) constraintExpr(e ast.Expr) *types.Constraint {
 	if e == nil {
-		// A.7.1 ⊢ "a bare name is constraint `any`: [T] means [T: any]."
+		// A bare TypeParamName is constrained by `any`.
 		return types.Any
 	}
 
@@ -365,26 +370,36 @@ func (c *Checker) constraintExpr(e ast.Expr) *types.Constraint {
 		switch t := stripParens(x).(type) {
 		case *ast.BinaryExpr:
 			if t.Op == token.OR {
-				// A.7.3 ⊢ `|` is union: the type set is every listed type.
+				// `|` within one element is a union: the set is every listed
+				// type.
 				walk(t.X)
 				walk(t.Y)
 				return
 			}
+
 		case *ast.UnaryExpr:
 			if t.Op == token.TILDE {
-				// A.7.3 ⊢ `~T` admits T and every type whose underlying type
-				// is T, so an alias to float32 still satisfies ~float32.
+				// `~T` admits every type whose underlying type is T; a bare T
+				// admits only T exactly.
 				terms = append(terms, types.Term{Tilde: true, Type: c.typ(t.X)})
 				return
 			}
+
 		case *ast.Ident:
-			// The A.7.2 fork. A constraint name embeds its set; anything else
-			// is a one-term type set.
-			if obj := c.lookup(t); obj != nil {
-				if tn, ok := obj.(*types.TypeName); ok && tn.IsConstraint() {
-					embeds = append(embeds, tn.Constraint())
-					return
-				}
+			obj := c.lookup(t)
+			if obj == nil {
+				return
+			}
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				c.errorExpr(t, diag.NotAConstraint, t.Name)
+				return
+			}
+			if tn.IsConstraint() {
+				// A bare constraint name embeds that constraint's set.
+				c.objDecl(tn)
+				embeds = append(embeds, tn.Constraint())
+				return
 			}
 			terms = append(terms, types.Term{Type: c.typeFromName(t, t)})
 			return
@@ -422,50 +437,14 @@ func exprString(e ast.Expr) string {
 		return exprString(x.X) + "." + x.Sel.Name
 	case *ast.IndexExpr:
 		return exprString(x.X) + "[...]"
+	case *ast.TupleIndexExpr:
+		return exprString(x.X) + "." + x.Text
+	case *ast.CallExpr:
+		return exprString(x.Fun) + "(...)"
 	case *ast.ParenExpr:
 		return exprString(x.X)
+	case *ast.BasicLit:
+		return x.Value
 	}
 	return "expression"
-}
-
-// parseIntLit decodes an IntegerLiteral's source spelling (A.1.5.1), including
-// its base prefix and `_` separators. The scanner already validated the shape,
-// so this only has to read it.
-func parseIntLit(s string) (int64, bool) {
-	base := int64(10)
-	if len(s) > 2 && s[0] == '0' {
-		switch s[1] {
-		case 'b', 'B':
-			base, s = 2, s[2:]
-		case 'o', 'O':
-			base, s = 8, s[2:]
-		case 'x', 'X':
-			base, s = 16, s[2:]
-		}
-	}
-	var n int64
-	any := false
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if ch == '_' {
-			continue
-		}
-		var d int64
-		switch {
-		case '0' <= ch && ch <= '9':
-			d = int64(ch - '0')
-		case 'a' <= ch && ch <= 'f':
-			d = int64(ch-'a') + 10
-		case 'A' <= ch && ch <= 'F':
-			d = int64(ch-'A') + 10
-		default:
-			return 0, false
-		}
-		if d >= base {
-			return 0, false
-		}
-		n = n*base + d
-		any = true
-	}
-	return n, any
 }

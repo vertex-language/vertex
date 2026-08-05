@@ -1,143 +1,186 @@
+// decl.go
 package vir
 
 import (
+	"strings"
+
 	"github.com/vertex-language/vertex/lower/hir"
-	ir "github.com/vertex-language/vvm/ir/vir"
+	vir "github.com/vertex-language/vvm/ir/vir"
 )
 
-// decl.go emits everything above the function section: structs, consts,
-// globals, links, extern groups, imports.
-//
-// The only non-mechanical thing here is struct ordering. hir appends a
-// *Struct to its module *before* lowering the struct's fields, so that a
-// self-referential field reaches its own enclosing type without looping —
-// which means a struct-typed field's shape lands in the slice *after* the
-// struct that names it. vir has no forward references (§2.2), so the
-// declaration order has to be recomputed rather than preserved.
+// ------------------------------------------------------------------ structs
 
-func (l *lowerer) structs(m *ir.Module, hm *hir.Module) {
-	for _, s := range l.orderStructs(hm) {
-		fields := make([]ir.Field, 0, len(s.Fields))
+// structs emits the struct section in dependency order.
+//
+// hir appends a *Struct to its module *before* lowering the struct's
+// fields, so a self-referential field can reach its enclosing type without
+// looping. That means a struct-typed field's shape lands in the slice after
+// the struct naming it — exactly the order vir forbids (§2.2, no forward
+// references). orderStructs does the post-order walk that fixes it.
+func (ml *moduleLowerer) structs() {
+	for _, s := range ml.orderStructs() {
+		fields := make([]vir.Field, 0, len(s.Fields))
 		for _, f := range s.Fields {
-			fields = append(fields, ir.Field{Name: f.Name, Type: l.typ(hm, f.Type)})
+			fields = append(fields, vir.Field{Name: f.Name, Type: ml.typ(f.Type)})
 		}
-		m.DeclareStruct(s.Name, fields...)
+		// Deliberately not Exported(): hir declares synthesized headers
+		// (_Vstr, _Vvec, _Vfn, tuples) once per module, a struct produces no
+		// symbol, and duplicating a declaration is safe for layout. It is
+		// not obviously safe for byval/sret, which compare nominally per
+		// origin — the first cross-package []T passed by value wants a
+		// decision, and this is where it lands.
+		ml.out.DeclareStruct(s.Name, fields...)
 	}
 }
 
-// orderStructs returns hm's structs in dependency order, each after every
-// struct reachable from its fields by value. A pointer field erases the
-// dependency (vir's ptr is untyped), so a cycle here would mean a struct
-// of infinite size — which the analyzer already rejected. Reaching one
-// anyway is a compiler bug, reported as such.
-func (l *lowerer) orderStructs(hm *hir.Module) []*hir.Struct {
-	own := make(map[*hir.Struct]bool, len(hm.Structs))
-	for _, s := range hm.Structs {
-		own[s] = true
-	}
-	const (
-		open = 1
-		done = 2
-	)
-	state := make(map[*hir.Struct]int, len(hm.Structs))
-	out := make([]*hir.Struct, 0, len(hm.Structs))
+const (
+	unvisited = iota
+	visiting
+	visited
+)
+
+func (ml *moduleLowerer) orderStructs() []*hir.Struct {
+	state := make(map[*hir.Struct]int, len(ml.src.Structs))
+	out := make([]*hir.Struct, 0, len(ml.src.Structs))
+	var stack []*hir.Struct
 
 	var visit func(s *hir.Struct)
 	visit = func(s *hir.Struct) {
 		switch state[s] {
-		case done:
+		case visited:
 			return
-		case open:
-			l.errorf(0, "internal: struct %s participates in a by-value cycle, which has no layout", s.Name)
-			return
+		case visiting:
+			// A by-value cycle is a struct of infinite size, which
+			// semantics.md §3.4 already forbids — so this is a bug in the
+			// checker or in hir, never in the user's source.
+			ml.bug("struct cycle through by-value fields: " + cycleOf(stack, s))
 		}
-		state[s] = open
-		for _, f := range s.Fields {
-			for _, dep := range byValueStructs(f.Type) {
-				if own[dep] {
-					visit(dep)
-				}
-			}
+		state[s] = visiting
+		stack = append(stack, s)
+		for _, dep := range ml.structDeps(s) {
+			visit(dep)
 		}
-		state[s] = done
+		stack = stack[:len(stack)-1]
+		state[s] = visited
 		out = append(out, s)
 	}
-	for _, s := range hm.Structs {
+
+	for _, s := range ml.src.Structs {
 		visit(s)
 	}
 	return out
 }
 
-// byValueStructs lists the structs a type embeds without an intervening
-// pointer. An array of structs embeds its element; ptr embeds nothing.
-func byValueStructs(t hir.Type) []*hir.Struct {
-	switch x := t.(type) {
-	case hir.StructType:
-		return []*hir.Struct{x.Def}
-	case hir.ArrayType:
-		return byValueStructs(x.Elem)
+// structDeps collects the by-value struct types a struct's fields name. A
+// pointer field erases the edge — that is what makes a linked list finite —
+// and a cross-module field is an import reference rather than a local
+// ordering constraint.
+func (ml *moduleLowerer) structDeps(s *hir.Struct) []*hir.Struct {
+	var deps []*hir.Struct
+	var walk func(t *hir.Type)
+	walk = func(t *hir.Type) {
+		if t == nil {
+			return
+		}
+		switch t.Kind {
+		case hir.KStruct:
+			if t.Struct != nil && t.Struct.Module == ml.src && t.Struct != s {
+				deps = append(deps, t.Struct)
+			}
+		case hir.KArray:
+			walk(t.Elem)
+		}
 	}
-	return nil
+	for _, f := range s.Fields {
+		walk(f.Type)
+	}
+	return deps
 }
 
-func (l *lowerer) consts(m *ir.Module, hm *hir.Module) {
-	for _, c := range hm.Consts {
-		m.DeclareConstant(c.Name, l.typ(hm, c.Type), l.value(hm, c.Value))
+func cycleOf(stack []*hir.Struct, s *hir.Struct) string {
+	names := make([]string, 0, len(stack)+1)
+	start := 0
+	for i, x := range stack {
+		if x == s {
+			start = i
+			break
+		}
+	}
+	for _, x := range stack[start:] {
+		names = append(names, x.Name)
+	}
+	return strings.Join(append(names, s.Name), " -> ")
+}
+
+// ------------------------------------------------------- constants, globals
+
+func (ml *moduleLowerer) constants() {
+	for _, c := range ml.src.Consts {
+		d := ml.out.DeclareConstant(c.Name, ml.typ(c.Type), ml.operand(c.Value))
+		if c.Export {
+			d.Exported()
+		}
 	}
 }
 
-func (l *lowerer) globals(m *ir.Module, hm *hir.Module) {
-	for _, g := range hm.Globals {
-		vg := m.DeclareGlobal(g.Name, l.typ(hm, g.Type), l.init(hm, g.Init))
+func (ml *moduleLowerer) globals() {
+	for _, g := range ml.src.Globals {
+		d := ml.out.DeclareGlobal(g.Name, ml.typ(g.Type), ml.constInit(g.Init))
 		if g.Export {
-			vg.Exported()
+			d.Exported()
 		}
 		if g.TLS {
-			vg.ThreadLocal()
+			d.ThreadLocal()
 		}
 		if g.Align > 0 {
-			vg.Aligned(g.Align)
+			d.Aligned(g.Align)
 		}
 	}
 }
 
-// init maps hir's folded initializer forms onto vir's init grammar (§6.2).
-// Both are already narrow — hir did the folding precisely so this is a
-// rename.
-func (l *lowerer) init(hm *hir.Module, in hir.Init) ir.ConstInit {
-	switch x := in.(type) {
-	case nil:
-		return ir.InitZero{}
-	case hir.InitZero:
-		return ir.InitZero{}
-	case hir.InitConst:
-		return ir.InitLiteral{Value: l.value(hm, x.Value)}
-	case hir.InitBytes:
-		return ir.InitByteString{Data: x.Data}
-	case hir.InitAddr:
-		return ir.InitAddressOf{Name: x.Name}
-	case hir.InitAggregate:
-		elems := make([]ir.ConstInit, 0, len(x.Elems))
-		for _, e := range x.Elems {
-			elems = append(elems, l.init(hm, e))
-		}
-		return ir.InitAggregate{Elems: elems}
+// --------------------------------------------------------- links and externs
+
+// links emits the runtime dependency plus whatever a declare block asked
+// for. A module lowered from ordinary Vertex source carries no hir Links at
+// all, so everything past the first line came from user source — the
+// invariant is checkable by reading the emitted text.
+func (ml *moduleLowerer) links() {
+	ml.out.DeclareLink(vir.LinkStatic, runtimeLink)
+	for _, l := range ml.src.Links {
+		ml.out.DeclareLink(linkKind(ml, l.Kind), l.Name)
 	}
-	l.errorf(0, "internal: no vir init form for %T", in)
-	return ir.InitZero{}
 }
 
-// links emits the link declarations and their extern groups together,
-// since §7.2 requires every extern group's Dependency to match a Link.Name
-// byte-for-byte and hir already built them as a pair.
-func (l *lowerer) links(m *ir.Module, hm *hir.Module) {
-	for _, lk := range hm.Links {
-		m.DeclareLink(ir.LinkKind(lk.Kind), lk.Name)
+func linkKind(ml *moduleLowerer, k string) vir.LinkKind {
+	switch k {
+	case "static":
+		return vir.LinkStatic
+	case "shared":
+		return vir.LinkShared
+	case "framework":
+		return vir.LinkFramework
 	}
-	for _, eg := range hm.Externs {
-		g := m.DeclareExternGroup(eg.Dependency)
-		for _, f := range eg.Funcs {
-			ef := g.DeclareFunction(f.Name, l.params(hm, f.Params), l.typ(hm, f.Result))
+	ml.bug("link kind with no vir spelling: " + k)
+	return vir.LinkStatic
+}
+
+// externs emits one group per declare block.
+//
+// No group is emitted for vertexrt. hir reaches every runtime symbol as a
+// *qualified* call into a builtins module and records the corresponding
+// import (see funcBuilder.callBuiltin), so the runtime is an import
+// dependency at the IR level and a link dependency at the object level, and
+// the two are declared in the two different places that say so. See the
+// note at the bottom of func.go.
+func (ml *moduleLowerer) externs() {
+	for _, g := range ml.src.Externs {
+		og := ml.out.DeclareExternGroup(g.Dependency)
+		for _, f := range g.Functions {
+			var attrs []vir.FunctionAttribute
+			if f.NoReturn {
+				attrs = append(attrs, vir.AttributeNoReturn)
+			}
+			ef := og.DeclareFunction(f.Name, ml.params(f.Params), ml.typ(f.Result), attrs...)
 			if f.Variadic {
 				ef.SetVariadic()
 			}
@@ -145,36 +188,13 @@ func (l *lowerer) links(m *ir.Module, hm *hir.Module) {
 	}
 }
 
-// imports emits one line per cross-module dependency. hir stores module
-// *names*, which is the bare form §7.3 accepts, and every qualified call
-// operand downstream is spelled against the same name.
-func (l *lowerer) imports(m *ir.Module, hm *hir.Module) {
-	for _, name := range hm.Imports {
-		m.DeclareImport(name)
+func (ml *moduleLowerer) declareImports() {
+	// hir's list first, in its own first-reference order, so a build stays
+	// byte-reproducible; then anything translation discovered.
+	for _, p := range ml.src.Imports {
+		ml.needImport(p)
 	}
-}
-
-func (l *lowerer) params(hm *hir.Module, ps []*hir.Param) []ir.Param {
-	if len(ps) == 0 {
-		return nil
+	for _, p := range ml.imports {
+		ml.out.DeclareImport(p)
 	}
-	out := make([]ir.Param, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, l.param(hm, p))
-	}
-	return out
-}
-
-// param applies vir's aggregate conventions. Both byval and sret mean the
-// parameter's vir type is ptr — hir states this once in its package doc
-// and this is the one place that reads it off.
-func (l *lowerer) param(hm *hir.Module, p *hir.Param) ir.Param {
-	out := ir.Param{Name: p.Name, Type: l.typ(hm, p.Type)}
-	switch {
-	case p.SRet != nil:
-		out.SRet, out.Type = p.SRet.Name, ir.Ptr
-	case p.ByVal != nil:
-		out.ByVal, out.Type = p.ByVal.Name, ir.Ptr
-	}
-	return out
 }

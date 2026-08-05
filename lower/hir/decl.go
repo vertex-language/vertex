@@ -1,284 +1,227 @@
-// decl.go
 package hir
 
 import (
-	"fmt"
-	"os"
 	"github.com/vertex-language/vertex/ast"
+	"github.com/vertex-language/vertex/token"
 	"github.com/vertex-language/vertex/types"
 )
 
-// declarations lowers everything in a unit that is not a function body:
-// struct and enum shapes, compile-time constants, top-level variables, and
-// declare blocks.
+// collect is pass 1: everything whose shape is known without walking a body.
 //
-// Function *bodies* are deliberately not walked here. They are reached only
-// through monomorphization from a root, so a package's unreachable
-// functions never produce code and the dead-symbol-elimination question is
-// removed rather than answered.
-func (l *lowerer) declarations(u *Unit) {
-	mod := l.byUnit[u]
-	prev := l.cur
-	l.cur = &instance{unit: u, mod: mod}
-	defer func() { l.cur = prev }()
-
+// Function bodies are deliberately absent. A body is lowered only when
+// monomorphization reaches it, so a generic never instantiated emits
+// nothing and a package whose functions are all unreachable emits only its
+// types and globals.
+func (l *lowerer) collect(u *Unit) {
 	for _, f := range u.Files {
 		for _, d := range f.Decls {
-			switch d := d.(type) {
-			case *ast.RecordDecl, *ast.EnumDecl, *ast.TypeAliasDecl,
-				*ast.ConstraintDecl, *ast.FuncDecl:
-				// Shapes are minted on demand by typeLowerer as bodies
-				// reference them; a declaration nobody reaches produces
-				// nothing. Constraints and aliases produce nothing at all.
+			switch x := d.(type) {
+			case *ast.RecordDecl:
+				l.collectRecord(x)
+			case *ast.EnumDecl:
+				l.collectEnum(x)
 			case *ast.VarDecl:
-				l.globalDecl(u, mod, d)
+				l.collectTopLevelVar(x)
 			case *ast.DeclareDecl:
-				l.declareBlock(u, mod, d)
+				l.collectDeclare(x)
+			case *ast.TypeAliasDecl, *ast.ConstraintDecl:
+				// Neither has a lowering. A transparent alias mints no type
+				// at all, an abstract one is a ptr, and a constraint is not a
+				// value type — all already settled in types.
+			case *ast.FuncDecl:
+				// Deferred to the worklist.
 			}
 		}
 	}
 }
 
-// globalDecl lowers a top-level VariableDeclaration. A.2 already requires a
-// compile-time-evaluable initializer, and vir's global init form is
-// narrower still — literal, zero, addr ident, or an aggregate of those,
-// with no arithmetic and no const references. There is no
-// static-initialization-order problem to have because there is no
-// initialization-time code.
-func (l *lowerer) globalDecl(u *Unit, mod *Module, d *ast.VarDecl) {
+// collectRecord forces a generic-free record's shape into existence eagerly,
+// so a struct that is only ever named in a signature still gets declared.
+// A generic one has no shape until it is instantiated.
+func (l *lowerer) collectRecord(d *ast.RecordDecl) {
+	if d.TypeParams != nil {
+		return
+	}
+	obj := l.defOf(d.Name)
+	tn, ok := obj.(*types.TypeName)
+	if !ok || tn.Type() == nil {
+		return
+	}
+	l.typ(tn.Type(), l.mod)
+}
+
+func (l *lowerer) collectEnum(d *ast.EnumDecl) {
+	if d.TypeParams != nil {
+		return
+	}
+	tn, ok := l.defOf(d.Name).(*types.TypeName)
+	if !ok || tn.Type() == nil {
+		return
+	}
+	l.typ(tn.Type(), l.mod)
+}
+
+// collectTopLevelVar lowers a top-level binding.
+//
+// A `let` whose type is scalar becomes a vir const — no runtime storage. A
+// `var`, or a `let` of aggregate type, becomes a global. vir's global init
+// grammar is narrower than semantics.md §5.3's constant expressions, so the
+// folded types.Value is projected onto literal/zero/bytes/aggregate here and
+// anything that will not fit is a bug rather than a diagnostic: the analyzer
+// already required the initializer to be compile-time-evaluable.
+func (l *lowerer) collectTopLevelVar(d *ast.VarDecl) {
 	for i, b := range d.Bindings {
-		if b.Name.IsBlank() {
+		obj := l.defOf(b.Name)
+		if obj == nil || b.Name.IsBlank() {
 			continue
 		}
-		obj := u.Info.Defs[b.Name]
-		if obj == nil {
-			continue
-		}
-		ht := l.hirType(obj.Type())
+		t := l.typ(obj.Type(), l.mod)
+		name := l.qualify(obj.Name())
 
-		var init Init = InitZero{}
+		if c, ok := obj.(*types.Const); ok && !IsAggregate(t) {
+			l.mod.Consts = append(l.mod.Consts, &Const{
+				Name:   name,
+				Type:   t,
+				Value:  l.constValue(c.Val(), t),
+				Export: true,
+			})
+			continue
+		}
+
+		init := ConstInit(InitZero{})
 		if i < len(d.Values) {
-			if v, ok := l.constInit(u, d.Values[i], obj.Type()); ok {
-				init = v
-			} else {
-				l.todo(d.Values[i].Pos(), "top-level initializer is not reducible to a vir global init form")
-			}
+			init = l.constInit(obj, t)
 		}
-
-		// A.5.1: `let` is immutable and may be folded away entirely, so a
-		// scalar `let` becomes a vir const (no runtime storage) rather
-		// than a global.
-		if d.Kw == 0 /* LET */ && !IsAggregate(ht) {
-			if c, ok := init.(InitConst); ok {
-				mod.Consts = append(mod.Consts, &Const{
-					Name: mod.uniqueName(obj.Name()), Type: ht, Value: c.Value,
-				})
-				l.bindGlobal(obj, mod.Consts[len(mod.Consts)-1].Name, ht, true)
-				continue
-			}
-		}
-
-		g := &Global{Name: mod.uniqueName(obj.Name()), Type: ht, Init: init}
-		mod.Globals = append(mod.Globals, g)
-		l.bindGlobal(obj, g.Name, ht, false)
+		l.mod.Globals = append(l.mod.Globals, &Global{
+			Name:   name,
+			Type:   t,
+			Init:   init,
+			Export: true,
+			Align:  int(l.alignOf(t)),
+		})
 	}
 }
 
-// constInit folds an initializer expression down to vir's init grammar. It
-// is deliberately narrow: anything it cannot fold is reported rather than
-// smuggled into an initialization-time code path that does not exist.
-func (l *lowerer) constInit(u *Unit, x ast.Expr, want types.Type) (Init, bool) {
-	tv, ok := u.Info.Types[x]
-	if ok && tv.Value != nil {
-		if s, isStr := types.StringVal_(tv.Value); isStr {
-			return InitBytes{Data: []byte(s)}, true
-		}
-		if v, isInt := types.Int64Val(tv.Value); isInt {
-			return InitConst{Value: IntVal(l.hirType(want), v)}, true
-		}
-		if b, isBool := types.BoolVal_(tv.Value); isBool {
-			return InitConst{Value: BoolVal(b)}, true
-		}
+// constInit projects a folded constant onto vir's global-init grammar.
+func (l *lowerer) constInit(obj types.Object, t *Type) ConstInit {
+	c, ok := obj.(*types.Const)
+	if !ok {
+		// A top-level `var` still has a constant initializer, but types.Var
+		// does not carry the folded value — the checker discarded it after
+		// the representability check.
+		//
+		// todo: analyzer should record a top-level var's folded value in
+		// Info (a new table, or a *types.Const-shaped side entry), so this
+		// stops being a zero.
+		return InitZero{}
 	}
-	switch x := x.(type) {
-	case *ast.ParenExpr:
-		return l.constInit(u, x.X, want)
-	case *ast.ArrayLit:
-		var elems []Init
-		et := l.elem(want)
-		for _, e := range x.Elems {
-			ei, ok := l.constInit(u, e, et)
-			if !ok {
-				return nil, false
-			}
-			elems = append(elems, ei)
-		}
-		return InitAggregate{Elems: elems}, true
-	case *ast.CompositeLit:
-		var elems []Init
-		for _, e := range x.Elems {
-			kv, ok := e.(*ast.KeyValueExpr)
-			if !ok {
-				return nil, false
-			}
-			ei, ok := l.constInit(u, kv.Value, u.Info.TypeOf(kv.Value))
-			if !ok {
-				return nil, false
-			}
-			elems = append(elems, ei)
-		}
-		return InitAggregate{Elems: elems}, true
+	v := c.Val()
+	if s, ok := types.StringVal(v); ok {
+		// A string global is its bytes; the {ptr,len} header is built at each
+		// use, since the header is a value and the bytes are storage.
+		return InitBytes{Data: []byte(s)}
 	}
-	return nil, false
+	return InitScalar{Value: l.constValue(v, t)}
 }
 
-// declareBlock lowers A.8's linkage boundary. This is the single exception
-// to invariant 3 — and A.8.1 already requires such a file to carry a
-// BuildClause, so the grammar fenced it before hir had to.
-func (l *lowerer) declareBlock(u *Unit, mod *Module, d *ast.DeclareDecl) {
-	kind := LinkShared
+func (l *lowerer) constValue(v types.Value, t *Type) Value {
 	switch {
-	case d.Kind == "framework":
-		kind = LinkFramework
-	case hasTag(d.Variant, "static"):
-		kind = LinkStatic
+	case v == nil:
+		return Int(0, t)
+	case IsFloat(t):
+		f, _ := types.FloatVal(v)
+		return Float(f, t)
+	default:
+		n, _ := types.Int64Val(v)
+		return Int(n, t)
 	}
-	lib := unquote(d.Path.Value)
-	mod.Links = append(mod.Links, Link{Kind: kind, Name: lib})
-
-	g := &ExternGroup{Dependency: lib}
-	mod.Externs = append(mod.Externs, g)
-	l.foreignMembers(u, mod, g, d.Members)
 }
 
-func (l *lowerer) foreignMembers(u *Unit, mod *Module, g *ExternGroup, members []ast.ForeignMember) {
-	for _, mem := range members {
-		switch mem := mem.(type) {
+// ------------------------------------------------------------ declare blocks
+
+// collectDeclare lowers a declare block into a link line and an extern
+// group. This is the one path by which user source touches the linker, and
+// grammar.md already fenced it: a file carrying a declare block must carry a
+// BuildClause, which is exactly the information needed to emit a triple.
+func (l *lowerer) collectDeclare(d *ast.DeclareDecl) {
+	kind := "shared"
+	if d.Kind == token.CtxFramework {
+		kind = "framework"
+	}
+	lib, ok := stringLit(d.Path)
+	if !ok {
+		l.bugAt(d.Pos(), "declare block with an undecodable path")
+	}
+	l.mod.Links = append(l.mod.Links, &Link{Kind: kind, Name: lib})
+	g := &ExternGroup{Dependency: lib}
+	l.mod.Externs = append(l.mod.Externs, g)
+
+	for _, m := range d.Members {
+		switch x := m.(type) {
 		case *ast.ForeignFunc:
-			if mem.Name == nil {
-				// An unnamed initializer resolves through bare Type(...)
-				// construction; it still needs a real entry point name,
-				// which the analyzer recorded on the object.
-				l.todo(mem.Pos(), "unnamed foreign initializer needs a symbol name from the checked object")
+			if x.Name == nil {
+				// The unnamed initializer form. It has no package-scope name
+				// and is reached only through its enclosing class.
 				continue
 			}
-			obj := u.Info.Defs[mem.Name]
+			obj, _ := l.useOrDefOf(x.Name).(*types.Func)
 			if obj == nil {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "BIND %s: obj=%p\n", mem.Name.Name, obj)
-			sig, _ := obj.Type().(*types.Signature)
-			ef := &ExternFunc{Name: mem.Name.Name, Result: l.result(sig)}
-			for _, p := range paramsOf(sig) {
-				ef.Params = append(ef.Params, l.foreignParam(p.Name, p.Type))
-			}
-			ef.Variadic = sig != nil && sig.Variadic()
-			g.Funcs = append(g.Funcs, ef)
-			mod.names[ef.Name] = true
-			// Record the checked object -> ExternFunc mapping so a call
-			// naming this identifier (expr.go's callExpr) resolves here
-			// directly instead of falling through to the monomorphization
-			// worklist, which has no notion of a foreign body — see
-			// lower.go's externs field doc for what that misrouting used
-			// to produce.
-			l.bindExtern(obj, ef)
+			g.Functions = append(g.Functions, l.externFunc(obj.Name(), obj.Signature()))
 		case *ast.ForeignClass:
-			l.foreignMembers(u, mod, g, mem.Members)
-		case *ast.ForeignField:
-			// A.8.3 bans these and the analyzer already reported it.
+			// todo: foreign class members are methods on an opaque handle,
+			// and the flat-C case is a direct call with `this` first.
+			// Objective-C (declare framework, darwin) needs the selector
+			// cache of lowering.md §20.4, and C++/COM need fnsig-typed
+			// indirect calls, which nothing upstream produces yet.
+			l.todoAt(x.Pos(), "foreign class members")
 		}
 	}
 }
 
-// param applies vir's aggregate conventions: an aggregate parameter is
-// passed byval, which means its vir type is ptr and the callee may not
-// mutate the caller's object.
-func (l *lowerer) param(name string, t types.Type) *Param {
-	ht := l.hirType(t)
-	p := &Param{Name: sanitize(name), Type: ht}
-	if st, ok := ht.(StructType); ok {
-		p.ByVal = st.Def
-	}
-	return p
-}
-
-// foreignParam builds one declare-block parameter's ABI shape (A.8.3).
-//
-// It differs from param in exactly one case. A.8.3 ⊢ "a declare block
-// describes call shape only, never foreign-side layout" — hir's own
-// {ptr,len} vx_string header is a Vertex-internal convention with nothing
-// on the C side that recognizes it, so treating a `string` parameter like
-// any other struct and passing it `byval[vx_string]` asserts an ABI shape
-// the real callee never declared (Vertex IR §5.4 item 8: a mismatched-
-// signature call is undefined behavior — not a diagnostic the verifier is
-// obligated to catch).
-//
-//
-// A.1.5.2 already names the fix rather than leaving it to be invented:
-// "a string carries no NUL terminator; one is manufactured only at a
-// declare boundary." So a `string` parameter here lowers to a bare `ptr`
-// instead, and CString records that every call site must marshal a
-// NUL-terminated buffer onto it — see expr.go's cStringArg. Every other
-// type is unaffected and goes through param unchanged: this is not a
-// general "aggregates cross a boundary by pointer" rule, only the one
-// conversion the spec itself anticipates.
-func (l *lowerer) foreignParam(name string, t types.Type) *Param {
-	if l.classify(t) == kString {
-		return &Param{Name: sanitize(name), Type: Ptr, CString: true}
-	}
-	return l.param(name, t)
-}
-
-func (l *lowerer) result(sig *types.Signature) Type {
+func (l *lowerer) externFunc(name string, sig *types.Signature) *ExternFunc {
 	if sig == nil {
-		return Void
+		return &ExternFunc{Name: name, Result: Void}
 	}
-	res := sig.Results()
-	if res == nil || res.Len() == 0 {
-		return Void
+	f := &ExternFunc{Name: name, Variadic: sig.Variadic()}
+	for i := 0; i < sig.Params().Len(); i++ {
+		p := sig.Params().At(i)
+		t := l.typ(p.Type(), l.mod)
+		if IsAggregate(t) {
+			// A foreign boundary takes a pointer, never a Vertex aggregate
+			// by value: the foreign side has its own layout expectations and
+			// a declare block describes call shape only.
+			t = Ptr
+		}
+		f.Params = append(f.Params, &Param{Name: p.Name(), Type: t})
 	}
-	if res.Len() == 1 {
-		return l.hirType(res.At(0).Type())
+	if sig.Results().Len() == 1 {
+		f.Result = l.typ(sig.Results().At(0).Type(), l.mod)
+	} else {
+		f.Result = Void
 	}
-	// A multi-value return is a tuple; the tuple *is* the type, and an
-	// aggregate result travels through sret.
-	return l.hirType(res)
+	return f
 }
 
-type paramInfo struct {
-	Name string
-	Type types.Type
-	Mut  bool
-}
+// ------------------------------------------------------------------ helpers
 
-func paramsOf(sig *types.Signature) []paramInfo {
-	if sig == nil {
+func (l *lowerer) defOf(id *ast.Ident) types.Object {
+	if l.info == nil {
 		return nil
 	}
-	ps := sig.Params()
-	out := make([]paramInfo, 0, ps.Len())
-	for i := 0; i < ps.Len(); i++ {
-		v := ps.At(i)
-		out = append(out, paramInfo{Name: v.Name(), Type: v.Type(), Mut: v.Mode() == types.ModeMut})
-	}
-	return out
+	return l.info.Defs[id]
 }
 
-func hasTag(v *ast.VariantTag, want string) bool {
-	if v == nil {
-		return false
-	}
-	for _, t := range v.Tags {
-		if unquote(t.Value) == want {
-			return true
-		}
-	}
-	return false
+func (l *lowerer) useOrDefOf(id *ast.Ident) types.Object {
+	return l.info.ObjectOf(id)
 }
 
-func unquote(s string) string {
-	if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
-		return s[1 : len(s)-1]
+func stringLit(b *ast.BasicLit) (string, bool) {
+	if b == nil || len(b.Value) < 2 {
+		return "", false
 	}
-	return s
+	// The scanner kept the raw spelling; a declare path admits no escape
+	// worth decoding, so the quotes come off and nothing else happens.
+	return b.Value[1 : len(b.Value)-1], true
 }

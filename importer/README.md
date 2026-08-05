@@ -1,153 +1,89 @@
 # importer
 
+```go
+import "github.com/vertex-language/vertex/importer"
 ```
-github.com/vertex-language/vertex/importer
-```
 
-`importer` resolves a Vertex import graph into checked packages. It is the seam `ast.NewPackage`'s doc comment names: resolution belongs here rather than to the parser, which is why `parser.ParseDir` handles one directory and `importer` handles the graph.
+`importer` resolves a Vertex import graph into checked packages. It is the seam `ast.NewPackage` names — that constructor is "a validated container and nothing more: no I/O, no import resolution, no scopes. Resolution belongs to the loader, which is why this takes no importer." `parser.ParseDir` handles one directory; `importer` handles the graph.
 
-It depends on `analyzer`, `ast`, `diag`, `parser`, `token`, and `types`, and calls all of them in that order for each package: parse, resolve imports, check. Nothing in the toolchain depends back on `importer` — like `analyzer`, it is a terminal stage, but for a whole graph rather than one directory.
+It depends on `analyzer`, `ast`, `diag`, `parser`, `token`, and `types`, and calls them in that order per package: parse, resolve imports, check. Nothing depends back on it.
 
-The ordering constraint is A.2.3: an imported package's `PackageClause` supplies the qualifier its symbols are reached under, so a file's names cannot be resolved until every directory it imports has had its package clause read. That is what makes loading a post-order walk rather than a single pass, and what `parser.PackageClauseOnly` exists to support cheaply.
+## Design philosophy
+
+The ordering constraint is §1.3: the qualifier under which an imported package's symbols are reached comes from that package's own package clause, and the path is a locator rather than a name. A file's names cannot resolve until every directory it imports has had its package line read — which is what makes loading a **post-order walk** rather than a single pass, and what `parser.PackageClauseOnly` exists to support cheaply.
+
+**Two failure kinds, deliberately separate.** A `return`ed `error` is fatal to the load: an unresolvable path, or an import cycle. Neither has a file to point at as the fix, and Vertex has no forward-declaration form to break a cycle with. Everything else is a `*diag.Diagnostic` on some package's `Errors`, and the load continues — most of what this toolchain rejects is a form that parses and is diagnosed, not one that aborts anything.
+
+**Partial results always.** The `*Result` is non-nil on every path including a fatal one, and holds whatever finished. `Load`'s `defer` populates `Order` and `Diagnostics` on exit rather than only on success, so an editor gets the graph it managed to build.
+
+**Citation convention.** A bare `§` cites semantics.md; CamelCase names are grammar.md productions, matching `types` and `analyzer`. Where neither document fixes something — how a path locates a directory, whether a relative import is even spelled — the comment says so.
+
+## Package layout
+
+| File | Contents |
+|---|---|
+| `importer.go` | Package doc, `Config`, `Package`, `Result`, `Load` |
+| `loader.go` | `loader` and the walk (`load`/`parse`/`loadImports`/`check`), `pkgImporter`, `CycleError` |
+| `resolver.go` | `Resolver`, `ResolverFunc`, `DirResolver`, `MapResolver`, `NotFoundError` |
+| `graph.go` | The query surface over a finished load: `Sorted`, `Lookup`, `Deps`, `Importers`, `Entry` |
 
 ## Config and Load
 
-### `Config`
-
 ```go
 type Config struct {
-    Fset     *token.FileSet
-    Tag      token.BuildTag
-    Resolver Resolver
-    Reporter diag.Reporter
-    Mode     parser.Mode
+	Fset     *token.FileSet
+	Tag      token.BuildTag
+	Resolver Resolver      // nil → DirResolver rooted at "."
+	Reporter diag.Reporter // nil → collected onto Result.Diagnostics
+	Mode     parser.Mode
 }
+
+func Load(conf *Config, paths ...string) (*Result, error)
 ```
 
-`Fset` is one `*token.FileSet` shared by the whole load, so a diagnostic can span two files in two different packages. `Tag` is threaded to both the parser and each package's `analyzer.Config`, since A.2.2's build tag decides what parses as well as what links. `Resolver` defaults to a `DirResolver` rooted at the current directory when nil. `Reporter` may be nil, in which case diagnostics are collected onto the returned `*Result` instead of streamed.
+`Fset` is one `*token.FileSet` for the whole load, so a diagnostic can span two files in two packages. `Tag` is threaded to both the parser and each `analyzer.Config`, since the build tag decides what parses as well as what links.
 
-### `Load(conf *Config, paths ...string) (*Result, error)`
-
-Resolves and checks the packages named by `paths`, plus everything they import transitively. Each root is loaded in turn via the internal `loader`, whose `packages` and `state` maps persist across roots, so a package imported by two different roots is loaded once.
-
-Failure during a given root's load returns immediately with the partial `*Result` still populated — `Result.Packages` and `Result.Order` hold whatever finished before the error, which is what a caller wanting partial results (an editor) reads.
+The internal `loader`'s `packages` and `state` maps persist across roots, so a package imported by two roots is loaded once.
 
 ## `Package` and `Result`
 
-### `Package`
+`Package.Name` comes from the package clause, never from `Path` — §1.3 makes the two independent, and the name is the qualifier importers use. `Imports` maps each declared path to its loaded package; with no aliasing, dot-import, or blank-import form, the mapping is the whole story. `Errors` holds this package's diagnostics from both the parse and the check.
 
-```go
-type Package struct {
-    Path    string
-    Dir     string
-    Name    string
-    Files   []*ast.File
+`Result.Order` is topological and is what a lowering pass follows. `Sorted()` is what a caller wanting output stable against unrelated edits uses instead. `Diagnostics` is nil when a `Reporter` was supplied; `HasErrors` reads the per-package lists, which are populated either way.
 
-    Types   *types.Package
-    Info    *types.Info
+## The walk
 
-    Imports map[string]*Package
-    Errors  []*diag.Diagnostic
-}
-```
+`load` is keyed by `loadState`:
 
-One loaded package: its syntax, its checked types, and its resolved dependencies. `Name` comes from the `PackageClause` (A.2.1), not from `Path` — a directory's import path and the name its own files declare are independent per A.2.3. `Imports` maps each import path this package declares to the loaded `*Package` it resolved to; per A.2.3 there is no aliasing, dot-import, or blank-import form, so the map is the whole story.
+| State | Behaviour |
+|---|---|
+| `loaded` | return the cached `*Package` |
+| `loading` | an import cycle → `*CycleError`, fatal |
+| `failed` | a plain error; the original failure was already returned to whoever reached it first |
+| `unstarted` | resolve → `parse` → `loadImports` → `check`, in that fixed order |
 
-`Errors` holds this package's own diagnostics regardless of whether the load ultimately succeeds — a package with errors is still returned, since A.0.5 makes a rejected form part of the grammar rather than something that aborts a load. `String()` returns `Path`.
+Imports are recursed into *before* the package is checked, because `analyzer`'s `collectImports` asks its `Importer` for a complete `*types.Package`, not a promise of one.
 
-### `Result`
+`parse` delegates to `parser.ParseDir`, which already runs the two passes — every file's package and build clauses read against a throwaway `FileSet` first, so the tag filter runs before any file is fully parsed and a mistagged file's exclusion stays whole. A nil `*ast.Package` is fatal (no source in this build); a non-nil one alongside an error is a syntax error already reported, and the check proceeds over the `Bad*` recovery nodes.
 
-```go
-type Result struct {
-    Roots       []*Package
-    Packages    map[string]*Package
-    Order       []*Package
-    Diagnostics *diag.List
-}
-```
+`check` allocates `pkg.Info`, runs the checker, and then calls `MarkComplete` **unconditionally** — deliberately overriding `analyzer.Files`, which marks complete only on a clean check. That default is right for a caller holding one package; a loader holding a graph wants the opposite, since refusing to hand a partial scope to a dependent turns one bad file into a cascade of undeclared-name errors across everything downstream.
 
-`Roots` are the packages named in the `Load` call, in the order given. `Packages` holds every loaded package by import path, roots included. `Order` is topological — a package appears after everything it imports — which is both the order the analyzer ran in and the order `lower` should follow, since A.2.3 makes a package's qualifiers depend on its imports having already been read. `Diagnostics` is empty when `Config.Reporter` was non-nil, since diagnostics streamed there instead; otherwise it is sorted and deduplicated once the load finishes.
+`pkgImporter` scopes each package's `Importer` to exactly the dependencies it declared. A path some *other* package imports is refused: §1.3 gives no spelling for a name reached through a transitive dependency.
 
-### `(*Result) HasErrors() bool`
-
-True if any loaded package holds an error-severity diagnostic, checked across both `Order` and `Diagnostics` — the second check covers a `Reporter`-less load whose per-package `Errors` were populated but whose severities are only otherwise visible through the aggregated list.
-
-## The loader
-
-`loader` is unexported state for one `Load` call: `packages` and `state` (by path), the post-order accumulator `order`, the current root-to-here `stack` (for rendering a cycle), and `list`, the `*diag.List` collected into when `Config.Reporter` is nil.
-
-### `load(path string, from *Package) (*Package, error)`
-
-The recursive step, keyed by `loadState` (`unstarted` / `loading` / `loaded`):
-
-- **`loaded`** — returns the cached `*Package` immediately.
-- **`loading`** — an import cycle. This is fatal for the whole load rather than a diagnostic on some file: Vertex has no forward-declaration form and no way to break a cycle, so there is nothing to point at as the fix. Returned as `*CycleError`.
-- **`unstarted`** — resolves a directory via `Resolver`, marks the path `loading`, and proceeds through `parse` → `loadImports` → `check` in that fixed order, restoring `state[path] = loaded` via `defer` regardless of outcome.
-
-Imports are recursed into *before* the package itself is checked (`loadImports` runs before `check`): `collectImports` in `analyzer` asks its `Importer` for a complete `*types.Package`, not a promise of one, so every dependency must already be a finished `*Package` by the time this one's `analyzer.Checker` runs.
-
-### `parse(pkg *Package) error`
-
-Delegates to `parser.ParseDir`, which already implements A.2.2's two-pass shape — every file's package and build clauses are read into a throwaway `FileSet` first, so the build-tag filter runs before any file is fully parsed, keeping a mistagged file's exclusion whole rather than partial. Diagnostics are forwarded through a `diag.ReporterFunc` that both appends to `pkg.Errors` and calls `l.report`.
-
-### `loadImports(pkg *Package) error`
-
-Walks every `ImportDecl` in every file of `pkg`, recursing via `load` and populating `pkg.Imports`. A `seen` set by path means a path imported by two files of the same package, or twice in one file, recurses once. A cycle surfaced from a nested `load` call has its `Importer` field set here to `pkg.Path`, identifying which package's import list actually closed the cycle.
-
-### `check(pkg *Package)`
-
-Allocates `pkg.Info`, builds an `analyzer.Config` around a `pkgImporter` scoped to this one package, and runs `analyzer.NewChecker(...).Files(pkg.Files)`. The resulting `*types.Package` is stored on `pkg.Types` and, if non-nil, marked complete — per `types`'s own `Package.Complete` doc comment, a half-checked scope must never be handed to a dependent, since it would answer a lookup with a nil type. A package is handed onward as complete once its *own* check finishes, errors included, so that one bad file does not cascade into every package downstream of it.
-
-### `pkgImporter`
-
-Satisfies `analyzer.Importer` over exactly the dependencies `loadImports` already resolved for one package — deliberately not the whole graph. `Import(path)` fails for any path the package did not itself declare an import of, even if some other loaded package imports it: A.2.3 gives no spelling for a name reached through a transitive dependency, so `pkgImporter` refuses to let one leak in that way.
-
-## Resolvers (`resolver.go`)
-
-### `Resolver`
+## Resolvers
 
 ```go
 type Resolver interface {
-    Resolve(path, from string) (dir string, err error)
+	Resolve(path, from string) (dir string, err error)
 }
 ```
 
-Maps an import path to the directory holding that package's `.vs` files. It is an interface because A.2.3 says only that "the import path is a locator, not a name" — a build system, a module cache, and a test fixture all answer the locate question differently, and `importer` doesn't pick one. `from` is the importing package's directory, or `""` for a root; a resolver that supports relative imports uses it, one that doesn't ignores it. `ResolverFunc` adapts a plain function to the interface.
+An interface because the path is a locator and nothing says what it locates against. `from` is the importing package's directory, or `""` for a root.
 
-### `DirResolver`
+`DirResolver` searches roots in order, first hit with a `.vs` file wins. A `./` or `../` path resolves against `from` instead and fails without one; an absolute path is rejected outright, since no root could apply to it. No module resolution, no versions, no vendoring — the language describes none, and inventing one here would fix a choice the toolchain hasn't made. `hasSources` gates by extension only; whether a file is *in* the build is the tag's question, answered in `ParseDir`.
 
-Resolves a path against one or more root directories, in order, made absolute by `NewDirResolver`. A `./` or `../`-prefixed path resolves relative to the importing package's directory instead of against the roots, and fails if there is no importing package (`from == ""`) to resolve against. This is deliberately the simplest policy that works: no module resolution, no version selection, no vendor directory, since the annex describes none of those and inventing one here would fix a choice the toolchain hasn't made.
+`NotFoundError` distinguishes a directory that exists but holds no `.vs` file from one that doesn't exist, since those are different mistakes.
 
-`hasSources` gates a candidate directory by extension alone (`.vs`) — whether a given file is actually *in* the build is A.2.2's build-tag question, which `parser.ParseDir`'s own first pass answers, so a directory whose files are all tagged for another target resolves successfully but yields no package there.
+## Entry points
 
-### `MapResolver`
-
-`map[string]string`, resolving from a fixed table. Exists for a driver that has already computed a layout, and for tests that want no filesystem dependency at all.
-
-### `NotFoundError`
-
-Reports an unresolvable path, carrying every directory searched and, when a searched directory exists but holds no `.vs` file, a `Reason` distinguishing that from a directory that doesn't exist at all — the two are different mistakes and the message says which.
-
-## Errors (`importer.go`)
-
-### `CycleError`
-
-```go
-type CycleError struct {
-    Path     string
-    Importer string
-    Stack    []string
-}
-```
-
-Reports an import cycle as fatal rather than as a `diag.Diagnostic` on some file, since Vertex has no forward-declaration form and therefore no single file whose fix would break the cycle. `Stack` is the root-to-here path at the point the cycle was detected; `Importer` (set by `loadImports`) identifies which package's own import list closed it.
-
-## The query surface (`graph.go`)
-
-Everything in `graph.go` answers questions about an already-completed `Result` — nothing here parses or checks.
-
-- **`Sorted() []*Package`** — every loaded package by path, in lexical order. `Result.Order` is topological and therefore not stable against an unrelated edit; `Sorted` is what a caller wanting reproducible output over the whole set uses instead.
-- **`Lookup(path string) *Package`** — a loaded package by import path, or nil.
-- **`Deps(p *Package) []*Package`** — every package reachable from `p`, excluding `p`, in topological order: the set a link step needs and the set `lower` walks. Computed by a `seen`-guarded post-order walk over each package's `Imports`, sorted by path at each level for determinism.
-- **`Importers(path string) []*Package`** — the reverse edge: every loaded package that directly imports `path`. Nothing in a build needs this; tooling (e.g. "what breaks if I change this package") does.
-- **`Entry() *Package`** — the package holding the program's entry point, or nil, searching the roots rather than assuming a package literally named main since A.6.1 fixes what shape a main function has but not which package it lives in. A root whose `Types` is still nil (a failed check) is skipped rather than causing a panic.
+`Entry()` searches the whole graph for a package named `main` whose `main` satisfies `types.Func.IsEntry` (no parameters, void, no marker, no receiver). §1.4 requires exactly one; if the load holds more than one, `Entry` returns nil rather than picking, and the caller must say which.

@@ -11,6 +11,12 @@
 // test function's extent they land in, and only then builds and runs the
 // tests that were meant to compile.
 //
+// That second point is why this file calls load rather than Load: Load
+// renders diagnostics and turns any error among them into a failure, which
+// is right for a build and fatal for a suite whose whole point may be that
+// something didn't check. load collects instead, and hands back the
+// packages it managed to build along with every diagnostic on the *Loaded.
+//
 // A third thing shapes the suite-discovery half at the bottom of this
 // file: `loadDir` (load.go) treats a directory as one package only if it
 // holds .vs files directly, the same directory-granularity importer.Load
@@ -38,7 +44,7 @@ import (
 	"github.com/vertex-language/vertex/token"
 )
 
-// TestKind distinguishes the three shapes A.12.2 allows.
+// TestKind distinguishes the three shapes §7.4 allows.
 type TestKind int
 
 const (
@@ -92,9 +98,13 @@ func DiscoverTests(pkg *Package) []TestCase {
 }
 
 // classifyExpected reads the `-> Expected(...)` clause. It is a plain
-// CallExpr in the tree (A.12.2 gives it no node of its own), so this is a
+// CallExpr in the tree (ast gives it no node of its own), so this is a
 // shape check over an ordinary call: first argument names the type — or
 // the identifier `error` — and the optional second is the string literal.
+//
+// Both `Expected` and `error` are contextual keywords, recognized only at
+// the one production that names them, so they're compared against token's
+// Ctx* constants rather than against literal strings here.
 func classifyExpected(result ast.Expr, tc *TestCase) {
 	call, ok := result.(*ast.CallExpr)
 	if !ok {
@@ -102,7 +112,7 @@ func classifyExpected(result ast.Expr, tc *TestCase) {
 		return
 	}
 	fun, ok := call.Fun.(*ast.Ident)
-	if !ok || fun.Name != "Expected" || len(call.Args) == 0 {
+	if !ok || fun.Name != token.CtxExpected || len(call.Args) == 0 {
 		tc.Kind = TestRuns
 		return
 	}
@@ -120,10 +130,10 @@ func classifyExpected(result ast.Expr, tc *TestCase) {
 }
 
 // unquote decodes a string literal's source spelling. The scanner keeps
-// literals raw (decoding is the analyzer's job), and this runner needs the
+// literals raw (decoding is a later phase's job), and this runner needs the
 // value, so it does the small subset of decoding an Expected string can
 // contain. strconv.Unquote handles Go's escape set, which covers every
-// escape A.1.5.2 shares with it; anything it rejects is passed through
+// escape Vertex shares with it; anything it rejects is passed through
 // with only the quotes stripped rather than dropped.
 func unquote(raw string) string {
 	if s, err := strconv.Unquote(raw); err == nil {
@@ -170,42 +180,31 @@ func runPackageTests(opts *Options, filter string) ([]TestResult, error) {
 		return nil, err
 	}
 	// `build test` is the only tag that changes what is grammatical, so a
-	// test run loads under it rather than under the host's own tag.
-	t.Tag = token.TagTest
+	// test run loads under it rather than under the host's own tag —
+	// and forTag re-derives Sizes with it, since the packages are about to
+	// be checked under this tag and hir's layout model has to match.
+	t = t.forTag(token.TagTest)
 
-	lc := newLoadContext()
-	pkgs, loadErr := loadForTest(opts, lc, t)
-	if pkgs == nil && loadErr != nil {
-		return nil, loadErr
+	// load, not Load: a diagnostic is data here, not a verdict.
+	ld, err := load(opts, t.Tag)
+	if err != nil {
+		return nil, err
 	}
 
-	root := pkgs[len(pkgs)-1]
+	root := ld.Packages[len(ld.Packages)-1]
 	cases := DiscoverTests(root)
 	if len(cases) == 0 {
 		return nil, fmt.Errorf(
 			"%s declares no `test`-marked functions (a test file needs `build test`)", opts.Input)
 	}
 
-	return runCases(opts, t, pkgs, cases, lc, filter)
+	return runCases(opts, t, ld, cases, filter)
 }
-
-// loadForTest is Load, minus the "abort on any diagnostic" behavior: an
-// Expected(error) test *produces* diagnostics, and the runner has to look
-// at them before deciding whether the load failed.
-func loadForTest(opts *Options, lc *loadContext, t Target) ([]*Package, error) {
-	saved := *opts
-	saved.Stderr = discardWriter{} // diagnostics are classified, not printed
-	return Load(&saved, t.Tag)
-}
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // runCases evaluates each test. Error tests are settled from the
 // diagnostics already collected; value and run tests are lowered, built,
 // and executed one at a time.
-func runCases(opts *Options, t Target, pkgs []*Package, cases []TestCase, lc *loadContext, filter string) ([]TestResult, error) {
+func runCases(opts *Options, t Target, ld *Loaded, cases []TestCase, filter string) ([]TestResult, error) {
 	// Partition the collected diagnostics by which test function's extent
 	// they fall inside. A diagnostic outside every error test is a real
 	// compile failure and stops the run: nothing downstream would be
@@ -213,7 +212,7 @@ func runCases(opts *Options, t Target, pkgs []*Package, cases []TestCase, lc *lo
 	inside := map[string][]*diag.Diagnostic{}
 	var stray []*diag.Diagnostic
 
-	for _, d := range lc.list.Items() {
+	for _, d := range ld.Diagnostics() {
 		owner := ""
 		for _, c := range cases {
 			if c.Kind == TestError && d.Pos >= c.Pos && d.Pos < c.End {
@@ -231,8 +230,9 @@ func runCases(opts *Options, t Target, pkgs []*Package, cases []TestCase, lc *lo
 	}
 
 	if len(stray) > 0 {
+		r := ld.Renderer(false)
 		for _, d := range stray {
-			_ = lc.renderer(false).Render(opts.Stderr, d)
+			_ = r.Render(opts.Stderr, d)
 		}
 		return nil, fmt.Errorf(
 			"%d compile error(s) outside any Expected(error) test — fix these before the suite can run",
@@ -248,7 +248,7 @@ func runCases(opts *Options, t Target, pkgs []*Package, cases []TestCase, lc *lo
 		case TestError:
 			results = append(results, judgeErrorCase(c, inside[c.Name]))
 		default:
-			results = append(results, runValueCase(opts, t, pkgs, c))
+			results = append(results, runValueCase(opts, t, ld, c))
 		}
 	}
 	return results, nil
@@ -263,7 +263,8 @@ func judgeErrorCase(c TestCase, ds []*diag.Diagnostic) TestResult {
 	}
 	for _, d := range ds {
 		// Text() deliberately excludes position, severity, and code — it
-		// is exactly the normative string A.12.2 compares against.
+		// is exactly the normative string an Expected(error, "...") result
+		// compares against.
 		if d.Text() == c.Expected {
 			return TestResult{Case: c, Passed: true}
 		}
@@ -272,8 +273,8 @@ func judgeErrorCase(c TestCase, ds []*diag.Diagnostic) TestResult {
 		"expected the diagnostic %q, got %q", c.Expected, ds[0].Text())}
 }
 
-func runValueCase(opts *Options, t Target, pkgs []*Package, c TestCase) TestResult {
-	modules, root, err := Lower(opts, t, pkgs, LowerOptions{TestFunc: c.Name})
+func runValueCase(opts *Options, t Target, ld *Loaded, c TestCase) TestResult {
+	modules, root, err := Lower(opts, t, ld, LowerOptions{TestFunc: c.Name})
 	if err != nil {
 		return TestResult{Case: c, Reason: fmt.Sprintf("lowering failed: %v", err)}
 	}
@@ -334,7 +335,7 @@ func report(opts *Options, results []TestResult) (passed, failed int) {
 // own shape, so neither the CLI nor a caller has to say up front whether
 // it's pointing at one package or a tree of them:
 //
-//   - A file always goes through RunTests, matching Load's own two-path
+//   - A file always goes through RunTests, matching load's own two-path
 //     split (loadFile never treats a file as a directory).
 //   - A directory holding .vs files directly is one package (loadDir's own
 //     definition) and runs through RunTests unchanged.
@@ -367,7 +368,7 @@ func RunTestsAuto(opts *Options, filter string) (bool, error) {
 // all of them. It returns false if any package failed to run or any test
 // within any package failed.
 //
-// Each package is fully isolated: its own Load, its own per-test-function
+// Each package is fully isolated: its own load, its own per-test-function
 // Lower/build/run cycle (runPackageTests), so a compile error in one
 // package's tests cannot mask or block another's.
 func RunTestSuite(opts *Options, filter string) (bool, error) {

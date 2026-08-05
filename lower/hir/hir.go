@@ -1,298 +1,401 @@
-// hir.go
+// Package hir is where every decision is made.
+//
+// Given the checked package graph and its *types.Info, hir produces a
+// *Program: monomorphic, ownership-explicit, control-flow-flattened, with
+// every builtin call named. lower/vir is mechanical afterward by
+// construction — if it ever needs a type switch on "is this owning" or "was
+// this transferred", that logic belongs here.
+//
+// hir does not import vvm and never sees a target triple. Layout is the one
+// target-shaped fact it consumes, and it arrives as a *types.Sizes on
+// Config. It imports builtins for names.go's ABI constants and features.go's
+// FeatureSet only — never a module constructor, so what decides *which* call
+// to emit cannot see *how* the callee is built.
+//
+// Three representation rules run through everything below:
+//
+//  1. Aggregates are pointers. vir makes struct and array memory-only, so a
+//     Value whose Type is aggregate *is* a ptr at the vir level. Aggregate
+//     parameters carry ByVal, aggregate results carry SRet, aggregate
+//     assignment is a memcopy. vector and the lane predicate are the
+//     exceptions: register-class types passed by value.
+//  2. `let` is a value, `var` is a slot. semantics.md §6.1 already says a
+//     `let` may be a register, an SSA value, or folded away entirely.
+//     Making that literal sidesteps every Join-Convention definite-
+//     assignment subtlety around mutation across branches, and it is why
+//     only a `var` can reach a `mut` parameter. See forcesSlot.
+//  3. One instruction representation, two control-flow shapes. A Func
+//     carries structured Body until Flatten runs and flat Blocks afterward,
+//     but both hold the same *Instr values. Flatten moves instructions; it
+//     never rewrites them.
 package hir
 
 import (
 	"github.com/vertex-language/vertex/builtins"
 	"github.com/vertex-language/vertex/token"
-	"github.com/vertex-language/vertex/types"
 )
 
-// Program is the whole compilation: every module, in dependency order.
+// Program is one whole-program lowering. Monomorphization is seeded from
+// main (or the one test function under ModeTest) and walks the call graph,
+// so hir consumes the entire checked graph at once even though lower/vir
+// emits one module per Vertex package.
 type Program struct {
-	// Modules in topological order — a module appears after everything it
-	// imports, which is the order lower/vir must emit in and the order
-	// vvm's importer expects.
-	Modules []*Module
+	Modules []*Module // topological order; dependencies first
+	Root    *Module   // holds the entry shim
+	Entry   *Func     // the entry shim itself
 
-	// Entry is the synthesized program-entry wrapper (§5.2, tier 2): the
-	// thing that starts the reactor, drives user main to completion, tears
-	// down, and returns a status. Under ModeTest the same slot holds the
-	// wrapper around one test function. Never a user Func.
-	Entry *Func
-
-	// Features is what the program actually uses. The driver hands it to
-	// builtins.Modules, which resolves the closure. This is the answer to
-	// the overview's open question about where the feature set is
-	// computed: hir returns it alongside the Program rather than making
-	// the driver re-derive it by scanning emitted import lines.
+	// Features is this package's answer to "where is the feature set
+	// computed". Every emitted builtin call records its feature at the call
+	// site, so the set can never disagree with the calls actually emitted.
 	Features builtins.FeatureSet
 }
 
-// Lookup returns the module for an import path, or nil.
-func (p *Program) Lookup(path string) *Module {
-	for _, m := range p.Modules {
-		if m.Path == path {
-			return m
-		}
-	}
-	return nil
-}
-
-// Module is one vir module's worth of declarations.
+// Module is one Vertex package. Name becomes vir's `module`, Path its
+// `namespace` — semantics.md §1.3's "the path is a locator, the declared
+// name is the qualifier", carried through to the linker unchanged.
 type Module struct {
-	Path string // import path   -> vir `namespace`
-	Name string // PackageClause -> vir `module`
+	Name string
+	Path string
 
 	Structs []*Struct
 	Consts  []*Const
 	Globals []*Global
+	Links   []*Link
+	Externs []*ExternGroup
+	Imports []string // vir import paths, in first-reference order
 	Funcs   []*Func
 
-	// Imports holds module *names* (not paths): lower/vir emits one
-	// `import "<name>"` line each, and every cross-module call operand is
-	// spelled `<name>.<symbol>`.
-	Imports []string
-
-	// Links and Externs are non-empty only for a module lowered from a
-	// file carrying a declare block (A.8.1), which is the single exception
-	// to invariant 3. Interop is the only path by which user source
-	// touches the linker.
-	Links   []Link
-	Externs []*ExternGroup
-
-	names map[string]bool // vir enforces one flat namespace per module
-	seen  map[string]bool // Imports dedup
+	imports map[string]bool
+	structs map[string]*Struct // by hir name, for interning
 }
 
-func newModule(path, name string) *Module {
-	return &Module{Path: path, Name: name, names: map[string]bool{}, seen: map[string]bool{}}
+func newModule(name, path string) *Module {
+	return &Module{
+		Name:    name,
+		Path:    path,
+		imports: map[string]bool{},
+		structs: map[string]*Struct{},
+	}
 }
 
-// AddImport records a cross-module dependency by module name, once.
-func (m *Module) AddImport(name string) {
-	if name == "" || name == m.Name || m.seen[name] {
+// Import records a cross-module dependency. Idempotent, and order-stable so
+// a build is byte-reproducible.
+func (m *Module) Import(path string) {
+	if path == "" || m.imports[path] {
 		return
 	}
-	m.seen[name] = true
-	m.Imports = append(m.Imports, name)
+	m.imports[path] = true
+	m.Imports = append(m.Imports, path)
 }
 
-// uniqueName reserves a name in the module's flat namespace (§2.2), adding
-// a numeric suffix on collision. Identifiers are [A-Za-z_][A-Za-z0-9_]*.
-func (m *Module) uniqueName(base string) string {
-	base = sanitize(base)
-	if !m.names[base] {
-		m.names[base] = true
-		return base
-	}
-	for i := 1; ; i++ {
-		n := base + "_" + itoa(i)
-		if !m.names[n] {
-			m.names[n] = true
-			return n
-		}
-	}
-}
-
-func (m *Module) lookupFunc(name string) *Func {
-	for _, f := range m.Funcs {
-		if f.Name == name {
-			return f
-		}
-	}
-	return nil
-}
-
-// LinkKind mirrors A.8's linkage boundary as vir spells it (§7.2).
-type LinkKind string
-
-const (
-	LinkStatic    LinkKind = "static"
-	LinkShared    LinkKind = "shared"
-	LinkFramework LinkKind = "framework"
-)
-
-type Link struct {
-	Kind LinkKind
-	Name string
-}
-
-// ExternGroup attributes imported symbols to the dependency that provides
-// them. Dependency matches a Link.Name byte-for-byte.
-type ExternGroup struct {
-	Dependency string
-	Funcs      []*ExternFunc
-}
-
-type ExternFunc struct {
-	Name     string
-	Params   []*Param
-	Variadic bool
-	Result   Type
-}
-
-// Struct is a memory-only aggregate. It produces no symbol (§2.2: an
-// exported struct is a shape-visibility flag), so declaring the same
-// synthesized header in two modules is harmless — unlike a tier-2 function,
-// which needs exactly one owning module.
+// Struct is a lowered aggregate: a Vertex struct or class, a tuple, a
+// boundary tuple, a synthesized header (_Vstr, _Vslice, _Vvec), or an async
+// frame. Fields are in declaration order with no reordering — semantics.md
+// §7.2 makes order observable through destruction order, and interop
+// assumes it.
 type Struct struct {
 	Name   string
 	Module *Module
-	Fields []Field
-	Size   int64
-	Align  int64
+	Fields []StructField
+	Export bool
 
-	// Origin is the types.Type this shape was derived from, or nil for a
-	// synthesized header (a slice, a string, a tuple, a payload enum).
-	Origin types.Type
+	Size  int64
+	Align int64
 }
 
-func (s *Struct) Field(name string) (Field, bool) {
-	for _, f := range s.Fields {
-		if f.Name == name {
-			return f, true
-		}
-	}
-	return Field{}, false
-}
-
-type Field struct {
+type StructField struct {
 	Name   string
-	Type   Type
+	Type   *Type
 	Offset int64
 }
 
-// Const is a compile-time scalar. It yields a direct value and occupies no
-// runtime storage (§6.2).
-type Const struct {
-	Name  string
-	Type  Type
-	Value Value
+func (s *Struct) FieldIndex(name string) int {
+	for i, f := range s.Fields {
+		if f.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
-// Global is module-level storage. A.2 already requires a top-level
-// VariableDeclaration to have a compile-time-evaluable initializer, and
-// vir's init grammar is narrower still, so hir folds initializers down to
-// these forms and there is no initialization-time code to order.
+// Const is a compile-time scalar. Vertex's top-level `let` folds to one when
+// its type is scalar; an aggregate one becomes a Global instead, since vir
+// consts are scalars only.
+type Const struct {
+	Name   string
+	Type   *Type
+	Value  Value
+	Export bool
+}
+
+// Global is module-level storage: a top-level `var`, a string literal's
+// bytes, or a lazily-filled selector cache.
+//
+// vir's global init form is narrower than semantics.md §5.3's constant
+// expressions — literal, zero, addr, or an aggregate of those, with no
+// arithmetic and no const references — so decl.go folds initializers down to
+// exactly those forms. There is no static-initialization-order problem
+// because there is no initialization-time code.
 type Global struct {
 	Name   string
-	Type   Type
-	Init   Init
+	Type   *Type
+	Init   ConstInit
 	Export bool
 	TLS    bool
 	Align  int
 }
 
-type Init interface{ initNode() }
+type ConstInit interface{ constInit() }
 
-type InitZero struct{}
-type InitConst struct{ Value Value }
-type InitBytes struct{ Data []byte }
-type InitAggregate struct{ Elems []Init }
-
-// InitAddr is a relocated pointer to an earlier function or global. It is
-// the only way to name a function's address, since vir has no address-of
-// instruction — see funcAddr in expr.go.
-type InitAddr struct{ Name string }
-
-func (InitZero) initNode()      {}
-func (InitConst) initNode()     {}
-func (InitBytes) initNode()     {}
-func (InitAggregate) initNode() {}
-func (InitAddr) initNode()      {}
-
-// FuncKind records why a Func exists. Every kind but FuncUser is tier 2
-// (§5.2): type-dependent, target-agnostic, synthesized here.
-type FuncKind uint8
-
-const (
-	FuncUser FuncKind = iota
-	FuncCopy         // per-type deep copy
-	FuncDeinit       // per-type teardown
-	FuncDrop         // state-machine payload drop
-	FuncStateMachine // an async body's poll function
-	FuncEntryShim    // the program entry / test wrapper
+type (
+	InitZero      struct{}
+	InitScalar    struct{ Value Value }
+	InitBytes     struct{ Data []byte }
+	InitAddrOf    struct{ Name string }
+	InitAggregate struct{ Elems []ConstInit }
 )
 
+func (InitZero) constInit()      {}
+func (InitScalar) constInit()    {}
+func (InitBytes) constInit()     {}
+func (InitAddrOf) constInit()    {}
+func (InitAggregate) constInit() {}
+
+// Link and ExternGroup exist only for declare blocks. A module lowered from
+// ordinary Vertex source carries neither — the invariant is checkable by
+// reading the emitted text.
+type Link struct {
+	Kind string // "static" | "shared" | "framework"
+	Name string
+}
+
+type ExternGroup struct {
+	Dependency string
+	Functions  []*ExternFunc
+}
+
+type ExternFunc struct {
+	Name     string
+	Params   []*Param
+	Result   *Type
+	Variadic bool
+	NoReturn bool
+}
+
+// Func is one lowered function: a monomorphic instance, a method, a
+// synthesized _Vcopy/_Vdrop routine, an epilogue-expanded body, or the entry
+// shim.
 type Func struct {
 	Name   string
 	Module *Module
-
-	Params []*Param
-	Result Type
-
-	Export   bool
-	Entry    bool // vir's `entry` attribute; at most one per module
-	NoReturn bool
-
-	Kind   FuncKind
-	Origin types.Object // nil for synthesized
 	Pos    token.Pos
 
-	// Body is the structured form, valid until Flatten. Blocks is the flat
-	// form, valid after. Exactly one is non-nil in a well-formed Func.
-	Body   *Seq
-	Blocks []*Block
+	Params []*Param
+	Result *Type // nil for void; aggregates go through SRet instead
+	SRet   *Type // non-nil when the result is an aggregate
 
-	names map[string]int
+	Export   bool
+	Entry    bool
+	NoReturn bool
+	Variadic bool // foreign C variadics only; Vertex variadics are slices
+
+	// Body is the structured tree; Blocks is what Flatten produces from it.
+	// Exactly one is non-nil after lowering completes.
+	Body   *Seq
+	Blocks []*FlatBlock
+
+	// Allocas are hoisted to the entry block. vir allocas are per-execution
+	// and accumulate per loop iteration, so a slot written inside a loop is
+	// allocated once, before the loop, and reused — sound because a
+	// loop-body local's teardown runs on every back edge.
+	Allocas []*Instr
+
+	names int // counter for generated value names
 }
 
-// Param is one declared parameter. ByVal and SRet carry vir's aggregate
-// conventions; both imply the parameter's vir type is ptr.
 type Param struct {
 	Name  string
-	Type  Type
-	ByVal *Struct
-	SRet  *Struct
-
-	// CString marks a declare-block parameter that began as a Vertex
-	// `string` and was bridged to a bare `ptr` for its C-ABI boundary
-	// (A.1.5.2: "a string carries no NUL terminator; one is manufactured
-	// only at a declare boundary"). decl.go's foreignParam is the only
-	// place that sets it. hir's own call-site marshaling (expr.go's
-	// externCallExpr) does not need to read it back — it decides whether
-	// to marshal from each argument's own checked type, which also covers
-	// a string reaching the `...` tail, where no declared Param exists to
-	// consult. The flag is kept here anyway, as the declared signature's
-	// own record of which position was bridged this way.
-	CString bool
+	Type  *Type
+	ByVal *Struct // set when the parameter is an owning aggregate
+	SRet  *Struct // set on the synthetic first parameter of an sret function
 }
 
-func (f *Func) fresh(base string) string {
-	if f.names == nil {
-		f.names = map[string]int{}
+// fresh mints an unused value name. vir idents are [A-Za-z_][A-Za-z0-9_]*,
+// and the Join Convention keys on the name, so uniqueness within a function
+// is the whole requirement.
+func (f *Func) fresh(hint string) string {
+	f.names++
+	if hint == "" {
+		hint = "t"
 	}
-	base = sanitize(base)
-	n := f.names[base]
-	f.names[base] = n + 1
-	if n == 0 {
-		return base
-	}
-	return base + "_" + itoa(n)
+	return hint + itoa(f.names)
 }
 
-func sanitize(s string) string {
-	if s == "" {
-		return "_"
+// ---------------------------------------------------------------- statements
+
+// Seq is a run of structured statements. Stmt is closed: everything a Vertex
+// body can do reaches Flatten as one of these.
+type Seq struct{ List []Stmt }
+
+func (s *Seq) add(x Stmt) {
+	if x != nil {
+		s.List = append(s.List, x)
 	}
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
-			out = append(out, c)
-		case c >= '0' && c <= '9':
-			if len(out) == 0 {
-				out = append(out, '_')
-			}
-			out = append(out, c)
-		default:
-			out = append(out, '_')
-		}
-	}
-	return string(out)
 }
 
+type Stmt interface{ stmtNode() }
+
+type (
+	// If is the only conditional shape. `&&`/`||` are already branches by
+	// the time they get here — semantics.md §5.1 has no truthiness, so the
+	// operand is a real bool.
+	If struct {
+		Cond Value
+		Then *Seq
+		Else *Seq // may be nil
+	}
+
+	// Loop is unconditional; every Vertex loop shape (while, for over a
+	// range, an array, a map) is lowered to a Loop whose head tests and
+	// Breaks. There are no loop labels, so Break/Continue always name the
+	// innermost one.
+	Loop struct {
+		Body *Seq
+	}
+
+	// SwitchStmt dispatches on an integer or an enum tag. Cases are dense or
+	// sparse; jump-table-vs-compare-chain is cpu/lower's decision, not this
+	// package's, so both spell one vir switch.
+	SwitchStmt struct {
+		Value   Value
+		Cases   []SwitchCase
+		Default *Seq // never nil; an exhaustive enum switch gets Unreachable
+	}
+
+	Break    struct{}
+	Continue struct{}
+
+	// ReturnStmt carries the value for a thin result. An aggregate result
+	// was already stored through the SRet pointer, so Value is nil there.
+	ReturnStmt struct{ Value *Value }
+
+	TrapStmt        struct{}
+	UnreachableStmt struct{}
+)
+
+type SwitchCase struct {
+	Value int64
+	Body  *Seq
+}
+
+func (*Instr) stmtNode()           {}
+func (*If) stmtNode()              {}
+func (*Loop) stmtNode()            {}
+func (*SwitchStmt) stmtNode()      {}
+func (*Break) stmtNode()           {}
+func (*Continue) stmtNode()        {}
+func (*ReturnStmt) stmtNode()      {}
+func (*TrapStmt) stmtNode()        {}
+func (*UnreachableStmt) stmtNode() {}
+
+// --------------------------------------------------------------- instructions
+
+// Instr is one instruction. It is a Stmt too, which is what lets Flatten
+// move instructions between shapes without rewriting them.
+//
+// Type is the *result* type. lower/vir derives the vir suffix from it,
+// except for the comparison family, where the suffix names the operand type
+// and is read off Args[0].
+type Instr struct {
+	Result string
+	Op     Op
+	Type   *Type
+	Args   []Value
+	Align  int
+	Pos    token.Pos
+
+	// Callee is set for OpCall. Module is the owning module name for a
+	// cross-module call — a Vertex package or a builtins module — and "" for
+	// a call within this module. Sig names a fnsig for an indirect call and
+	// is not yet produced by anything.
+	Callee string
+	Module string
+	Sig    string
+}
+
+// Value is an operand.
+type Value struct {
+	Kind ValueKind
+	Name string  // VName, VGlobal, VFuncAddr
+	Int  int64   // VInt
+	Flt  float64 // VFloat
+	Type *Type
+}
+
+type ValueKind uint8
+
+const (
+	VNone ValueKind = iota
+	VName
+	VInt
+	VFloat
+	VNull
+	VGlobal
+	VFuncAddr // `addr f` — hir's only spelling for a function address
+	VType     // a type in operand position, for index.ptr
+)
+
+func Name(n string, t *Type) Value    { return Value{Kind: VName, Name: n, Type: t} }
+func Int(v int64, t *Type) Value      { return Value{Kind: VInt, Int: v, Type: t} }
+func Float(v float64, t *Type) Value  { return Value{Kind: VFloat, Flt: v, Type: t} }
+func Null() Value                     { return Value{Kind: VNull, Type: Ptr} }
+func GlobalRef(n string, t *Type) Value { return Value{Kind: VGlobal, Name: n, Type: t} }
+func FuncAddr(n string) Value         { return Value{Kind: VFuncAddr, Name: n, Type: Ptr} }
+func TypeVal(t *Type) Value           { return Value{Kind: VType, Type: t} }
+
+func (v Value) IsZero() bool { return v.Kind == VNone }
+
+// ---------------------------------------------------------- flat control flow
+
+// FlatBlock is what Flatten produces. The entry block is Blocks[0] and its
+// Label is "" — vir's entry block is implicit, unlabeled, and unbranchable-to.
+type FlatBlock struct {
+	Label string
+	Lines []*Instr
+	Term  Term
+}
+
+type Term interface{ termNode() }
+
+type (
+	Br   struct{ Label string }
+	BrIf struct {
+		Cond       Value
+		Then, Else string
+	}
+	SwitchTerm struct {
+		Value   Value
+		Default string
+		Cases   []SwitchTermCase
+	}
+	Ret         struct{ Value *Value }
+	TrapTerm    struct{}
+	UnreachTerm struct{}
+)
+
+type SwitchTermCase struct {
+	Value int64
+	Label string
+}
+
+func (Br) termNode()          {}
+func (BrIf) termNode()        {}
+func (SwitchTerm) termNode()  {}
+func (Ret) termNode()         {}
+func (TrapTerm) termNode()    {}
+func (UnreachTerm) termNode() {}
+
+// itoa avoids pulling strconv into every file for one use.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

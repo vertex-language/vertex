@@ -1,51 +1,54 @@
 package hir
 
-// async.go holds the async/await state-machine split. It is not
-// implemented, and this file exists to hold the shape and the constraint
-// rather than to pretend otherwise.
+// The async/await state-machine split. Not implemented.
 //
-// What it must do (overview §3):
+// The shape is fixed and the reason it is not written is ordering, not
+// difficulty. An async function becomes three things:
 //
-//   - Rewrite each async-marked function into a poll loop plus a
-//     synthesized payload enum of suspended states. Each await point
-//     becomes a state boundary yielding Pending.
-//   - Run a localized liveness pass so only variables surviving across an
-//     await enter the enum, keeping the payload small.
-//   - Synthesize a drop routine per state machine: if a task is cancelled,
-//     its handle dies mid-flight, or the reactor is torn down at exit, the
-//     payload enum still holds live owning variables whose deinits must run.
-//   - Drive a bare `await someAsyncFn(x)` inline in the caller's poll loop,
-//     merging state machines without touching the reactor or allocating a
-//     channel. A launch-prefixed `async f(a, b)` bypasses the
-//     transformation entirely and generates the channel handshake instead.
+//  1. struct _Vframe_f(state i32, <locals live across a suspend>,
+//     <child frames>, result)
+//  2. fn _Vresume_f(frame ptr) i32 — one block per resume point, dispatched
+//     by a switch on state at entry. 0 = complete, 1 = suspended.
+//  3. a stub fn f(…) that initializes the frame.
 //
-// Two ordering constraints bind whoever writes it:
+// State lives in the frame in memory, so there are no phi nodes to
+// reconstruct and no registers to restore across a suspend. A localized
+// liveness pass extracts only the variables surviving across an await, which
+// is the whole of the memory-footprint claim.
 //
-//  1. It runs over still-structured control flow, before flattening, so the
-//     split can see scopes.
-//  2. It runs *before* defer/deinit epilogue expansion. Expanding epilogues
-//     first would duplicate them across exit edges that the split then has
-//     to cut apart and reassign. A suspend edge is not a scope exit:
-//     `return Pending` explicitly bypasses these points, to preserve live
-//     state.
+// `await g()` where g is async embeds _Vframe_g inside _Vframe_f and calls
+// _Vresume_g directly, so one allocation covers a whole await chain — and
+// therefore recursive async is a compile error, since the frame size would
+// not be computable. Vertex has no boxed-future type and should not grow
+// one; spawn instead, which allocates a fresh frame.
 //
-// Constraint 2 is why the current arrangement is temporary. This package
-// expands epilogues during body lowering, through the builder's scope
-// stack, which is equivalent for a program containing no async functions
-// and wrong for one that does. Landing this pass means first lifting
-// epilogue expansion out of stmt.go into a standalone pass over the
-// structured tree.
-func (l *lowerer) splitAsync() {
-	for _, m := range l.prog.Modules {
-		for _, f := range m.Funcs {
-			if !l.isAsync(f) {
-				continue
-			}
-			l.todo(f.Pos, "async state-machine split for %s — see async.go", f.Name)
-		}
-	}
-}
-
-func (l *lowerer) isAsync(f *Func) bool {
-	return l.markerOf(f) == "async"
-}
+// ---------------------------------------------------------------------------
+//
+// What has to happen first, and why this file is empty rather than partial:
+//
+// This package performs defer/deinit epilogue expansion *during* body
+// lowering, through funcBuilder's scope stack (openScope, epilogueTo,
+// closeScope). lowering.md specifies it as a pass over the still-structured
+// tree, running after the split. The two are equivalent for a program
+// containing no async functions and wrong for one that does, because a
+// suspend edge is not a scope exit: a `return Pending` must bypass the
+// epilogue entirely to preserve live state, and an epilogue already inlined
+// at every exit edge cannot tell the two kinds of edge apart.
+//
+// So landing async means, in order:
+//
+//  1. Lift epilogue expansion out of stmt.go into a pass over *Seq. The seam
+//     is three methods on funcBuilder — openScope, epilogueTo, closeScope —
+//     which is why it was written as three methods.
+//  2. Run the split before that pass, over the structured tree, so the split
+//     can still see scopes.
+//  3. Synthesize the drop routine each state machine needs: if a task is
+//     cancelled, or its handle dies mid-flight, or the reactor is torn down
+//     at exit, the payload frame still holds live owning variables whose
+//     teardown must run.
+//
+// The reactor that drives the machines is not synthesized here. It is a
+// builtins module, reached through the task ABI — {poll fnptr, drop fnptr,
+// state ptr} — which is the one indirect dispatch the compiler emits and the
+// one thing standing between this file and lower/vir's missing fnsig
+// support.

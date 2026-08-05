@@ -1,350 +1,388 @@
 package hir
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/vertex-language/vertex/types"
 )
 
-// Type is hir's type representation: vir's type vocabulary, nothing more.
-// Every Vertex type has already been decided into one of these by the time
-// a Func body exists — there is no ownership qualifier, no generic
-// parameter, and no constraint left to interpret.
-type Type interface {
-	String() string
-	typeNode()
+// Type is hir's own type representation. It is not types.Type: by the time a
+// body is lowered every type is concrete (monomorphization ran first) and
+// every aggregate has a name and a layout, neither of which types.Type
+// carries. It is also not vir.Type, because hir must not import vvm.
+type Type struct {
+	Kind   Kind
+	Bits   int     // Int, Float
+	Signed bool    // Int
+	Elem   *Type   // Array, Vector, Predicate
+	Len    int64   // Array, Vector, Predicate
+	Struct *Struct // Struct
 }
 
-type IntType struct{ Bits int }   // i1, i8, i16, i32, i64, i128
-type FloatType struct{ Bits int } // f16, f32, f64
-type PtrType struct{}             // untyped; width is the target's usize
-type VoidType struct{}
-type StructType struct{ Def *Struct }
-type ArrayType struct {
-	Elem Type
-	Len  int64
-}
+type Kind uint8
 
-func (IntType) typeNode()    {}
-func (FloatType) typeNode()  {}
-func (PtrType) typeNode()    {}
-func (VoidType) typeNode()   {}
-func (StructType) typeNode() {}
-func (ArrayType) typeNode()  {}
-
-func (t IntType) String() string    { return fmt.Sprintf("i%d", t.Bits) }
-func (t FloatType) String() string  { return fmt.Sprintf("f%d", t.Bits) }
-func (PtrType) String() string      { return "ptr" }
-func (VoidType) String() string     { return "void" }
-func (t StructType) String() string { return "struct " + t.Def.Name }
-func (t ArrayType) String() string  { return fmt.Sprintf("array[%s, %d]", t.Elem, t.Len) }
-
-var (
-	I1   = IntType{1}
-	I8   = IntType{8}
-	I16  = IntType{16}
-	I32  = IntType{32}
-	I64  = IntType{64}
-	I128 = IntType{128}
-	F32  = FloatType{32}
-	F64  = FloatType{64}
-	Ptr  = PtrType{}
-	Void = VoidType{}
+const (
+	KVoid Kind = iota
+	KInt
+	KFloat
+	KPtr
+	KStruct
+	KArray
+	KVector
+	KPredicate // vec[i1, N]; a value-only type, never in memory
 )
 
-// IsAggregate reports whether t is memory-only. A Value of aggregate type
-// is a pointer at the vir level — see the package doc comment.
-func IsAggregate(t Type) bool {
-	switch t.(type) {
-	case StructType, ArrayType:
-		return true
-	}
-	return false
+// The scalars. bool is i8 because i1 has no ABI-agreed memory
+// representation; comparisons yield i1 and widen at the store. char is i32.
+var (
+	Void = &Type{Kind: KVoid}
+	I1   = &Type{Kind: KInt, Bits: 1, Signed: false}
+	I8   = &Type{Kind: KInt, Bits: 8, Signed: true}
+	I16  = &Type{Kind: KInt, Bits: 16, Signed: true}
+	I32  = &Type{Kind: KInt, Bits: 32, Signed: true}
+	I64  = &Type{Kind: KInt, Bits: 64, Signed: true}
+	U8   = &Type{Kind: KInt, Bits: 8}
+	U16  = &Type{Kind: KInt, Bits: 16}
+	U32  = &Type{Kind: KInt, Bits: 32}
+	U64  = &Type{Kind: KInt, Bits: 64}
+	F32  = &Type{Kind: KFloat, Bits: 32}
+	F64  = &Type{Kind: KFloat, Bits: 64}
+	Ptr  = &Type{Kind: KPtr}
+
+	Bool = I8
+	Char = I32
+)
+
+func ArrayOf(elem *Type, n int64) *Type  { return &Type{Kind: KArray, Elem: elem, Len: n} }
+func VectorOf(elem *Type, n int64) *Type { return &Type{Kind: KVector, Elem: elem, Len: n} }
+func StructOf(s *Struct) *Type           { return &Type{Kind: KStruct, Struct: s} }
+
+// IsAggregate reports whether t is memory-only, and therefore *is* a ptr at
+// the vir level. Vector and the lane predicate are deliberately absent —
+// they are register-class types (lowering.md §4.3, §15).
+func IsAggregate(t *Type) bool {
+	return t != nil && (t.Kind == KStruct || t.Kind == KArray)
 }
 
-func IsInt(t Type) bool   { _, ok := t.(IntType); return ok }
-func IsFloat(t Type) bool { _, ok := t.(FloatType); return ok }
-func IsPtr(t Type) bool   { _, ok := t.(PtrType); return ok }
-func IsVoid(t Type) bool  { _, ok := t.(VoidType); return ok }
+func IsInt(t *Type) bool   { return t != nil && t.Kind == KInt }
+func IsFloat(t *Type) bool { return t != nil && t.Kind == KFloat }
+func IsPtr(t *Type) bool   { return t != nil && t.Kind == KPtr }
+func IsVoid(t *Type) bool  { return t == nil || t.Kind == KVoid }
 
-func TypeEqual(a, b Type) bool {
-	switch x := a.(type) {
-	case IntType:
-		y, ok := b.(IntType)
-		return ok && x.Bits == y.Bits
-	case FloatType:
-		y, ok := b.(FloatType)
-		return ok && x.Bits == y.Bits
-	case PtrType:
-		_, ok := b.(PtrType)
-		return ok
-	case VoidType:
-		_, ok := b.(VoidType)
-		return ok
-	case StructType:
-		y, ok := b.(StructType)
-		return ok && x.Def == y.Def
-	case ArrayType:
-		y, ok := b.(ArrayType)
-		return ok && x.Len == y.Len && TypeEqual(x.Elem, y.Elem)
+func (t *Type) String() string {
+	switch t.Kind {
+	case KVoid:
+		return "void"
+	case KInt:
+		return "i" + itoa(t.Bits)
+	case KFloat:
+		return "f" + itoa(t.Bits)
+	case KPtr:
+		return "ptr"
+	case KStruct:
+		return "struct " + t.Struct.Name
+	case KArray:
+		return "array[" + t.Elem.String() + ", " + itoa(int(t.Len)) + "]"
+	case KVector:
+		return "vec[" + t.Elem.String() + ", " + itoa(int(t.Len)) + "]"
+	case KPredicate:
+		return "vec[i1, " + itoa(int(t.Len)) + "]"
 	}
-	return false
+	return "?"
 }
 
-// ---------------------------------------------------------------------------
-// types.Type -> hir.Type
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------- from types.Type
 
-// typeLowerer maps checked Vertex types onto hir types, memoized by the
-// rendered spelling of the source type so a diamond of references to the
-// same struct lands on one *Struct.
+// typ lowers a checked type. Every call goes through here, so every struct
+// the program needs is declared exactly once per owning module and every
+// layout question is answered by conf.Sizes and nothing else.
 //
-// The fat-type shapes below are the language's own layout commitments,
-// written once here:
-//
-//	string    {ptr, len}                 immutable, two words (A.9.4)
-//	[]T       {ptr, len, cap}            three words (A.3.1)
-//	map[K]V   ptr                        opaque handle into builtins/map
-//	chan T    ptr                        refcounted handle (A.10.1)
-//	unique T  ptr                        one word, deep copy (A.9.4)
-//	shared T  ptr                        one word, atomic increment
-//	weak T    ptr                        observes a shared allocation
-//	func(...) {code, env}                two words; the one-word non-capturing
-//	                                     form is what crosses a boundary (A.3.4)
-//	abstract  ptr                        foreign handle, interior invisible
-//	(A, B)    struct                     parentheses are the type's shape
-//	enum      unit-only: its discriminant integer; payload: {tag, bytes}
-type typeLowerer struct {
-	l     *lowerer
-	cache map[string]Type
-	// synthesized headers are declared per-module, since a struct produces
-	// no symbol and so cannot collide across modules.
-	headers map[*Module]map[string]*Struct
-	word    int64
-}
+// The `in` module is where a synthesized aggregate lands. A named type goes
+// to its own declaring module; a header or tuple goes to the module that
+// first needed it, which is why lower/vir declares them per-module and why
+// the cross-package byval/sret question in its README is still open.
+func (l *lowerer) typ(t types.Type, in *Module) *Type {
+	switch u := types.Underlying(t).(type) {
+	case nil:
+		return l.bug("nil type reached lowering")
 
-func newTypeLowerer(l *lowerer) *typeLowerer {
-	w := l.conf.PointerSize
-	if w == 0 {
-		w = 8
-	}
-	return &typeLowerer{l: l, cache: map[string]Type{}, headers: map[*Module]map[string]*Struct{}, word: w}
-}
+	case *types.Basic:
+		return l.basic(u)
 
-// lower converts a checked type to its hir shape, in the module currently
-// being emitted into (synthesized headers are declared there).
-func (tl *typeLowerer) lower(m *Module, t types.Type) Type {
-	if t == nil {
-		return Void
-	}
-	t = tl.l.subst(t)
-	key := m.Path + "\x00" + types.TypeString(t)
-	if got, ok := tl.cache[key]; ok {
-		return got
-	}
-	out := tl.build(m, t)
-	tl.cache[key] = out
-	return out
-}
+	case *types.Named:
+		// Unreachable: Underlying already stripped one layer of naming.
+		return l.bug("named type survived Underlying")
 
-func (tl *typeLowerer) build(m *Module, t types.Type) Type {
-	switch tl.l.classify(t) {
-	case kInvalid:
-		return Void
-	case kUnit:
-		return Void
-	case kBool:
-		// vir's i1 is the boolean type; comparisons already yield it, and
-		// a bool field is one byte of storage per types.Sizes.
-		return I1
-	case kChar:
-		return I32 // A.1.5.2: one Unicode scalar value, held in 4 bytes
-	case kInt:
-		return IntType{Bits: tl.l.intBits(t)}
-	case kFloat:
-		return FloatType{Bits: tl.l.floatBits(t)}
-	case kString:
-		return StructType{tl.header(m, "vx_string", []Field{
-			{Name: "ptr", Type: Ptr}, {Name: "len", Type: I64},
-		})}
-	case kSlice:
-		return StructType{tl.header(m, "vx_slice", []Field{
-			{Name: "ptr", Type: Ptr}, {Name: "len", Type: I64}, {Name: "cap", Type: I64},
-		})}
-	case kArray:
-		elem, n := tl.l.arrayParts(t)
-		return ArrayType{Elem: tl.lower(m, elem), Len: n}
-	case kMap, kChan, kPointer, kAbstract, kUnique, kShared, kWeak:
+	case *types.Struct:
+		return StructOf(l.structFor(t, in))
+
+	case *types.Enum:
+		if u.UnitOnly() {
+			// A unit enum is its discriminant integer, full stop.
+			return l.basic(u.Discriminant())
+		}
+		return StructOf(l.enumStruct(t, u, in))
+
+	case *types.Array:
+		return ArrayOf(l.typ(u.Elem(), in), u.Len())
+
+	case *types.Tuple:
+		return StructOf(l.tupleStruct(u, in))
+
+	case *types.Vector:
+		return VectorOf(l.typ(u.Elem(), in), u.Lanes())
+
+	case *types.Predicate:
+		return &Type{Kind: KPredicate, Elem: I1, Len: u.Lanes()}
+
+	case *types.Slice:
+		// {ptr, len, cap}. A view and a dynamic slice share one shape here;
+		// the view simply never grows. lowering.md §4.2 splits them, and
+		// splitting is a size optimization we have not taken.
+		return StructOf(l.header(in, "_Vvec", field("p", Ptr), field("len", I64), field("cap", I64)))
+
+	case *types.Map, *types.Chan:
+		// One ptr to a builtins-side table or channel core. The element type
+		// reaches the runtime as sizes and function pointers, not as a shape.
 		return Ptr
-	case kFunc:
-		// A.3.4: two words, {code, env}. The non-capturing one-word form is
-		// narrowed per-expression at a boundary, not by the type.
-		return StructType{tl.header(m, "vx_closure", []Field{
-			{Name: "code", Type: Ptr}, {Name: "env", Type: Ptr},
-		})}
-	case kTuple:
-		return StructType{tl.tuple(m, t)}
-	case kStruct:
-		return StructType{tl.named(m, t)}
-	case kEnum:
-		return tl.enum(m, t)
-	case kTensor:
-		tl.l.errorf(0, "todo: tensor types have no host lowering — a device-marked body is out of scope for VIR emission")
-		return Void
+
+	case *types.Pointer, *types.Abstract:
+		return Ptr
+
+	case *types.Ownership:
+		// unique/shared/weak are all one word. Which one decides the copy and
+		// drop cost, and that is own.go's question, read off the types.Type
+		// rather than off this.
+		return Ptr
+
+	case *types.Signature:
+		// {code, env}. A non-capturing function still gets the pair; §12.2's
+		// thunk is what fills the code word.
+		return StructOf(l.header(in, "_Vfn", field("code", Ptr), field("env", Ptr)))
+
+	case *types.TypeParam:
+		return l.bug("type parameter survived monomorphization: " + types.TypeString(t))
 	}
-	tl.l.errorf(0, "internal: no hir lowering for type %s", types.TypeString(t))
-	return Void
+	return l.bug("unlowerable type " + types.TypeString(t))
 }
 
-// header declares (or reuses) a synthesized layout struct in m. Fields are
-// laid out with natural alignment, matching A.6.2's declaration-order rule.
-func (tl *typeLowerer) header(m *Module, name string, fields []Field) *Struct {
-	byMod := tl.headers[m]
-	if byMod == nil {
-		byMod = map[string]*Struct{}
-		tl.headers[m] = byMod
+func (l *lowerer) basic(b *types.Basic) *Type {
+	switch b.Kind() {
+	case types.Bool:
+		return Bool
+	case types.Int8:
+		return I8
+	case types.Int16:
+		return I16
+	case types.Int32:
+		return I32
+	case types.Int64:
+		return I64
+	case types.Uint8:
+		return U8
+	case types.Uint16:
+		return U16
+	case types.Uint32:
+		return U32
+	case types.Uint64:
+		return U64
+	case types.Int:
+		// semantics.md §2.3: the target's pointer width, and a distinct type
+		// from int64 even where the widths agree. The distinctness mattered
+		// in the checker; here only the width survives.
+		return intOfBits(int(l.conf.Sizes.WordSize)*8, true)
+	case types.Uint:
+		return intOfBits(int(l.conf.Sizes.WordSize)*8, false)
+	case types.Float32:
+		return F32
+	case types.Float64:
+		return F64
+	case types.Char:
+		return Char
+	case types.String:
+		return StructOf(l.header(l.mod, "_Vstr", field("p", Ptr), field("len", I64)))
+	case types.BF16, types.FP8E4M3, types.FP8E5M2, types.Int4:
+		// todo: tensor element types only exist packed inside a tensor, and
+		// tensors only exist in an npu body, which has no CPU lowering.
+		return l.todo("tensor element type " + b.Name())
 	}
-	if s, ok := byMod[name]; ok {
+	return l.bug("unlowerable basic " + b.Name())
+}
+
+func intOfBits(bits int, signed bool) *Type {
+	switch {
+	case bits == 32 && signed:
+		return I32
+	case bits == 32:
+		return U32
+	case bits == 64 && signed:
+		return I64
+	}
+	return U64
+}
+
+func field(name string, t *Type) StructField { return StructField{Name: name, Type: t} }
+
+// header declares a synthesized aggregate once per module. The name is the
+// key: _Vstr means the same shape everywhere, so re-deriving it is free and
+// interning it keeps the emitted text stable.
+func (l *lowerer) header(in *Module, name string, fields ...StructField) *Struct {
+	if s, ok := in.structs[name]; ok {
 		return s
 	}
-	s := &Struct{Name: m.uniqueName(name), Module: m}
-	tl.layout(s, fields)
-	byMod[name] = s
-	m.Structs = append(m.Structs, s)
+	s := &Struct{Name: name, Module: in, Fields: fields}
+	l.layout(s)
+	in.structs[name] = s
+	in.Structs = append(in.Structs, s)
 	return s
 }
 
-// layout assigns offsets in declaration order with ABI padding and no
-// reordering (A.6.2) — a reader predicts layout straight from source order.
-func (tl *typeLowerer) layout(s *Struct, fields []Field) {
-	var off, max int64 = 0, 1
-	out := make([]Field, len(fields))
-	for i, f := range fields {
-		a := tl.align(f.Type)
-		if a > max {
-			max = a
-		}
-		if r := off % a; r != 0 {
-			off += a - r
-		}
-		f.Offset = off
-		out[i] = f
-		off += tl.size(f.Type)
+// structFor lowers a declared struct or class. One path for both: a class is
+// byte-for-byte identical in layout to a struct and differs only in its
+// member and method model, so nothing here branches on Class().
+func (l *lowerer) structFor(t types.Type, in *Module) *Struct {
+	name := l.typeName(t)
+	owner := l.ownerOf(t, in)
+	if s, ok := owner.structs[name]; ok {
+		return s
 	}
-	if r := off % max; r != 0 {
-		off += max - r
+	st := types.AsStruct(t)
+	if st == nil {
+		return nil
 	}
-	s.Fields, s.Size, s.Align = out, off, max
+
+	// Declared before the fields are lowered, so a self-referential field
+	// reaches its enclosing type without looping. This is the same two-step
+	// types.Named itself uses, and it is why lower/vir has to re-sort the
+	// struct section.
+	s := &Struct{Name: name, Module: owner, Export: true}
+	owner.structs[name] = s
+	owner.Structs = append(owner.Structs, s)
+
+	for i := 0; i < st.NumFields(); i++ {
+		f := st.Field(i)
+		s.Fields = append(s.Fields, field(f.Name, l.typ(f.Type, owner)))
+	}
+	l.layout(s)
+	return s
 }
 
-func (tl *typeLowerer) size(t Type) int64 {
-	switch x := t.(type) {
-	case IntType:
-		if x.Bits <= 8 {
+// enumStruct lays a payload enum out as tag + opaque payload bytes. Case
+// bindings are a field.ptr plus a reinterpretation into the payload — views,
+// not copies. The sources fix no enum layout; this is the implementation's
+// choice, matching types.Sizes.enumSize so the two cannot disagree.
+func (l *lowerer) enumStruct(t types.Type, e *types.Enum, in *Module) *Struct {
+	name := l.typeName(t)
+	owner := l.ownerOf(t, in)
+	if s, ok := owner.structs[name]; ok {
+		return s
+	}
+	tag := l.basic(e.Discriminant())
+	total := l.conf.Sizes.Sizeof(t)
+	tagSize := l.conf.Sizes.Sizeof(e.Discriminant())
+
+	s := &Struct{
+		Name:   name,
+		Module: owner,
+		Export: true,
+		Fields: []StructField{
+			field("tag", tag),
+			field("payload", ArrayOf(U8, total-tagSize)),
+		},
+	}
+	l.layout(s)
+	owner.structs[name] = s
+	owner.Structs = append(owner.Structs, s)
+	return s
+}
+
+func (l *lowerer) tupleStruct(tp *types.Tuple, in *Module) *Struct {
+	var parts []string
+	fields := make([]StructField, 0, tp.Len())
+	for i := 0; i < tp.Len(); i++ {
+		ft := l.typ(tp.At(i).Type(), in)
+		parts = append(parts, mangleType(ft))
+		fields = append(fields, field("f"+itoa(i), ft))
+	}
+	return l.header(in, "_Vt_"+strings.Join(parts, "_"), fields...)
+}
+
+// layout fills offsets, size, and alignment from types.Sizes. Declaration
+// order with padding and no reordering: a reader predicts the layout from
+// the source, and interop assumes it.
+func (l *lowerer) layout(s *Struct) {
+	var cur, maxAlign int64 = 0, 1
+	for i := range s.Fields {
+		a := l.alignOf(s.Fields[i].Type)
+		cur = align(cur, a)
+		s.Fields[i].Offset = cur
+		cur += l.sizeOf(s.Fields[i].Type)
+		if a > maxAlign {
+			maxAlign = a
+		}
+	}
+	s.Size = align(cur, maxAlign)
+	s.Align = maxAlign
+}
+
+func (l *lowerer) sizeOf(t *Type) int64 {
+	switch t.Kind {
+	case KVoid:
+		return 0
+	case KInt:
+		if t.Bits <= 8 {
 			return 1
 		}
-		return int64((x.Bits + 7) / 8)
-	case FloatType:
-		return int64(x.Bits / 8)
-	case PtrType:
-		return tl.word
-	case VoidType:
+		return int64(t.Bits) / 8
+	case KFloat:
+		return int64(t.Bits) / 8
+	case KPtr:
+		return l.conf.Sizes.WordSize
+	case KStruct:
+		return t.Struct.Size
+	case KArray:
+		return t.Len * align(l.sizeOf(t.Elem), l.alignOf(t.Elem))
+	case KVector:
+		return t.Len * l.sizeOf(t.Elem)
+	case KPredicate:
+		// Never reaches storage, so it never has a layout to report.
 		return 0
-	case StructType:
-		return x.Def.Size
-	case ArrayType:
-		return x.Len * tl.size(x.Elem) // arrays have no inter-element padding
 	}
 	return 0
 }
 
-func (tl *typeLowerer) align(t Type) int64 {
-	switch x := t.(type) {
-	case StructType:
-		return x.Def.Align
-	case ArrayType:
-		return tl.align(x.Elem)
+func (l *lowerer) alignOf(t *Type) int64 {
+	switch t.Kind {
+	case KStruct:
+		return t.Struct.Align
+	case KArray:
+		return l.alignOf(t.Elem)
+	case KVector:
+		return roundPow2(l.sizeOf(t))
+	case KPredicate:
+		return 1
 	}
-	if n := tl.size(t); n > 0 {
-		return n
+	sz := l.sizeOf(t)
+	if sz > l.conf.Sizes.MaxAlign {
+		return l.conf.Sizes.MaxAlign
 	}
-	return 1
+	if sz == 0 {
+		return 1
+	}
+	return sz
 }
 
-// Sizeof and Alignof are the queries lower/vir, own.go, and the builtin
-// allocation sites all share; nothing recomputes layout independently.
-func (tl *typeLowerer) Sizeof(t Type) int64  { return tl.size(t) }
-func (tl *typeLowerer) Alignof(t Type) int64 { return tl.align(t) }
-
-func (tl *typeLowerer) named(m *Module, t types.Type) *Struct {
-	name, fields := tl.l.structParts(t)
-	byMod := tl.headers[m]
-	if byMod == nil {
-		byMod = map[string]*Struct{}
-		tl.headers[m] = byMod
+func align(x, a int64) int64 {
+	if a <= 1 {
+		return x
 	}
-	key := "n:" + types.TypeString(t)
-	if s, ok := byMod[key]; ok {
-		return s
-	}
-	s := &Struct{Name: m.uniqueName(name), Module: m, Origin: t}
-	byMod[key] = s
-	m.Structs = append(m.Structs, s)
-
-	// Bind the *Struct before lowering fields, so a self-referential field
-	// (next: typed_ptr Node) reaches its own enclosing type without looping
-	// — the same trick analyzer's recordDecl uses.
-	hf := make([]Field, 0, len(fields))
-	for _, f := range fields {
-		hf = append(hf, Field{Name: sanitize(f.Name), Type: tl.lower(m, f.Type)})
-	}
-	tl.layout(s, hf)
-	return s
+	return (x + a - 1) &^ (a - 1)
 }
 
-func (tl *typeLowerer) tuple(m *Module, t types.Type) *Struct {
-	elems := tl.l.tupleElems(t)
-	var sb strings.Builder
-	sb.WriteString("vx_tuple")
-	hf := make([]Field, 0, len(elems))
-	for i, e := range elems {
-		sb.WriteString("_")
-		sb.WriteString(sanitize(types.TypeString(e.Type)))
-		name := e.Name
-		if name == "" {
-			name = "_" + itoa(i)
-		}
-		hf = append(hf, Field{Name: sanitize(name), Type: tl.lower(m, e.Type)})
+func roundPow2(x int64) int64 {
+	p := int64(1)
+	for p < x {
+		p <<= 1
 	}
-	return tl.header(m, sb.String(), hf)
-}
-
-// enum implements A.6.5 directly: a unit-only enum *is* its discriminant
-// integer, so it lowers to that integer and nothing else. A payload enum is
-// a tag plus opaque storage sized to the largest variant; the tag tells a
-// copy or teardown routine which interpretation to walk.
-func (tl *typeLowerer) enum(m *Module, t types.Type) Type {
-	disc, unitOnly, payload := tl.l.enumParts(t)
-	tag := IntType{Bits: tl.l.intBits(disc)}
-	if unitOnly {
-		return tag
-	}
-	var maxSize, maxAlign int64 = 0, 1
-	for _, v := range payload {
-		for _, ft := range v.Types {
-			h := tl.lower(m, ft)
-			if s := tl.size(h); s > maxSize {
-				maxSize = s
-			}
-			if a := tl.align(h); a > maxAlign {
-				maxAlign = a
-			}
-		}
-	}
-	name := "vx_enum_" + sanitize(types.TypeString(t))
-	return StructType{tl.header(m, name, []Field{
-		{Name: "tag", Type: tag},
-		{Name: "payload", Type: ArrayType{Elem: I8, Len: maxSize}},
-	})}
+	return p
 }

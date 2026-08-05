@@ -1,216 +1,176 @@
 package hir
 
 import (
-	"sort"
 	"strings"
 
+	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/types"
 )
 
-// worklist drives monomorphization. types.Info.Instances records type
-// arguments at each instantiation site, but only as the analyzer saw them
-// while checking a generic body once, generically — it is not a concrete
-// call graph. So hir builds its own worklist, seeded from every externally
-// reachable root, composing substitutions as it descends and memoizing by
-// (Func, ConcreteTypeArgs) so a diamond of instantiations is built once.
-type worklist struct {
-	l     *lowerer
-	queue []job
-	done  map[string]*Func
+// instance is one entry of the monomorphization worklist: a function plus
+// the concrete type arguments it is being built for.
+type instance struct {
+	obj  *types.Func
+	args []types.Type
+	fn   *Func // the shell, allocated at enqueue time
+	pkg  *types.Package
 }
 
-type job struct {
-	unit  *Unit
-	fn    *types.Func
-	args  []types.Type
-	depth int
-}
-
-func newWorklist(l *lowerer) *worklist {
-	return &worklist{l: l, done: map[string]*Func{}}
-}
-
-func (w *worklist) key(fn *types.Func, args []types.Type) string {
-	var sb strings.Builder
-	if p := fn.Pkg(); p != nil {
-		sb.WriteString(p.Path())
+// key identifies an instance for memoization. Two call sites reaching
+// smaller[int32] must produce one Func, or a diamond of instantiations
+// builds the same body twice.
+func instanceKey(obj *types.Func, args []types.Type) string {
+	var b strings.Builder
+	if obj.Pkg() != nil {
+		b.WriteString(obj.Pkg().Path())
+		b.WriteByte('.')
 	}
-	sb.WriteString(".")
-	sb.WriteString(fn.Name())
+	if sig := obj.Signature(); sig != nil && sig.Recv() != nil {
+		b.WriteString(types.TypeString(sig.Recv().Type()))
+		b.WriteByte('.')
+	}
+	b.WriteString(obj.Name())
 	for _, a := range args {
-		sb.WriteString("[")
-		sb.WriteString(types.TypeString(a))
-		sb.WriteString("]")
+		b.WriteByte('_')
+		b.WriteString(types.TypeString(a))
 	}
-	return sb.String()
+	return b.String()
 }
 
-// enqueue schedules one instantiation and returns the *Func it will occupy,
-// creating the shell immediately so a recursive or mutually recursive call
-// can reference it before its body exists.
+// enqueue appends a shell when a call site is *discovered*, which is why
+// Module.Funcs runs caller-before-callee and lower/vir has to reverse it.
 //
-// The shell's Result is resolved right here, eagerly, from fn's own
-// checked signature — not left nil for lowerBody to fill in later. A nil
-// Type reads as "not void" to IsVoid (the type assertion nil.(VoidType)
-// fails), so any call reaching this shell before its body is lowered would
-// otherwise wrongly bind a result name to what may be a void call. This is
-// not a hypothetical: buildEntry calls the seeded main/test function from
-// inside seed(), strictly before work.run() ever executes lowerBody, so
-// the entry shim is guaranteed to observe a half-built shell on every
-// build unless Result is settled up front. The signature is already fully
-// resolved by the checker at this point, so there is no reason to defer
-// this — lowerBody's own assignment of f.Result becomes a redundant
-// re-computation of the same value once this runs first.
-func (w *worklist) enqueue(u *Unit, fn *types.Func, args []types.Type, depth int) *Func {
-	k := w.key(fn, args)
-	if f, ok := w.done[k]; ok {
+// types.Info.Instances is not consulted as a call graph: it records only
+// what the analyzer saw while checking each generic body once, generically.
+// The worklist is built here, composing substitutions as it descends.
+func (l *lowerer) enqueue(obj *types.Func, args []types.Type) *Func {
+	key := instanceKey(obj, args)
+	if f, ok := l.done[key]; ok {
 		return f
 	}
-	max := w.l.conf.MaxDepth
-	if max == 0 {
-		max = 64
-	}
-	if depth > max {
-		// A.7.6: recursive instantiation must terminate; unbounded
-		// deepening is a compile error, because the stamping-out would not.
-		w.l.errorf(fn.Pos(), "recursive instantiation of %s exceeds depth %d (A.7.6)", fn.Name(), max)
-		return nil
+
+	pkg := obj.Pkg()
+	mod := l.modOf[pkg]
+	if mod == nil {
+		l.bug("function " + obj.Name() + " belongs to no lowered module")
 	}
 
-	mod := w.l.byUnit[u]
-	shell := &Func{
-		Name:   mod.uniqueName(instanceName(fn, args)),
+	f := &Func{
+		Name:   l.funcName(obj, args),
 		Module: mod,
-		Kind:   FuncUser,
-		Origin: fn,
-		Pos:    fn.Pos(),
+		Pos:    obj.Pos(),
+		// Monomorphized instances are internal: vir has no linkonce, so two
+		// modules instantiating smaller[int32] would collide in the flat
+		// namespace. Each module emits its own copy.
+		Export: len(args) == 0,
 	}
-
-	// Resolve Result now, under this instantiation's own substitution,
-	// exactly as lowerBody would later — but before any caller can
-	// possibly observe the shell in a half-built state.
-	prev := w.l.cur
-	w.l.cur = &instance{unit: u, mod: mod, subst: substitution(fn, args), depth: depth}
-	shell.Result = w.l.result(fn.Signature())
-	w.l.cur = prev
-
-	mod.Funcs = append(mod.Funcs, shell)
-	w.done[k] = shell
-	w.queue = append(w.queue, job{unit: u, fn: fn, args: args, depth: depth})
-	return shell
+	l.done[key] = f
+	mod.Funcs = append(mod.Funcs, f)
+	l.work = append(l.work, &instance{obj: obj, args: args, fn: f, pkg: pkg})
+	return f
 }
 
-func (w *worklist) run() {
-	for len(w.queue) > 0 {
-		j := w.queue[0]
-		w.queue = w.queue[1:]
-		w.lowerBody(j)
+// drain lowers every queued instance, including the ones discovered while
+// lowering. The depth guard is this package's own: semantics.md §9 makes
+// non-terminating instantiation a compile error, and nothing here assumes
+// the analyzer enforced it.
+func (l *lowerer) drain() {
+	for len(l.work) > 0 {
+		in := l.work[0]
+		l.work = l.work[1:]
+
+		l.depth++
+		if l.depth > maxInstantiationDepth {
+			l.bug("instantiation depth exceeded at " + in.fn.Name +
+				"; recursive instantiation must terminate")
+		}
+		l.lowerInstance(in)
+		l.depth--
 	}
 }
 
-// lookup finds an already-scheduled instance without scheduling one.
-func (w *worklist) lookup(fn *types.Func, args []types.Type) *Func {
-	return w.done[w.key(fn, args)]
-}
+func (l *lowerer) lowerInstance(in *instance) {
+	saveMod, saveInfo, saveUnit := l.mod, l.info, l.unit
+	l.mod = in.fn.Module
+	l.info = l.infoOf[in.pkg]
+	l.unit = l.unitOf(in.pkg)
+	defer func() { l.mod, l.info, l.unit = saveMod, saveInfo, saveUnit }()
 
-func (w *worklist) lowerBody(j job) {
-	f := w.lookup(j.fn, j.args)
-	if f == nil {
+	decl := l.declOf(in.obj)
+	if decl == nil {
+		// No body: a foreign declaration, or a synthesized object. Foreign
+		// ones were already emitted as externs.
 		return
 	}
-	decl := findFuncDecl(j.unit, j.fn)
-	if decl == nil || decl.Body == nil {
-		// A foreign declaration or an error-recovery shell: nothing to
-		// lower, and the extern group already named the entry point.
-		return
-	}
+	l.lowerFuncDecl(in, decl)
+}
 
-	subst := substitution(j.fn, j.args)
-	prev := w.l.cur
-	w.l.cur = &instance{unit: j.unit, mod: f.Module, subst: subst, depth: j.depth}
-	defer func() { w.l.cur = prev }()
-
-	// The receiver and the marker both live on the Signature, not on the
-	// Func — A.4.2 makes the marker part of the callee's contract, so it is
-	// part of the type. Everything below therefore reads through here.
-	sig := j.fn.Signature()
-
-	// f.Result was already resolved in enqueue, under the same
-	// substitution, so this is a no-op recomputation of the same value —
-	// left in place only because it is harmless and keeps lowerBody
-	// self-contained if enqueue's early resolution is ever reverted.
-	f.Result = w.l.result(sig)
-	if st, ok := f.Result.(StructType); ok {
-		// An aggregate result is written through an sret destination the
-		// caller supplies, so the vir function returns void.
-		f.Params = append(f.Params, &Param{Name: "sret", Type: Ptr, SRet: st.Def})
-		f.Result = Void
-	}
-	if sig != nil {
-		if recv := sig.Recv(); recv != nil {
-			f.Params = append(f.Params, w.l.param("self", recv.Type()))
+func (l *lowerer) unitOf(p *types.Package) *Unit {
+	for _, u := range l.units {
+		if u.Pkg == p {
+			return u
 		}
 	}
-	for _, p := range paramsOf(sig) {
-		f.Params = append(f.Params, w.l.param(p.Name, p.Type))
-	}
-
-	// vir has one flat namespace per module and spells every cross-module
-	// call `module.symbol`, so a callee that is not exported cannot be named
-	// from another module.
-	//
-	// There is no visibility fact for hir to read. ast.FuncDecl carries no
-	// modifier list and types.Func records none; the grammar admits a
-	// visibility modifier only inside a declare block (A.8.3), where it is
-	// banned. So everything lowered is exported. That is sound rather than
-	// merely convenient: monomorphization reaches a function only from a
-	// root, so an unreachable function is never lowered and there is no
-	// private symbol being leaked — the dead-symbol question was removed
-	// upstream rather than answered here.
-	f.Export = true
-
-	b := newFuncBuilder(w.l, f, decl)
-	b.body(decl.Body)
+	return nil
 }
 
-// substitution composes the concrete arguments onto the declaration's own
-// parameter list.
-func substitution(fn *types.Func, args []types.Type) map[*types.TypeParam]types.Type {
-	if len(args) == 0 {
+// declOf finds the syntax a Func object came from. types.Info records
+// definitions by identifier, so this walks the package's files once and
+// caches — the analyzer's funcObj map is not exported.
+func (l *lowerer) declOf(obj *types.Func) *ast.FuncDecl {
+	u := l.unitOf(obj.Pkg())
+	if u == nil {
 		return nil
 	}
-	params := typeParamsOf(fn)
-	out := make(map[*types.TypeParam]types.Type, len(args))
-	for i, p := range params {
-		if i < len(args) {
-			out[p] = args[i]
+	for _, f := range u.Files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			if u.Info.Defs[fd.Name] == obj {
+				return fd
+			}
 		}
 	}
-	return out
+	return nil
 }
 
-func instanceName(fn *types.Func, args []types.Type) string {
-	var sb strings.Builder
-	if sig := fn.Signature(); sig != nil && sig.Recv() != nil {
-		sb.WriteString(sanitize(types.TypeString(sig.Recv().Type())))
-		sb.WriteString("_")
-	}
-	sb.WriteString(fn.Name())
-	for _, a := range args {
-		sb.WriteString("__")
-		sb.WriteString(sanitize(types.TypeString(a)))
-	}
-	return sb.String()
+// subst maps type parameters to concrete arguments while a generic body is
+// lowered. It is composed on descent: instantiating Pair[T] inside
+// Stack[int32]'s body substitutes T=int32 before enqueuing Pair[int32].
+type subst struct {
+	params []*types.TypeParam
+	args   []types.Type
+	outer  *subst
 }
 
-// sortedTypes gives a deterministic rendering for keys built from a map. A
-// TypeParam carries its own name (A.7.1's TypeParameterList entry), so there
-// is no declaring object to go through.
-func sortedTypes(m map[*types.TypeParam]types.Type) []string {
-	out := make([]string, 0, len(m))
-	for k, v := range m {
-		out = append(out, k.Name()+"="+types.TypeString(v))
+func (s *subst) apply(t types.Type) types.Type {
+	if s == nil || t == nil {
+		return t
 	}
-	sort.Strings(out)
-	return out
+	if tp, ok := t.(*types.TypeParam); ok {
+		for i, p := range s.params {
+			if p == tp && i < len(s.args) {
+				return s.outer.apply(s.args[i])
+			}
+		}
+		return s.outer.apply(t)
+	}
+	// todo: a composite type mentioning a parameter — []T, map[K]V,
+	// Stack[T] — needs a structural rebuild here. Today only bare parameter
+	// positions substitute, which covers every generic in the corpus and
+	// silently mis-lowers `func f[T](xs: []T)`.
+	return t
+}
+
+func genericParams(obj *types.Func) []*types.TypeParam {
+	sig := obj.Signature()
+	if sig == nil || sig.Recv() == nil {
+		return nil
+	}
+	if n := types.AsNamed(sig.Recv().Type()); n != nil {
+		return n.TypeParams()
+	}
+	return nil
 }

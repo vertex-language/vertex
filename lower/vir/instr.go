@@ -1,212 +1,206 @@
+// instr.go
 package vir
 
 import (
 	"github.com/vertex-language/vertex/lower/hir"
-	ir "github.com/vertex-language/vvm/ir/vir"
+	vir "github.com/vertex-language/vvm/ir/vir"
 )
 
-// instr.go is the table. hir's Op vocabulary was chosen as a subset of
-// vir's §4 opcodes spelled identically, so almost every instruction is one
-// map lookup plus an operand walk.
+// The opcode table.
 //
-// The table is explicit rather than a name lookup through
-// vir.ParseOpcode(op.String()) on purpose: hir spells its pointer
-// arithmetic ops "field.ptr" and "index.ptr" — the *instruction* form,
-// suffix included — while vir's closed opcode vocabulary spells them
-// "field" and "index". A name-based bridge would work for sixty opcodes
-// and silently fail for two.
-var opcodes = map[hir.Op]ir.Opcode{
-	hir.OpAdd:  ir.OpAdd,
-	hir.OpSub:  ir.OpSub,
-	hir.OpMul:  ir.OpMul,
-	hir.OpUDiv: ir.OpUDiv,
-	hir.OpSDiv: ir.OpSDiv,
-	hir.OpURem: ir.OpURem,
-	hir.OpSRem: ir.OpSRem,
-	hir.OpNeg:  ir.OpNeg,
-	hir.OpAbs:  ir.OpAbs,
+// hir.Op is a subset of vir's §4 opcodes spelled identically, so this is a
+// table. It is an explicit table rather than vir.ParseOpcode(op.String())
+// because hir spells its pointer arithmetic field.ptr / index.ptr — the
+// instruction form, suffix included — while vir's closed vocabulary spells
+// them field / index. A name-based bridge works for sixty opcodes and fails
+// silently for two.
+var opTable = map[hir.Op]vir.Opcode{
+	hir.OpAdd:  vir.OpAdd,
+	hir.OpSub:  vir.OpSub,
+	hir.OpMul:  vir.OpMul,
+	hir.OpNeg:  vir.OpNeg,
+	hir.OpSDiv: vir.OpSDiv,
+	hir.OpUDiv: vir.OpUDiv,
+	hir.OpSRem: vir.OpSRem,
+	hir.OpURem: vir.OpURem,
 
-	hir.OpAnd:  ir.OpAnd,
-	hir.OpOr:   ir.OpOr,
-	hir.OpXor:  ir.OpXor,
-	hir.OpNot:  ir.OpNot,
-	hir.OpShl:  ir.OpShl,
-	hir.OpLShr: ir.OpLShr,
-	hir.OpAShr: ir.OpAShr,
+	hir.OpSAddO: vir.OpSAddO,
+	hir.OpUAddO: vir.OpUAddO,
+	hir.OpSSubO: vir.OpSSubO,
+	hir.OpUSubO: vir.OpUSubO,
+	hir.OpSMulO: vir.OpSMulO,
+	hir.OpUMulO: vir.OpUMulO,
 
-	hir.OpEq:  ir.OpEq,
-	hir.OpNe:  ir.OpNe,
-	hir.OpSlt: ir.OpSlt,
-	hir.OpSgt: ir.OpSgt,
-	hir.OpSle: ir.OpSle,
-	hir.OpSge: ir.OpSge,
-	hir.OpUlt: ir.OpUlt,
-	hir.OpUgt: ir.OpUgt,
-	hir.OpUle: ir.OpUle,
-	hir.OpUge: ir.OpUge,
-	hir.OpLt:  ir.OpLt,
-	hir.OpGt:  ir.OpGt,
-	hir.OpLe:  ir.OpLe,
-	hir.OpGe:  ir.OpGe,
+	hir.OpAnd:  vir.OpAnd,
+	hir.OpOr:   vir.OpOr,
+	hir.OpXor:  vir.OpXor,
+	hir.OpNot:  vir.OpNot,
+	hir.OpShl:  vir.OpShl,
+	hir.OpLShr: vir.OpLShr,
+	hir.OpAShr: vir.OpAShr,
 
-	hir.OpSelect: ir.OpSelect,
+	hir.OpEq:  vir.OpEq,
+	hir.OpNe:  vir.OpNe,
+	hir.OpSlt: vir.OpSlt,
+	hir.OpSgt: vir.OpSgt,
+	hir.OpSle: vir.OpSle,
+	hir.OpSge: vir.OpSge,
+	hir.OpUlt: vir.OpUlt,
+	hir.OpUgt: vir.OpUgt,
+	hir.OpUle: vir.OpUle,
+	hir.OpUge: vir.OpUge,
+	// The float comparison family drops the f: hir disambiguates by
+	// mnemonic, vir by the operand type in the suffix.
+	hir.OpFlt: vir.OpLt,
+	hir.OpFgt: vir.OpGt,
+	hir.OpFle: vir.OpLe,
+	hir.OpFge: vir.OpGe,
 
-	hir.OpLoad:    ir.OpLoad,
-	hir.OpStore:   ir.OpStore,
-	hir.OpMemcopy: ir.OpMemcopy,
-	hir.OpMemmove: ir.OpMemmove,
-	hir.OpMemset:  ir.OpMemset,
+	hir.OpSelect: vir.OpSelect,
 
-	hir.OpTrunc:      ir.OpTrunc,
-	hir.OpSext:       ir.OpSext,
-	hir.OpZext:       ir.OpZext,
-	hir.OpFdemote:    ir.OpFdemote,
-	hir.OpFpromote:   ir.OpFpromote,
-	hir.OpBitcast:    ir.OpBitcast,
-	hir.OpSfromint:   ir.OpSfromint,
-	hir.OpUfromint:   ir.OpUfromint,
-	hir.OpStointSat:  ir.OpStointSat,
-	hir.OpUtointSat:  ir.OpUtointSat,
+	hir.OpAlloca:  vir.OpAlloca,
+	hir.OpLoad:    vir.OpLoad,
+	hir.OpStore:   vir.OpStore,
+	hir.OpMemcopy: vir.OpMemcopy,
+	hir.OpMemmove: vir.OpMemmove,
+	hir.OpMemset:  vir.OpMemset,
+	hir.OpFieldPtr: vir.OpField, // the two that a name-based bridge would miss
+	hir.OpIndexPtr: vir.OpIndex,
 
-	hir.OpSMin: ir.OpSMin,
-	hir.OpSMax: ir.OpSMax,
-	hir.OpUMin: ir.OpUMin,
-	hir.OpUMax: ir.OpUMax,
+	hir.OpAtomicLoad:  vir.OpAtomicLoad,
+	hir.OpAtomicStore: vir.OpAtomicStore,
+	hir.OpAtomicAdd:   vir.OpAtomicAdd,
+	hir.OpAtomicSub:   vir.OpAtomicSub,
+	hir.OpCmpxchg:     vir.OpCmpxchg,
 
-	// OpAlloca, OpFieldPtr, OpIndexPtr and OpCall are absent deliberately:
-	// each has a dedicated builder entry point below, because vir's form
-	// carries something an Emit(result, op, suffix, args...) call can't —
-	// an align clause, a struct/field name pair, an element type operand,
-	// or a callee.
+	hir.OpTrunc:    vir.OpTrunc,
+	hir.OpSext:     vir.OpSext,
+	hir.OpZext:     vir.OpZext,
+	hir.OpFdemote:  vir.OpFdemote,
+	hir.OpFpromote: vir.OpFpromote,
+	hir.OpBitcast:  vir.OpBitcast,
+	hir.OpSfromint: vir.OpSfromint,
+	hir.OpUfromint: vir.OpUfromint,
+	hir.OpStoint:   vir.OpStoint,
+	hir.OpUtoint:   vir.OpUtoint,
+
+	hir.OpCall: vir.OpCall,
 }
 
-// comparisons are the opcodes whose result type is i1 rather than their
-// suffix (opTable's ruleBool). hir's Instr.Type holds the *result* type
-// for these, but vir's suffix names the *operand* type — `eq.ptr` yields
-// i1 — so the suffix is read off the first argument instead.
-var comparisons = map[hir.Op]bool{
-	hir.OpEq: true, hir.OpNe: true,
-	hir.OpSlt: true, hir.OpSgt: true, hir.OpSle: true, hir.OpSge: true,
-	hir.OpUlt: true, hir.OpUgt: true, hir.OpUle: true, hir.OpUge: true,
-	hir.OpLt: true, hir.OpGt: true, hir.OpLe: true, hir.OpGe: true,
-}
-
-func (e *emitter) instr(in *hir.Instr) {
-	e.loc(in.Pos)
-
+func (fl *funcLowerer) instr(in *hir.Instr) {
 	switch in.Op {
 	case hir.OpCall:
-		e.call(in)
+		fl.call(in)
 		return
-
 	case hir.OpAlloca:
-		// alloca's align is a clause, not an operand (§2.3).
-		if len(in.Args) != 1 {
-			e.l.errorf(in.Pos, "internal: alloca takes one size operand, got %d", len(in.Args))
-			return
-		}
-		e.fb.Alloca(in.Name, e.l.value(e.hm, in.Args[0]), in.Align)
+		fl.alloca(in)
 		return
-
-	case hir.OpFieldPtr:
-		if in.Field == nil || len(in.Args) != 1 {
-			e.l.errorf(in.Pos, "internal: field.ptr without a struct/field pair")
-			return
-		}
-		e.fb.FieldPointer(in.Name, e.l.value(e.hm, in.Args[0]), in.Field.Struct.Name, in.Field.Field)
-		return
-
 	case hir.OpIndexPtr:
-		if in.Elem == nil || len(in.Args) != 2 {
-			e.l.errorf(in.Pos, "internal: index.ptr without an element type")
-			return
-		}
-		e.fb.IndexPointer(in.Name, e.l.value(e.hm, in.Args[0]),
-			e.l.typ(e.hm, in.Elem), e.l.value(e.hm, in.Args[1]))
+		fl.indexPtr(in)
 		return
 	}
 
-	op, ok := opcodes[in.Op]
+	op, ok := opTable[in.Op]
 	if !ok {
-		e.l.errorf(in.Pos, "internal: hir opcode %s has no vir spelling", in.Op)
-		return
+		fl.ml.bug("no vir opcode for hir op " + in.Op.String())
 	}
-	e.fb.Emit(in.Name, op, e.suffix(in), e.operands(in.Args)...)
+	fl.b.Emit(in.Result, op, fl.suffix(in), fl.operands(in.Args)...)
 }
 
-// suffix picks the instruction's type suffix. Three cases, and they are
-// the whole rule: a comparison names its operand type, a void-typed
-// instruction has no suffix at all (`memcopy dst, src, n`), and everything
-// else names its own result type.
-func (e *emitter) suffix(in *hir.Instr) ir.Type {
-	if comparisons[in.Op] {
-		if len(in.Args) == 0 || in.Args[0].Type == nil {
-			e.l.errorf(in.Pos, "internal: comparison %s has no operand to take a suffix from", in.Op)
-			return nil
-		}
-		return e.l.typ(e.hm, in.Args[0].Type)
-	}
-	if in.Type == nil || hir.IsVoid(in.Type) {
-		return nil
-	}
-	return e.l.typ(e.hm, in.Type)
-}
-
-// call routes the three callee shapes. A qualified call is emitted as
-// `module.symbol` and erased by vvm's importer Rewrite before cpu/lower
-// ever sees it.
+// suffix applies the two rules worth knowing.
 //
-// This builds the ir.Instruction directly rather than going through
-// builder.go's Call/CallImported/CallIndirect convenience wrappers, which
-// all hardcode Suffix to nil. That was invisible for a locally-resolved
-// call — cpu/lower/<arch> derived the result type from its own function
-// table instead — but a rewritten cross-module call (importer.Rewrite
-// erases the qualified ident into a bare mangled symbol, per its own
-// per-kind summary) has no local declaration for a backend to consult, and
-// needs Suffix to carry the checked result type hir already computed
-// (hir's builder.go: `Instr{..., Type: f.Result, ...}`) — the same
-// contract every other ruleSuffix opcode already relies on. Setting it
-// unconditionally, for every call shape, keeps this one rule instead of a
-// special case for the cross-module path alone.
-func (e *emitter) call(in *hir.Instr) {
-	c := in.Call
-	if c == nil {
-		e.l.errorf(in.Pos, "internal: call instruction with no callee")
-		return
-	}
-	args := e.operands(in.Args)
-	suffix := e.suffix(in)
-
-	switch {
-	case c.Indirect != nil:
-		if c.Sig == "" {
-			e.l.todo(in.Pos, "indirect call with no fnsig — vir types call.<fnsig> against a declared signature, and nothing declares one yet")
-			return
+//  1. Comparisons name their operand type, not their result type. vir's
+//     eq/slt/ult family yields i1 from a suffix naming what is being
+//     compared, while hir.Instr.Type holds the result — so the suffix comes
+//     off Args[0] for these.
+//  2. A void-typed instruction has no suffix. memcopy dst, src, n takes
+//     none; store.i32 p, v does, and hir passes the real type there — which
+//     is why this keys on hir's Type being Void rather than on the opcode
+//     being void-resulting.
+func (fl *funcLowerer) suffix(in *hir.Instr) vir.Type {
+	if in.Op.IsComparison() {
+		if len(in.Args) == 0 {
+			fl.ml.bug("comparison with no operands in " + fl.fn.Name)
 		}
-		e.fb.EmitInstruction(ir.Instruction{
-			Result: in.Name, Op: ir.OpCall, Suffix: suffix, Sig: c.Sig,
-			Args: append([]ir.Operand{e.l.value(e.hm, *c.Indirect)}, args...),
-		})
-	case c.Module != "":
-		e.fb.EmitInstruction(ir.Instruction{
-			Result: in.Name, Op: ir.OpCall, Suffix: suffix,
-			Args: append([]ir.Operand{ir.QualifiedIdent(c.Module, c.Name)}, args...),
-		})
-	default:
-		e.fb.EmitInstruction(ir.Instruction{
-			Result: in.Name, Op: ir.OpCall, Suffix: suffix,
-			Args: append([]ir.Operand{ir.Ident(c.Name)}, args...),
-		})
+		return fl.ml.typ(in.Args[0].Type)
 	}
-}
-
-func (e *emitter) operands(vs []hir.Value) []ir.Operand {
-	if len(vs) == 0 {
+	if hir.IsVoid(in.Type) {
 		return nil
 	}
-	out := make([]ir.Operand, 0, len(vs))
-	for _, v := range vs {
-		out = append(out, e.l.value(e.hm, v))
+	return fl.ml.typ(in.Type)
+}
+
+func (fl *funcLowerer) operands(args []hir.Value) []vir.Operand {
+	out := make([]vir.Operand, 0, len(args))
+	for _, a := range args {
+		out = append(out, fl.ml.operand(a))
 	}
 	return out
+}
+
+// alloca carries an align clause, which the plain Emit path has nowhere to
+// put. Every hir alloca is a byte count plus an alignment: Vertex has no
+// dynamically sized local, so the size operand is always a constant.
+func (fl *funcLowerer) alloca(in *hir.Instr) {
+	fl.b.EmitInstruction(vir.Instruction{
+		Result: in.Result,
+		Op:     vir.OpAlloca,
+		Suffix: vir.Ptr,
+		Args:   fl.operands(in.Args),
+		Align:  in.Align,
+	})
+}
+
+// indexPtr bridges the one arity mismatch between the two vocabularies.
+//
+// vir's index takes (base, elem type, index) and scales by the element's
+// stride. hir scales in the front end and emits (base, byte offset) — the
+// bounds check and the multiply are already separate instructions above it,
+// because the check has to happen whether or not the scale folds. So the
+// element type this names is i8: the offset is a byte count, and a stride
+// of one leaves the arithmetic hir already did untouched.
+func (fl *funcLowerer) indexPtr(in *hir.Instr) {
+	if len(in.Args) != 2 {
+		fl.ml.bug("index.ptr with unexpected arity in " + fl.fn.Name)
+	}
+	fl.b.Emit(in.Result, vir.OpIndex, vir.Ptr,
+		fl.ml.operand(in.Args[0]),
+		vir.TypeOperand(vir.I8),
+		fl.ml.operand(in.Args[1]),
+	)
+}
+
+// call takes no suffix: vir derives a call's result type from the callee's
+// declaration rather than from the site.
+//
+// Module is the owning module name for a cross-module call — a Vertex
+// package or a builtins module — and "" for a call within this module. The
+// import it needs was recorded by hir at the site that made it.
+func (fl *funcLowerer) call(in *hir.Instr) {
+	if in.Sig != "" {
+		// An indirect call. Nothing upstream produces one — hir todos on
+		// every call through a function value — but the spelling is here so
+		// that landing fnsig upstream does not also mean landing it here.
+		if len(in.Args) == 0 {
+			fl.ml.bug("indirect call with no function pointer in " + fl.fn.Name)
+		}
+		ops := fl.operands(in.Args)
+		fl.b.EmitInstruction(vir.Instruction{
+			Result: in.Result,
+			Op:     vir.OpCall,
+			Sig:    in.Sig,
+			Args:   ops,
+		})
+		return
+	}
+	if in.Callee == "" {
+		fl.ml.bug("call with no callee in " + fl.fn.Name)
+	}
+
+	callee := vir.Ident(in.Callee)
+	if in.Module != "" {
+		callee = vir.QualifiedIdent(in.Module, in.Callee)
+	}
+	args := append([]vir.Operand{callee}, fl.operands(in.Args)...)
+	fl.b.Emit(in.Result, vir.OpCall, nil, args...)
 }

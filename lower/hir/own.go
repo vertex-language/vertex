@@ -2,242 +2,224 @@ package hir
 
 import (
 	"github.com/vertex-language/vertex/builtins"
-	"github.com/vertex-language/vertex/token"
 	"github.com/vertex-language/vertex/types"
 )
 
-// ownership synthesizes and dispatches the per-type routines that "copy"
-// and "teardown" actually mean. types.Info.Transfers answers move-vs-copy
-// at each owning position, but copy is not one operation — it is the table
-// in overview §3, and this file is that table's right-hand column.
+// Ownership expansion. A bare owning use is a copy and a marked one is a
+// move; "copy" is not one operation, and this file is where the table in
+// semantics.md §8.5 becomes instructions.
 //
-// A.9.4 prices the difference: a bare copy of an owning fat type duplicates
-// header *and* payload, O(data); a transfer copies the header and stops,
-// O(1). unique T is the one cost cliff hidden behind a thin type, which is
-// why its marker is visible rather than inferred.
-type ownership struct {
-	l     *lowerer
-	copies map[string]*Func
-	deinits map[string]*Func
-}
+//	scalars, typed_ptr, vector    register move
+//	struct, class, [N]T           fieldwise, recursing per field
+//	string, []T, map[K]V          deep — duplicates the payload
+//	unique T                      allocates and deep-copies the pointee
+//	shared T, chan T              refcount increment
+//	weak T                        weak-count increment
 
-func newOwnership(l *lowerer) *ownership {
-	return &ownership{l: l, copies: map[string]*Func{}, deinits: map[string]*Func{}}
-}
+// copyOf produces an owned copy of v. Trivial copies emit nothing; the rest
+// go through a per-type routine or a builtin.
+func (fb *funcBuilder) copyOf(v Value, t types.Type) Value {
+	if v.IsZero() || t == nil {
+		return v
+	}
+	switch types.CopyCost(t) {
+	case types.CopyRegister:
+		return v
 
-// emitCopy produces a copy of v at an owning position where no transfer
-// marker was written.
-func (o *ownership) emitCopy(b *funcBuilder, pos token.Pos, t types.Type, v Value) Value {
-	switch o.l.classify(t) {
-	case kString:
-		// A.9.4 licenses sharing or interning an immutable string payload.
-		// Declining the license is the safe default, and this is the
-		// recorded choice: a string copy is a real duplication.
-		o.l.need(builtins.FeatString)
-		st := o.l.hirType(t).(StructType)
-		dst := b.alloca(pos, st)
-		b.callBuiltin(pos, symStringCopy, Void, dst, v)
-		return Value{Kind: ValRef, Name: dst.Name, Type: st}
-
-	case kShared, kChan:
-		// Always cheap: an atomic increment, regardless of marker.
-		s := symRCRetain
-		if o.l.classify(t) == kChan {
-			s = builtins.ChanRetain
+	case types.CopyRefcount:
+		if types.IsChan(t) {
+			fb.l.need(builtins.FeatChan)
+			return fb.callBuiltin(builtins.ChanRetain, Ptr, v)
 		}
-		return b.callBuiltin(pos, s, Ptr, v)
+		return fb.callBuiltin(builtins.RCRetain, Ptr, v)
 
-	case kWeak:
-		return b.callBuiltin(pos, builtins.RCWeak, Ptr, v)
+	case types.CopyWeakcount:
+		return fb.callBuiltin(builtins.RCWeak, Ptr, v)
 
-	case kSlice, kUnique, kMap, kStruct, kEnum:
-		f := o.copyRoutine(t)
-		if f == nil {
+	case types.CopyAlloc:
+		// unique T: a fresh allocation plus a deep copy of the pointee.
+		return fb.callBuiltin(builtins.UniqueNew, Ptr, v)
+
+	case types.CopyDeep:
+		return fb.deepCopy(v, t)
+
+	default: // CopyFieldwise
+		ht := fb.typ(t)
+		if !IsAggregate(ht) {
 			return v
 		}
-		ht := o.l.hirType(t)
-		dst := b.alloca(pos, ht)
-		b.call(pos, f, dst, v)
-		return Value{Kind: ValRef, Name: dst.Name, Type: ht}
+		dst := fb.alloca(ht, "cp")
+		fb.copyInto(dst, v, t)
+		return dst
 	}
-	return v // scalar, mut, non-owning view: a bit copy
 }
 
-// emitDeinit runs a binding's teardown where its liveness ends. Fields go
-// in reverse declaration order, locals in reverse declaration order.
-func (o *ownership) emitDeinit(b *funcBuilder, pos token.Pos, bd *binding) {
-	switch o.l.classify(bd.Src) {
-	case kString:
-		b.callBuiltin(pos, symStringFree, Void, bd.Value)
-	case kSlice:
-		b.callBuiltin(pos, symSliceFree, Void, bd.Value)
-	case kMap:
-		b.callBuiltin(pos, symMapFree, Void, bd.Value)
-	case kChan:
-		b.callBuiltin(pos, symChanRelease, Void, bd.Value)
-	case kShared:
-		// release takes the payload's deinit so the last owner runs it.
-		b.callBuiltin(pos, symRCRelease, I1, bd.Value, o.deinitAddr(b, pos, o.l.elem(bd.Src)))
-	case kWeak:
-		b.callBuiltin(pos, builtins.RCWeakDrop, Void, bd.Value)
-	case kUnique, kStruct, kEnum:
-		if f := o.deinitRoutine(bd.Src); f != nil {
-			b.call(pos, f, bd.Value)
+func (fb *funcBuilder) deepCopy(v Value, t types.Type) Value {
+	switch {
+	case types.IsString(t):
+		// This package declines semantics.md §8.5's license to share or
+		// intern an immutable string payload: a bare copy emits a real
+		// duplication. Interning would put a refcount header on a type whose
+		// spelling contains no `shared` — a cost invisible in the source.
+		ht := fb.typ(t)
+		dst := fb.alloca(ht, "str")
+		fb.callBuiltin(builtins.StringCopy, Void, dst, v)
+		return dst
+	case types.IsSlice(t):
+		ht := fb.typ(t)
+		dst := fb.alloca(ht, "sl")
+		elem := types.AsSlice(t).Elem()
+		fb.callBuiltin(builtins.SliceAlloc, Void, dst,
+			Int(fb.l.sizeOf(fb.typ(elem)), I64), Int(0, I64))
+		// todo: the element loop. A []T of non-trivial T copies each element
+		// at that element's own cost; today only the header is duplicated,
+		// which is wrong for []string and right for []int32.
+		return dst
+	case types.IsMap(t):
+		fb.l.need(builtins.FeatMap)
+		return fb.callBuiltin(builtins.MapNew, Ptr)
+	}
+	return v
+}
+
+// copyInto is the fieldwise copy: each field at that field's own cost, which
+// is why a struct holding a []T still deep-copies that field.
+func (fb *funcBuilder) copyInto(dst, src Value, t types.Type) {
+	ht := fb.typ(t)
+	if !fb.needsDrop(t) {
+		// Nothing owns anything: one memcopy is the whole operation.
+		fb.emitVoid(OpMemcopy, Void, dst, src, Int(fb.l.sizeOf(ht), I64))
+		return
+	}
+	st := types.AsStruct(t)
+	if st == nil || ht.Kind != KStruct {
+		fb.emitVoid(OpMemcopy, Void, dst, src, Int(fb.l.sizeOf(ht), I64))
+		return
+	}
+	for i := 0; i < st.NumFields(); i++ {
+		f := st.Field(i)
+		sp := fb.fieldPtr(src, ht.Struct, i)
+		dp := fb.fieldPtr(dst, ht.Struct, i)
+		ft := ht.Struct.Fields[i].Type
+		if IsAggregate(ft) {
+			fb.copyInto(dp, sp, f.Type)
+			continue
 		}
+		v := fb.copyOf(fb.emit(OpLoad, ft, sp), f.Type)
+		fb.emitVoid(OpStore, ft, dp, v)
 	}
 }
 
-// copyRoutine synthesizes the per-type copy. Tier-2 symbols have exactly
-// one owning module: the module declaring the type, or for a synthesized
-// container routine, the module declaring the element type. Two packages
-// copying the same []Foo reference the routine, they do not each emit it.
-func (o *ownership) copyRoutine(t types.Type) *Func {
-	key := types.TypeString(t)
-	if f, ok := o.copies[key]; ok {
-		return f
+// needsDrop reports whether a value of t owns anything. A type that owns
+// nothing needs no teardown, no _Vdrop routine, and no epilogue entry.
+func (fb *funcBuilder) needsDrop(t types.Type) bool {
+	if t == nil {
+		return false
 	}
-	mod := o.owningModule(t)
-	ht := o.l.types.lower(mod, t)
-	f := &Func{
-		Name: mod.uniqueName("copy__" + sanitize(key)), Module: mod, Kind: FuncCopy,
-		Params: []*Param{{Name: "dst", Type: Ptr}, {Name: "src", Type: Ptr}},
-		Result: Void, Export: true,
+	switch types.CopyCost(t) {
+	case types.CopyRegister:
+		return false
+	case types.CopyDeep, types.CopyAlloc, types.CopyRefcount, types.CopyWeakcount:
+		return true
 	}
-	mod.Funcs = append(mod.Funcs, f)
-	o.copies[key] = f
-
-	prev := o.l.cur
-	o.l.cur = &instance{unit: prev.unit, mod: mod}
-	defer func() { o.l.cur = prev }()
-
-	b := newFuncBuilder(o.l, f, nil)
-	dst, src := Ref("dst", Ptr), Ref("src", Ptr)
-	o.copyInto(b, ht, t, dst, src)
-	b.seq.add(&Return{})
-	return f
-}
-
-// copyInto is the recursion. A struct recurses field by field; an enum
-// recurses into the live variant only — the tag tells the copy routine
-// which interpretation to walk.
-func (o *ownership) copyInto(b *funcBuilder, ht Type, t types.Type, dst, src Value) {
-	switch o.l.classify(t) {
-	case kSlice:
-		// []T must genuinely duplicate: header plus payload, then an
-		// element loop for an owning element type.
-		o.l.need(builtins.FeatSlice)
-		st := ht.(StructType)
-		n := b.loadField(0, st.Def, src, "len")
-		esz := o.l.types.Sizeof(o.l.hirType(o.l.elem(t)))
-		b.callBuiltin(0, builtins.SliceAlloc, Void, dst, IntVal(I64, esz), n)
-		o.elementLoop(b, t, dst, src, n)
-
-	case kUnique:
-		// Deep: walks and duplicates the pointee.
-		inner := o.l.elem(t)
-		hi := o.l.hirType(inner)
-		h := b.callBuiltin(0, symUniqueNew, Ptr, IntVal(I64, o.l.types.Sizeof(hi)))
-		o.copyInto(b, hi, inner, h, src)
-		b.store(0, Ptr, dst, h)
-
-	case kStruct:
-		st := ht.(StructType)
-		_, fields := o.l.structParts(t)
-		b.opVoid(0, OpMemcopy, Void, dst, src, IntVal(I64, st.Def.Size))
-		for i, f := range st.Def.Fields {
-			if i >= len(fields) || !o.l.classify(fields[i].Type).owning() {
-				continue
-			}
-			o.copyInto(b, f.Type, fields[i].Type,
-				b.fieldPtr(0, st.Def, dst, f.Name), b.fieldPtr(0, st.Def, src, f.Name))
-		}
-
-	case kEnum:
-		o.l.todo(0, "enum copy routine — switch on the tag, recurse into the live variant only")
-
-	default:
-		b.store(0, ht, dst, b.load(0, ht, src))
+	// Fieldwise: recurse. A class declaring deinit is non-trivial regardless.
+	if n := types.AsNamed(t); n != nil && n.LookupMethod("deinit") != nil {
+		return true
 	}
-}
-
-func (o *ownership) elementLoop(b *funcBuilder, t types.Type, dst, src, n Value) {
-	elem := o.l.elem(t)
-	if !o.l.classify(elem).owning() {
-		return // the bulk copy already duplicated plain elements
-	}
-	he := o.l.hirType(elem)
-	i := b.alloca(0, I64)
-	b.store(0, I64, i, IntVal(I64, 0))
-	loop := &Loop{}
-	loop.Body = b.into(func() {
-		b.push(scopeLoop)
-		cur := b.load(0, I64, i)
-		b.seq.add(&If{Cond: b.op(0, OpUge, I1, cur, n), Then: &Seq{List: []Stmt{&Break{}}}})
-		o.copyInto(b, he, elem, b.indexPtr(0, he, dst, cur), b.indexPtr(0, he, src, cur))
-		b.store(0, I64, i, b.op(0, OpAdd, I64, cur, IntVal(I64, 1)))
-		b.pop()
-	})
-	b.seq.add(loop)
-}
-
-func (o *ownership) deinitRoutine(t types.Type) *Func {
-	key := types.TypeString(t)
-	if f, ok := o.deinits[key]; ok {
-		return f
-	}
-	mod := o.owningModule(t)
-	f := &Func{
-		Name: mod.uniqueName("deinit__" + sanitize(key)), Module: mod, Kind: FuncDeinit,
-		Params: []*Param{{Name: "p", Type: Ptr}}, Result: Void, Export: true,
-	}
-	mod.Funcs = append(mod.Funcs, f)
-	o.deinits[key] = f
-
-	prev := o.l.cur
-	o.l.cur = &instance{unit: prev.unit, mod: mod}
-	defer func() { o.l.cur = prev }()
-
-	b := newFuncBuilder(o.l, f, nil)
-	o.l.emitUserDeinit(b, t, Ref("p", Ptr)) // the declared deinit, if any
-	b.seq.add(&Return{})
-	return f
-}
-
-// deinitAddr yields a function pointer to a type's teardown, for the
-// builtins that must run it themselves (rc.release's last-owner path).
-func (o *ownership) deinitAddr(b *funcBuilder, pos token.Pos, t types.Type) Value {
-	f := o.deinitRoutine(t)
-	if f == nil {
-		return NullVal()
-	}
-	name := "addr_" + f.Name
-	if findGlobal(b.mod(), name) == nil {
-		b.mod().Globals = append(b.mod().Globals, &Global{
-			Name: b.mod().uniqueName(name), Type: Ptr, Init: InitAddr{Name: f.Name},
-		})
-	}
-	return b.load(pos, Ptr, GlobalVal(name, Ptr))
-}
-
-// owningModule picks the one module a synthesized symbol lives in: the
-// module declaring the generic function, or for a per-type routine, the
-// module declaring the type. vir has a strict flat namespace and
-// declare-before-use, so two packages both copying a []Foo would otherwise
-// produce a duplicate symbol rather than a silently-merged one.
-func (o *ownership) owningModule(t types.Type) *Module {
-	if n, ok := o.l.subst(t).(*types.Named); ok && n.Obj() != nil && n.Obj().Pkg() != nil {
-		if m := o.l.modules[n.Obj().Pkg().Path()]; m != nil {
-			return m
-		}
-	}
-	if e := o.l.elem(t); e != nil {
-		if n, ok := o.l.subst(e).(*types.Named); ok && n.Obj() != nil && n.Obj().Pkg() != nil {
-			if m := o.l.modules[n.Obj().Pkg().Path()]; m != nil {
-				return m
+	if st := types.AsStruct(t); st != nil {
+		for i := 0; i < st.NumFields(); i++ {
+			if fb.needsDrop(st.Field(i).Type) {
+				return true
 			}
 		}
 	}
-	// A routine over nothing but predeclared types has no declaring
-	// package; it belongs to the root module.
-	return o.l.prog.Modules[0]
+	if a := types.AsArray(t); a != nil {
+		return fb.needsDrop(a.Elem())
+	}
+	return false
+}
+
+// dropBinding tears one local down at a scope exit.
+func (fb *funcBuilder) dropBinding(b *binding) {
+	if !fb.needsDrop(b.vt) {
+		return
+	}
+	if b.slot {
+		fb.dropInPlace(b.val, b.vt)
+		return
+	}
+	fb.dropValue(b.val, b.vt)
+}
+
+// dropInPlace tears down the value stored at p.
+func (fb *funcBuilder) dropInPlace(p Value, t types.Type) {
+	if !fb.needsDrop(t) {
+		return
+	}
+	ht := fb.typ(t)
+	if !IsAggregate(ht) {
+		fb.dropValue(fb.emit(OpLoad, ht, p), t)
+		return
+	}
+	// The user deinit runs first, then the fields in reverse declaration
+	// order.
+	if n := types.AsNamed(t); n != nil {
+		if d := n.LookupMethod("deinit"); d != nil {
+			target := fb.l.enqueue(d, nil)
+			fb.emitCall(target.Name, moduleNameOf(target, fb.fn.Module), Void, []Value{p})
+		}
+	}
+	st := types.AsStruct(t)
+	if st == nil {
+		return
+	}
+	for i := st.NumFields() - 1; i >= 0; i-- {
+		f := st.Field(i)
+		if !fb.needsDrop(f.Type) {
+			continue
+		}
+		fb.dropInPlace(fb.fieldPtr(p, ht.Struct, i), f.Type)
+	}
+}
+
+func (fb *funcBuilder) dropValue(v Value, t types.Type) {
+	switch types.CopyCost(t) {
+	case types.CopyRefcount:
+		if types.IsChan(t) {
+			fb.callBuiltin(builtins.ChanRelease, Void, v)
+			return
+		}
+		// The release path drops the payload when the count reaches zero, so
+		// it takes the payload's own drop routine as a function pointer.
+		fb.callBuiltin(builtins.RCRelease, I1, v, Null())
+	case types.CopyWeakcount:
+		fb.callBuiltin(builtins.RCWeakDrop, Void, v)
+	case types.CopyAlloc:
+		fb.callBuiltin(builtins.UniqueFree, Void, v)
+	case types.CopyDeep:
+		switch {
+		case types.IsString(t):
+			fb.callBuiltin(builtins.StringFree, Void, v)
+		case types.IsSlice(t):
+			fb.callBuiltin(builtins.SliceFree, Void, v)
+		case types.IsMap(t):
+			fb.callBuiltin(builtins.MapFree, Void, v)
+		}
+	}
+}
+
+// todo: per-type _Vcopy_T / _Vdrop_T routines. Today copyInto and
+// dropInPlace inline the walk at every site, which is correct and duplicates
+// code — a bare copy is already the documented-expensive path, and
+// multiplying its body is exactly what lowering.md §7.1 says not to do.
+// Synthesizing one routine per type and calling it is mechanical from here;
+// the reason it is not done is that the owning-module rule (which module
+// holds _Vdrop_Foo when two packages both drop a Foo) wants deciding first.
+
+func moduleNameOf(target *Func, from *Module) string {
+	if target.Module == from {
+		return ""
+	}
+	from.Import(target.Module.Path)
+	return target.Module.Name
 }

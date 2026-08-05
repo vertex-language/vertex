@@ -1,8 +1,8 @@
 package hir
 
 import (
-	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/vertex-language/vertex/ast"
 	"github.com/vertex-language/vertex/builtins"
@@ -10,260 +10,241 @@ import (
 	"github.com/vertex-language/vertex/types"
 )
 
-// Mode selects what the build exists for.
+// Mode selects what the program is built around.
 type Mode uint8
 
 const (
-	// ModeProgram seeds monomorphization from main.
+	// ModeProgram seeds monomorphization from main. Exported *generic*
+	// functions are not roots — there are no concrete type arguments to seed
+	// with — so only reachability from main instantiates anything.
 	ModeProgram Mode = iota
-	// ModeTest compiles one test function in isolation into its own
-	// binary (overview §6.2). Isolation starts at analyzer, not here; by
-	// the time hir runs, the unit already contains exactly one test
-	// function, and hir's only extra job is the render wrapper.
+
+	// ModeTest seeds from the single test function named by Config.Test, and
+	// synthesizes a render wrapper into the entry slot instead of a main
+	// wrapper. A test binary holds exactly one test function; nothing
+	// enumerates tests inside a process.
 	ModeTest
 )
 
-// Config is everything lowering needs that isn't the checked graph itself.
-// Note what is absent: no target triple, no arch, no OS. The one
-// target-shaped fact hir consumes is layout, and it arrives as Sizes.
 type Config struct {
-	Fset  *token.FileSet
-	Sizes types.Sizes
-
-	// PointerSize is the width Sizes assigns a pointer, in bytes. Zero
-	// means 8. It is separate from Sizes only because the synthesized
-	// header layouts (slice, string, closure) are hir's own shapes and
-	// have no types.Type for Sizes to measure.
-	PointerSize int64
-
-	Mode Mode
-
-	// TestFunc names the single test function under ModeTest.
-	TestFunc string
-
-	// MaxDepth bounds recursive instantiation. A.7.6 makes non-terminating
-	// instantiation a compile error; the worklist carries its own guard
-	// rather than assuming the analyzer enforced it upstream. Zero means 64.
-	MaxDepth int
+	Fset  *token.FileSet // resolves positions into loc lines; hir resolves none itself
+	Sizes *types.Sizes   // the only target-shaped input
+	Mode  Mode
+	Test  string // the one test function, under ModeTest
 }
 
-// Unit is one checked Vertex package, as importer.Load produced it. hir
-// takes this shape rather than an *importer.Result so it does not depend on
-// the loader — and so a test can hand it a package built by hand.
+// Unit is one checked package. hir takes []*Unit rather than an
+// *importer.Result so it does not depend on the loader, and so a test can
+// hand it a graph built by hand.
 type Unit struct {
-	Path  string
-	Name  string
-	Files []*ast.File
-	Types *types.Package
+	Pkg   *types.Package
 	Info  *types.Info
+	Files []*ast.File
 }
 
-// Lower runs the whole front-to-hir pipeline over a checked graph and
-// returns one *hir.Program. units must be in topological order (a package
-// after everything it imports) — importer.Result.Order already is.
+// TodoError means the program is valid and this package does not lower that
+// construct yet. Distinct from InternalError, which means something the
+// analyzer should already have rejected got through — a bug here or in
+// analyzer, never in the user's source. A driver reports the first as
+// "unsupported" and the second as a compiler crash.
+type TodoError struct{ What string }
+
+func (e *TodoError) Error() string { return "todo: " + e.What }
+
+type InternalError struct{ What string }
+
+func (e *InternalError) Error() string { return "internal: " + e.What }
+
+// Lower turns the checked graph into a Program. units must be in topological
+// order — dependencies before dependents.
 //
-// Errors are accumulated rather than fatal, mirroring the toolchain's habit
-// everywhere else: a construct hir cannot lower yet produces a `todo:`
-// error naming it, distinct from an `internal:` error, which means
-// something the analyzer should already have caught got through.
-func Lower(conf *Config, units []*Unit) (*Program, error) {
-	if conf == nil {
-		return nil, errors.New("hir: nil Config")
+// Sizes must match the build tag the packages were *checked* under: `int`
+// and `uint` are the target's pointer width, so a mismatch silently changes
+// every layout the checker already committed to.
+func Lower(conf *Config, units []*Unit) (prog *Program, err error) {
+	if conf == nil || conf.Sizes == nil {
+		return nil, &InternalError{"Lower: Config.Sizes is required"}
 	}
+
 	l := &lowerer{
-		conf:    conf,
-		units:   units,
-		modules: map[string]*Module{},
-		byUnit:  map[*Unit]*Module{},
-		globals: map[types.Object]*globalBinding{},
-		externs: map[types.Object]*ExternFunc{},
-		prog:    &Program{},
+		conf:     conf,
+		units:    units,
+		prog:     &Program{},
+		modOf:    map[*types.Package]*Module{},
+		infoOf:   map[*types.Package]*types.Info{},
+		typeName: nil, // set below; needs l
+		done:     map[string]*Func{},
 	}
-	l.types = newTypeLowerer(l)
-	l.work = newWorklist(l)
-	l.own = newOwnership(l)
+	l.typeName = l.mangleTypeName
+
+	// bail is how todo/bug unwind out of the deeply recursive expression
+	// walk without threading an error through every return. Nothing else in
+	// this package panics.
+	defer func() {
+		if r := recover(); r != nil {
+			if b, ok := r.(bail); ok {
+				prog, err = nil, b.err
+				return
+			}
+			panic(r)
+		}
+	}()
 
 	for _, u := range units {
-		m := newModule(u.Path, u.Name)
-		l.modules[u.Path] = m
-		l.byUnit[u] = m
+		m := newModule(u.Pkg.Name(), u.Pkg.Path())
 		l.prog.Modules = append(l.prog.Modules, m)
+		l.modOf[u.Pkg] = m
+		l.infoOf[u.Pkg] = u.Info
 	}
 
-	// 0. Declarations first: structs, consts, globals, and every declare
-	//    block. Bodies reference them, and vir's fixed section order plus
-	//    declare-before-use means they must exist before any call site can
-	//    name one.
+	// Pass 1: declarations. Shapes, constants, globals, declare blocks, and
+	// a shell for every non-generic function.
 	for _, u := range units {
-		l.declarations(u)
+		l.unit = u
+		l.mod = l.modOf[u.Pkg]
+		l.info = u.Info
+		l.collect(u)
 	}
 
-	// 1. Monomorphization, seeded from the roots. Everything below is
-	//    type-dependent, so nothing can run before concrete types exist.
-	root := l.seed()
-	if root == nil {
-		return l.prog, l.err()
+	// Pass 2: monomorphization, seeded from the roots.
+	if err := l.seed(); err != nil {
+		return nil, err
 	}
-	l.work.run()
+	l.drain()
 
-	// 2. async/await state-machine split. Not implemented; see async.go.
-	//    When it lands it must run here, before epilogue expansion.
-	l.splitAsync()
+	// Pass 3 is async.go's state-machine split and is not implemented.
+	//
+	// Pass 4 — defer/deinit epilogue expansion — happens *during* body
+	// lowering, through the builder's scope stack. That is a known deviation
+	// from lowering.md, equivalent for a program with no async functions and
+	// wrong for one that has them, because a suspend edge is not a scope
+	// exit. Landing async.go means lifting it out first; see async.go.
 
-	// 3+4. defer/deinit epilogue expansion and ownership expansion are
-	//    performed during body lowering, through the builder's scope stack
-	//    (see builder.go's scope type and epilogue.go). This is a
-	//    deliberate deviation from the overview's five-pass shape, recorded
-	//    in the package README: it is equivalent for a program with no
-	//    async functions, and the seam is kept narrow so it can be lifted
-	//    into standalone passes when the split in step 2 arrives.
-
-	// 5. Control-flow flattening: structured statements become the Join
-	//    Convention shape, which is what makes lower/vir mechanical.
+	// Pass 5: flatten.
 	for _, m := range l.prog.Modules {
 		for _, f := range m.Funcs {
-			Flatten(f)
+			if f.Body != nil {
+				Flatten(f)
+			}
 		}
 	}
 
-	l.prog.Features = l.feats
-	return l.prog, l.err()
+	l.prog.Features = l.features
+	return l.prog, nil
 }
 
-// lowerer is the state of one Lower call.
+type bail struct{ err error }
+
 type lowerer struct {
 	conf  *Config
 	units []*Unit
+	prog  *Program
 
-	prog    *Program
-	modules map[string]*Module
-	byUnit  map[*Unit]*Module
+	// current unit, set by every pass that walks per-package
+	unit *Unit
+	mod  *Module
+	info *types.Info
 
-	types *typeLowerer
-	work  *worklist
-	own   *ownership
+	modOf  map[*types.Package]*Module
+	infoOf map[*types.Package]*types.Info
 
-	// globals maps a top-level object to where it landed: a vir const with
-	// no runtime storage, or module-level storage reached by address. See
-	// info.go's globalBinding.
-	globals map[types.Object]*globalBinding
+	typeName func(types.Type) string
 
-	// externs maps a checked object declared inside a `declare` block to
-	// the *ExternFunc decl.go already built for it. A call naming such an
-	// object must be routed here directly rather than through the
-	// monomorphization worklist: an extern has no Vertex body to
-	// instantiate, and prior to this map, resolveCallee had no way to
-	// tell the two apart — a call to `printf` was scheduled as if it were
-	// an ordinary Vertex function, collided with the extern's own
-	// reserved name in the module's flat namespace, got silently
-	// suffixed ("printf" -> "printf_1"), and produced a declared body
-	// with no instructions and no terminator, since findFuncDecl can
-	// never find an ast.FuncDecl behind a declare-block member. See
-	// expr.go's externCallExpr and decl.go's bindExtern call site.
-	externs map[types.Object]*ExternFunc
+	// work is the monomorphization worklist; done memoizes by instance key
+	// so a diamond of instantiations is built once.
+	work []*instance
+	done map[string]*Func
 
-	feats builtins.FeatureSet
-
-	// cur is the instance being lowered: which unit's Info to read, which
-	// module to emit into, and which type-parameter substitution is live.
-	cur *instance
-
-	errs []error
-}
-
-// instance is one monomorphized function in flight.
-type instance struct {
-	unit  *Unit
-	mod   *Module
-	subst map[*types.TypeParam]types.Type
+	// depth guards non-terminating instantiation. semantics.md §9 makes it a
+	// compile error; the guard lives here rather than assuming the analyzer
+	// enforced it upstream.
 	depth int
+
+	features builtins.FeatureSet
 }
 
-func (l *lowerer) info() *types.Info {
-	if l.cur == nil {
-		return nil
+const maxInstantiationDepth = 64
+
+func (l *lowerer) todo(what string) *Type {
+	panic(bail{&TodoError{what}})
+}
+
+func (l *lowerer) bug(what string) *Type {
+	panic(bail{&InternalError{what}})
+}
+
+func (l *lowerer) todoAt(pos token.Pos, what string) {
+	panic(bail{&TodoError{fmt.Sprintf("%s (%s)", what, l.conf.Fset.Position(pos))}})
+}
+
+func (l *lowerer) bugAt(pos token.Pos, what string) {
+	panic(bail{&InternalError{fmt.Sprintf("%s (%s)", what, l.conf.Fset.Position(pos))}})
+}
+
+// need records a feature at the site that requires it, which is what makes
+// Program.Features unable to disagree with the calls actually emitted.
+func (l *lowerer) need(f builtins.Feature) {
+	l.features = l.features.With(f)
+}
+
+// ownerOf answers which module a named type's shape belongs to. A type
+// declared in another package lands in that package's module and is
+// referenced across; anything anonymous lands where it was first needed.
+func (l *lowerer) ownerOf(t types.Type, fallback *Module) *Module {
+	if n := types.AsNamed(t); n != nil && n.Obj() != nil && n.Obj().Pkg() != nil {
+		if m, ok := l.modOf[n.Obj().Pkg()]; ok {
+			return m
+		}
 	}
-	return l.cur.Info()
+	return fallback
 }
 
-func (i *instance) Info() *types.Info { return i.unit.Info }
-
-// subst applies the live monomorphization substitution to t. Outside an
-// instance, or for a type mentioning no parameters, it is the identity.
-func (l *lowerer) subst(t types.Type) types.Type {
-	if l.cur == nil || len(l.cur.subst) == 0 || t == nil {
-		return t
+// seed enumerates the roots. Exported generic functions are not among them.
+func (l *lowerer) seed() error {
+	switch l.conf.Mode {
+	case ModeTest:
+		fn := l.findFunc(l.conf.Test, func(f *types.Func) bool { return f.IsTest() })
+		if fn == nil {
+			return &InternalError{"no test function named " + l.conf.Test}
+		}
+		l.enqueue(fn, nil)
+		l.prog.Entry = l.testShim(fn)
+	default:
+		fn := l.findFunc("main", func(f *types.Func) bool { return f.IsEntry() })
+		if fn == nil {
+			return &InternalError{"no func main() in package main"}
+		}
+		l.enqueue(fn, nil)
+		l.prog.Entry = l.mainShim(fn)
 	}
-	return substitute(t, l.cur.subst)
-}
 
-func (l *lowerer) hirType(t types.Type) Type {
-	m := l.currentModule()
-	return l.types.lower(m, t)
-}
-
-func (l *lowerer) currentModule() *Module {
-	if l.cur != nil {
-		return l.cur.mod
+	// Every exported non-generic function is also a root in ModeProgram:
+	// something outside the program may call it. That is the only reason to
+	// walk beyond main.
+	if l.conf.Mode == ModeProgram {
+		for _, u := range l.units {
+			s := u.Pkg.Scope()
+			names := s.Names()
+			sort.Strings(names) // map iteration must not decide emission order
+			for _, n := range names {
+				fn, ok := s.Lookup(n).(*types.Func)
+				if !ok || fn.IsEntry() {
+					continue
+				}
+				if sig := fn.Signature(); sig != nil && len(genericParams(fn)) == 0 {
+					l.enqueue(fn, nil)
+				}
+			}
+		}
 	}
-	return l.prog.Modules[0]
+	return nil
 }
 
-// need records a builtin feature the program uses. Every emitted builtin
-// call goes through here, so the feature set can never disagree with the
-// calls actually emitted.
-func (l *lowerer) need(f builtins.Feature) { l.feats = l.feats.With(f) }
-
-func (l *lowerer) needSymbol(s builtins.Symbol) {
-	if f, ok := builtins.FeatureFor(s); ok {
-		l.need(f)
-	}
-}
-
-func (l *lowerer) errorf(pos token.Pos, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	if pos.IsValid() && l.conf.Fset != nil {
-		msg = l.conf.Fset.Position(pos).String() + ": " + msg
-	}
-	l.errs = append(l.errs, errors.New("hir: "+msg))
-}
-
-// todo marks a construct that is valid Vertex this package does not lower
-// yet — the same distinction vvm's lowering backends draw between a plain
-// error (a bug upstream) and a todo (an unimplemented construct).
-func (l *lowerer) todo(pos token.Pos, format string, args ...any) {
-	l.errorf(pos, "todo: "+format, args...)
-}
-
-func (l *lowerer) err() error {
-	if len(l.errs) == 0 {
-		return nil
-	}
-	return errors.Join(l.errs...)
-}
-
-// seed picks the roots monomorphization starts from. Exported *generic*
-// functions are not roots — there are no concrete type arguments to seed
-// with — so only reachability from main (or the one test function)
-// instantiates anything.
-func (l *lowerer) seed() *types.Func {
-	want := "main"
-	if l.conf.Mode == ModeTest {
-		want = l.conf.TestFunc
-	}
+func (l *lowerer) findFunc(name string, ok func(*types.Func) bool) *types.Func {
 	for _, u := range l.units {
-		if u.Types == nil {
-			continue
+		if obj, is := u.Pkg.Scope().Lookup(name).(*types.Func); is && ok(obj) {
+			return obj
 		}
-		obj := u.Types.Scope().Lookup(want)
-		fn, ok := obj.(*types.Func)
-		if !ok {
-			continue
-		}
-		l.work.enqueue(u, fn, nil, 0)
-		l.buildEntry(u, fn)
-		return fn
 	}
-	l.errorf(0, "internal: no %q function in any root package", want)
 	return nil
 }

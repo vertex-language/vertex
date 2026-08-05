@@ -31,8 +31,8 @@ func emitBinary(opts *Options, res *Result) error {
 	}
 	if res.Target.VVM.Flat && len(res.Modules) > 1 {
 		return fmt.Errorf(
-			"%s produces a flat image, which forbids relocations — but this build has %d packages "+
-				"and a cross-package call is exactly a relocation; build a single-package program "+
+			"%s produces a flat image, which forbids relocations — but this build has %d modules "+
+				"and a cross-module call is exactly a relocation; build a single-package program "+
 				"for a freestanding target",
 			res.Target.Name, len(res.Modules))
 	}
@@ -62,7 +62,9 @@ func emitBinary(opts *Options, res *Result) error {
 // with imports (bare verify.Verify has no notion of a cross-module
 // reference), and BuildModuleGraph refuses flat targets. Choosing by the
 // module's own shape rather than by package count is what keeps both
-// constraints satisfied without the driver duplicating either rule.
+// constraints satisfied without the driver duplicating either rule — and
+// it stays correct now that a build's module list can hold builtin modules
+// the package count never mentions.
 func buildImage(t Target, modules []*virmod.Module, root string) ([]byte, error) {
 	if len(modules) == 1 && len(modules[0].Imports) == 0 {
 		bin, err := vvm.BuildModule(modules[0], t.VVM)
@@ -73,7 +75,7 @@ func buildImage(t Target, modules []*virmod.Module, root string) ([]byte, error)
 	}
 	if root == "" {
 		return nil, fmt.Errorf(
-			"a multi-package build needs a root module to resolve the entry point, and none was " +
+			"a multi-module build needs a root module to resolve the entry point, and none was " +
 				"derived — pass -root <module>")
 	}
 	bin, err := vvm.BuildModuleGraph(modules, root, t.VVM)
@@ -123,10 +125,9 @@ func emitIR(opts *Options, res *Result) error {
 // irOutputPaths resolves -o against an emission that may fan out.
 //
 // The rule is vvm's own device-build rule, for the same reason: one Vertex
-// program is one .vir per package, so -o may name a single file only when
-// there's exactly one package. Silently picking one module out of four to
-// write, or overwriting the same path four times, are both worse than
-// refusing.
+// program is one .vir per module, so -o may name a single file only when
+// there's exactly one. Silently picking one module out of four to write,
+// or overwriting the same path four times, are both worse than refusing.
 func irOutputPaths(opts *Options, res *Result) ([]string, error) {
 	names := make([]string, len(res.Modules))
 	for i, m := range res.Modules {
@@ -156,7 +157,7 @@ func irOutputPaths(opts *Options, res *Result) ([]string, error) {
 		return []string{o}, nil
 	}
 	return nil, fmt.Errorf(
-		"-o names a single file, but this build lowers %d packages (%s) — pass a directory",
+		"-o names a single file, but this build emits %d modules (%s) — pass a directory",
 		len(names), strings.Join(names, ", "))
 }
 
