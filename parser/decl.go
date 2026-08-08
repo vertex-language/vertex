@@ -2,477 +2,534 @@ package parser
 
 import (
 	"github.com/vertex-language/vertex/ast"
-	"github.com/vertex-language/vertex/diag"
 	"github.com/vertex-language/vertex/token"
 )
 
-// parseTopLevelDecl parses one TopLevelDecl. Top-level declarations are
-// order-independent, so there is nothing to track across calls.
-func (p *parser) parseTopLevelDecl() ast.Decl {
-	doc := p.leadComment
+// Declarations — sections C.1, D, H, I.
 
-	switch p.tok.Kind {
-	case token.FUNC:
-		return p.parseFuncDecl(doc)
-	case token.STRUCT, token.CLASS:
-		return p.parseRecordDecl(doc)
-	case token.ENUM:
-		return p.parseEnumDecl(doc)
-	case token.TYPE:
-		return p.parseTypeAliasDecl(doc)
-	case token.CONSTRAINT:
-		return p.parseConstraintDecl(doc)
-	case token.DECLARE:
-		return p.parseDeclareDecl(doc)
-	case token.LET, token.VAR:
-		// Also a Statement. That a top-level initializer must be
-		// compile-time-evaluable, and that the bare form is rejected here, are
-		// static rules over this node.
-		return p.parseVarDecl(doc)
+// parseDeclStmt handles the declarations introduced by a reserved word.
+func (p *parser) parseDeclStmt() ast.Stmt {
+	var decorators []*ast.Decorator
+	if p.at(token.AT) {
+		decorators = p.parseDecorators()
 	}
 
-	p.errorHere(diag.ExpectedDecl, p.describe(p.tok))
-	bad := &ast.BadDecl{From: p.tok.Pos, To: p.tok.End()}
-	p.advance(declStart)
-	return bad
-}
-
-// parseImportDecl parses `import "path"` or `import ( ... )`. There is no
-// aliasing form, no dot-import, and no blank import, so there is nothing to
-// record but paths.
-func (p *parser) parseImportDecl() *ast.ImportDecl {
-	d := &ast.ImportDecl{Doc: p.leadComment, Import: p.expect(token.IMPORT)}
-
-	if p.at(token.LPAREN) {
-		d.Lparen = p.open(token.LPAREN)
-		for !p.at(token.RPAREN) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			d.Paths = append(d.Paths, p.parseImportPath())
-			if p.stalled(before) {
-				continue
-			}
+	switch p.kind() {
+	case token.FUNCTION:
+		return p.parseFunction(decorators, token.NoPos, ast.AccelNone, false)
+	case token.CLASS:
+		return p.parseClass(decorators, token.NoPos)
+	case token.CONST:
+		// `const enum` (H) versus a const binding (C.1).
+		if p.peek(1).Kind == token.ENUM {
+			return p.parseEnum(p.next().Pos)
 		}
-		d.Rparen = p.close(token.RPAREN)
-	} else {
-		d.Paths = append(d.Paths, p.parseImportPath())
+		return p.parseVarDecl()
+	case token.ENUM:
+		return p.parseEnum(token.NoPos)
+	case token.IMPORT:
+		return p.parseImportDecl()
+	case token.EXPORT:
+		return p.parseExportDecl()
 	}
-	p.expectTerminator()
-	return d
+
+	if len(decorators) > 0 {
+		p.errorAt(decorators[0].Pos(), decorators[len(decorators)-1].End(),
+			"a decorator must be followed by a class, function, or member declaration")
+	}
+	return p.parseExprStmt()
 }
 
-func (p *parser) parseImportPath() *ast.BasicLit {
-	if !p.at(token.STRING) {
-		p.errorHere(diag.ExpectedToken, "an import path string", p.describe(p.tok))
-		lit := &ast.BasicLit{ValuePos: p.tok.Pos, Kind: token.STRING, Value: `""`}
-		return lit
-	}
-	lit := &ast.BasicLit{ValuePos: p.tok.Pos, Kind: token.STRING, Value: p.tok.Lit}
-	p.advanceToken()
-	return lit
-}
-
-// parseVarDecl parses both VarDecl forms: `let`/`var` with initializers, and
-// bare `var Binding`.
+// tryContextualDecl handles the declarations introduced by a contextual
+// keyword, which the grammar does not disambiguate for us.
 //
-// Statement-leading `var` is always a declaration. A bare `var w` would
-// otherwise read as the transfer marker outside an owning position; the two
-// readings collide and this one is chosen because `var Binding` is a production
-// while a bare transfer statement is not a production of anything. The other
-// reading is then diagnosed against a real declaration node.
-func (p *parser) parseVarDecl(doc *ast.CommentGroup) *ast.VarDecl {
-	d := &ast.VarDecl{Doc: doc, KwPos: p.tok.Pos, Kw: p.tok.Kind}
-	p.advanceToken()
+// ExpressionStatement's lookahead restriction (C) names only `{`, `function`,
+// `async function`, `class`, and `let [`. It says nothing about `struct`,
+// `interface`, `type`, `enum`, `namespace`, `declare`, `module`, `global`,
+// `abstract`, `kernel`, `graph`, `using`, or `accessor` — every one of which is
+// a plain identifier that could begin an expression. So the lookahead tests
+// below are the parser's own policy, not the grammar's. See the review note.
+//
+// Returns nil with the cursor unmoved when the word is just an identifier.
+func (p *parser) tryContextualDecl() ast.Stmt {
+	switch p.cur().Ctx {
+	case token.CtxStruct:
+		// `struct [no LineTerminator here] BindingIdentifier` (E.1, L). A line
+		// break forces the identifier reading, which is what keeps `struct`
+		// usable as a name (§4.3).
+		if p.peek(1).Kind == token.IDENT && !p.peek(1).NLBefore() {
+			return p.parseStruct(nil)
+		}
 
+	case token.CtxKernel, token.CtxGraph:
+		// AcceleratedFunctionModifier [no LineTerminator here] function (D.4, L).
+		if p.peek(1).Kind == token.FUNCTION && !p.peek(1).NLBefore() {
+			accel := ast.AccelKernel
+			if p.cur().Ctx == token.CtxGraph {
+				accel = ast.AccelGraph
+			}
+			accelPos := p.next().Pos
+			return p.parseFunctionAccel(nil, accelPos, accel)
+		}
+
+	case token.CtxAsync:
+		if p.peek(1).Kind == token.FUNCTION && !p.peek(1).NLBefore() {
+			asyncPos := p.next().Pos
+			return p.parseFunction(nil, asyncPos, ast.AccelNone, true)
+		}
+
+	case token.CtxInterface:
+		if p.peek(1).Kind == token.IDENT {
+			return p.parseInterface()
+		}
+
+	case token.CtxType:
+		// `type X =` and `type X<T> =`. Without the `=` this is an expression.
+		if p.peek(1).Kind == token.IDENT &&
+			(p.peek(2).Kind == token.ASSIGN || p.peek(2).Kind == token.LT) {
+			return p.parseTypeAlias()
+		}
+
+	case token.CtxNamespace:
+		if p.peek(1).Kind == token.IDENT {
+			return p.parseNamespace()
+		}
+
+	case token.CtxDeclare:
+		if p.atAmbientStart(1) {
+			return p.parseAmbient()
+		}
+
+	case token.CtxModule:
+		if p.peek(1).Kind == token.STRING {
+			return p.parseModuleDecl()
+		}
+
+	case token.CtxGlobal:
+		if p.peek(1).Kind == token.LBRACE {
+			return p.parseModuleDecl()
+		}
+
+	case token.CtxAbstract:
+		if p.peek(1).Kind == token.CLASS {
+			abstractPos := p.next().Pos
+			return p.parseClass(nil, abstractPos)
+		}
+
+	case token.CtxLet:
+		switch p.peek(1).Kind {
+		case token.IDENT, token.LBRACE:
+			return p.parseVarDecl()
+		case token.LBRACK:
+			// `let [` is excluded from ExpressionStatement, so it must be a
+			// declaration here.
+			return p.parseVarDecl()
+		}
+
+	case token.CtxUsing:
+		// `using [no LineTerminator here] [lookahead ≠ await]` (C.1).
+		if p.peek(1).Kind == token.IDENT && !p.peek(1).NLBefore() &&
+			p.peek(1).Ctx != token.CtxAwait {
+			return p.parseVarDecl()
+		}
+	}
+	return nil
+}
+
+func (p *parser) atAmbientStart(n int) bool {
+	switch t := p.peek(n); t.Kind {
+	case token.VAR, token.CONST, token.CLASS, token.FUNCTION, token.ENUM:
+		return true
+	case token.IDENT:
+		switch t.Ctx {
+		case token.CtxLet, token.CtxNamespace, token.CtxModule, token.CtxGlobal,
+			token.CtxStruct, token.CtxAbstract:
+			return true
+		}
+	}
+	return false
+}
+
+// --- bindings (C.1, C.2) ----------------------------------------------------
+
+func (p *parser) parseVarDecl() ast.Stmt {
+	d := &ast.VarDecl{}
+	switch {
+	case p.at(token.VAR):
+		d.Kind, d.KindPos = ast.VarVar, p.next().Pos
+	case p.at(token.CONST):
+		d.Kind, d.KindPos = ast.VarConst, p.next().Pos
+	case p.at(token.AWAIT):
+		// AwaitUsingDeclaration: `await [no LT] using [no LT] ...` (C.1, L).
+		d.AwaitPos = p.next().Pos
+		p.noLineTerminator("`using`")
+		d.Kind, d.KindPos = ast.VarAwaitUsing, p.expectCtx(token.CtxUsing)
+		p.noLineTerminator("the binding list")
+	case p.atCtx(token.CtxUsing):
+		d.Kind, d.KindPos = ast.VarUsing, p.next().Pos
+		p.noLineTerminator("the binding list")
+	default:
+		d.Kind, d.KindPos = ast.VarLet, p.next().Pos
+	}
+
+	// UsingBinding requires an initializer; LexicalBinding does not (C.1).
+	requireInit := d.Kind == ast.VarUsing || d.Kind == ast.VarAwaitUsing
 	for {
-		d.Bindings = append(d.Bindings, p.parseBinding())
+		before := p.i
+		d.List = append(d.List, p.parseBinding(allowIn, requireInit))
 		if !p.got(token.COMMA) {
 			break
 		}
-	}
-
-	if p.at(token.ASSIGN) {
-		d.Assign = p.tok.Pos
-		p.advanceToken()
-		for {
-			d.Values = append(d.Values, p.parseExpr())
-			if !p.got(token.COMMA) {
-				break
-			}
+		if !p.advanced(before) {
+			break
 		}
-	} else if d.Kw == token.LET || len(d.Bindings) > 1 {
-		// The initializer-free alternative is `"var" Binding` and nothing
-		// else: `let` always requires one, and the bare form takes a single
-		// binding.
-		p.errorHere(diag.ExpectedToken, "'='", p.describe(p.tok))
 	}
-
-	d.Comment = p.lineComment
+	d.Semi = p.expectSemi()
 	return d
 }
 
-func (p *parser) parseBinding() *ast.Binding {
-	b := &ast.Binding{Name: p.expectIdent()}
-	if p.at(token.COLON) {
-		b.Colon = p.tok.Pos
-		p.advanceToken()
-		b.Type = p.parseType()
+func (p *parser) parseBinding(in inFlag, requireInit bool) *ast.Binding {
+	b := &ast.Binding{}
+	switch {
+	case p.at(token.LBRACE), p.at(token.LBRACK):
+		b.Pattern = p.parseBindingTarget()
+	default:
+		b.Name = p.parseIdent()
+		// DefiniteAssignmentAssertion (C.1), only on the identifier form.
+		if p.at(token.NOT) {
+			b.Definite = p.next().Pos
+		}
+	}
+	b.Type = p.parseTypeAnnotation()
+
+	if p.at(token.ASSIGN) {
+		p.next()
+		b.Init = p.parseAssign(in)
+	} else if b.Pattern != nil || requireInit {
+		// `BindingPattern TypeAnnotation_opt Initializer` has no _opt on the
+		// initializer, and neither does UsingBinding.
+		p.errorAt(b.Pos(), b.End(), "this binding requires an initializer")
 	}
 	return b
 }
 
-// parseFuncDecl parses FunctionDecl and MethodDecl, and with them the
-// initializer and deinitializer forms.
-//
-// Those need no separate path: `init` and `deinit` are contextual keywords that
-// are ordinary method names in a receiver declaration, so they arrive as
-// identifiers and land in Name like any other. Whether a given declaration is
-// one is a question about its name and receiver.
-func (p *parser) parseFuncDecl(doc *ast.CommentGroup) ast.Decl {
-	d := &ast.FuncDecl{Doc: doc}
-	funcPos := p.expect(token.FUNC)
-
-	if p.at(token.LPAREN) {
-		d.Recv = p.parseReceiver()
+// parseBindingTarget is BindingIdentifier | BindingPattern (C.2), also used for
+// catch parameters and parameter names.
+func (p *parser) parseBindingTarget() ast.Expr {
+	switch p.kind() {
+	case token.LBRACE:
+		return p.parseObjectBindingPattern()
+	case token.LBRACK:
+		return p.parseArrayBindingPattern()
+	default:
+		return p.parseIdent()
 	}
-
-	d.Name = p.expectIdent()
-
-	if p.at(token.LBRACK) {
-		// A method may not declare its own type parameters. The slot is
-		// parsed either way, so the diagnostic can point a caret at the
-		// bracket list rather than report a syntax error.
-		d.TypeParams = p.parseTypeParamList()
-	}
-
-	d.Type = p.parseSignature(funcPos, true)
-
-	if p.at(token.LBRACE) {
-		d.Body = p.parseBlockStmt()
-	} else {
-		p.errorHere(diag.ExpectedToken, "'{'", p.describe(p.tok))
-		p.advance(declStart)
-	}
-	return d
 }
 
-// parseReceiver parses `( identifier : ReceiverType )`.
+// parseObjectBindingPattern is ObjectBindingPattern (C.2).
 //
-// A ReceiverType's own bracket list re-declares the receiver type's existing
-// names rather than introducing fresh ones; it arrives as an IndexExpr, which
-// is the same brackets in another position.
-func (p *parser) parseReceiver() *ast.Receiver {
-	r := &ast.Receiver{}
-	r.Lparen = p.open(token.LPAREN)
-	r.Name = p.expectIdent()
-	r.Colon = p.expect(token.COLON)
-	r.Type = p.parseType()
-	r.Rparen = p.close(token.RPAREN)
-	return r
-}
-
-// parseRecordDecl parses StructDecl and ClassDecl, which differ only in the
-// keyword. A class is byte-for-byte identical in layout to a struct.
-//
-// A field list is newline-separated juxtaposition rather than a comma list, so
-// this brace is terminator-significant and two fields on one line do not parse.
-func (p *parser) parseRecordDecl(doc *ast.CommentGroup) ast.Decl {
-	d := &ast.RecordDecl{Doc: doc, KwPos: p.tok.Pos, Kw: p.tok.Kind}
-	p.advanceToken()
-
-	d.Name = p.expectIdent()
-	if p.at(token.LBRACK) {
-		d.TypeParams = p.parseTypeParamList()
-	}
-
-	saved := p.enterTerminated()
-	d.Lbrace = p.expect(token.LBRACE)
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		d.Fields = append(d.Fields, p.parseField())
-		p.expectTerminator()
-		if p.stalled(before) {
-			continue
+// Declaration position is known here, so this parses straight into pattern
+// nodes with no cover and no reinterpretation — unlike the assignment side
+// (B.6), which arrives through objectToPattern.
+func (p *parser) parseObjectBindingPattern() ast.Expr {
+	pat := &ast.ObjectPattern{Lbrace: p.next().Pos}
+	for !p.at(token.RBRACE) && !p.atEOF() {
+		before := p.i
+		if p.at(token.ELLIPSIS) {
+			t := p.next()
+			// BindingRestProperty takes only an identifier, never a pattern.
+			pat.Props = append(pat.Props, &ast.RestElem{Ellipsis: t.Pos, X: p.parseIdent()})
+		} else {
+			pat.Props = append(pat.Props, p.parseBindingProperty())
 		}
-	}
-	d.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return d
-}
-
-// parseField parses a FieldDecl. The default is evaluated at construction for
-// any omitted field.
-func (p *parser) parseField() *ast.Field {
-	f := &ast.Field{Doc: p.leadComment}
-	f.Name = p.expectIdent()
-	f.Colon = p.expect(token.COLON)
-	f.Type = p.parseType()
-	if p.at(token.ASSIGN) {
-		f.Assign = p.tok.Pos
-		p.advanceToken()
-		f.Default = p.parseExpr()
-	}
-	f.Comment = p.lineComment
-	return f
-}
-
-// parseEnumDecl parses an enum declaration. Its body is a comma-separated
-// variant list and is not terminator-significant, which is what lets a variant
-// list span lines — so the brace pushes depth rather than resetting it.
-func (p *parser) parseEnumDecl(doc *ast.CommentGroup) ast.Decl {
-	d := &ast.EnumDecl{Doc: doc, Enum: p.expect(token.ENUM)}
-	d.Name = p.expectIdent()
-
-	if p.at(token.LBRACK) {
-		d.TypeParams = p.parseTypeParamList()
-	}
-	if p.at(token.COLON) {
-		d.Colon = p.tok.Pos
-		p.advanceToken()
-		d.Discrim = p.parseType()
-	}
-
-	d.Lbrace = p.open(token.LBRACE)
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		d.Variants = append(d.Variants, p.parseVariant())
 		if !p.got(token.COMMA) {
 			break
 		}
-		if p.stalled(before) {
-			continue
-		}
+		p.advanced(before)
 	}
-	d.Rbrace = p.close(token.RBRACE)
+	pat.Rbrace = p.expect(token.RBRACE)
+	return pat
+}
+
+func (p *parser) parseBindingProperty() ast.Expr {
+	// SingleNameBinding versus `PropertyName : BindingElement` (C.2).
+	if (p.at(token.IDENT) || p.kind().IsReserved()) && p.peek(1).Kind != token.COLON {
+		id := p.parseIdent()
+		if p.at(token.ASSIGN) {
+			assign := p.next().Pos
+			return &ast.PropertyPattern{Value: &ast.AssignPattern{
+				Lhs: id, Assign: assign, Rhs: p.parseAssign(allowIn)}}
+		}
+		return &ast.PropertyPattern{Value: id}
+	}
+	key := p.parsePropertyName()
+	colon := p.expect(token.COLON)
+	return &ast.PropertyPattern{Key: key, Colon: colon, Value: p.parseBindingElement()}
+}
+
+func (p *parser) parseArrayBindingPattern() ast.Expr {
+	pat := &ast.ArrayPattern{Lbrack: p.next().Pos}
+	for !p.at(token.RBRACK) && !p.atEOF() {
+		before := p.i
+		switch {
+		case p.at(token.COMMA):
+			pat.Elts = append(pat.Elts, &ast.Elision{Comma: p.next().Pos})
+			continue
+		case p.at(token.ELLIPSIS):
+			t := p.next()
+			// BindingRestElement takes an identifier or a pattern (C.2).
+			pat.Elts = append(pat.Elts, &ast.RestElem{Ellipsis: t.Pos, X: p.parseBindingTarget()})
+		default:
+			pat.Elts = append(pat.Elts, p.parseBindingElement())
+		}
+		if !p.got(token.COMMA) {
+			break
+		}
+		p.advanced(before)
+	}
+	pat.Rbrack = p.expect(token.RBRACK)
+	return pat
+}
+
+func (p *parser) parseBindingElement() ast.Expr {
+	target := p.parseBindingTarget()
+	if p.at(token.ASSIGN) {
+		assign := p.next().Pos
+		return &ast.AssignPattern{Lhs: target, Assign: assign, Rhs: p.parseAssign(allowIn)}
+	}
+	return target
+}
+
+// --- functions (D, D.1, D.4) ------------------------------------------------
+
+func (p *parser) parseFunction(decorators []*ast.Decorator, asyncPos token.Pos, accel ast.AccelKind, async bool) *ast.FuncDecl {
+	defer p.trace("FunctionDeclaration")()
+
+	fn := &ast.FuncDecl{Decorators: decorators, Accel: accel, Async: async}
+	if asyncPos != token.NoPos {
+		fn.AccelPos = token.NoPos
+	}
+	fn.FuncPos = p.expect(token.FUNCTION)
+	if p.at(token.MUL) {
+		p.next()
+		fn.Gen = true
+	}
+	if p.at(token.IDENT) {
+		fn.Name = p.parseIdent()
+	}
+	if p.at(token.LT) {
+		fn.TypeParams = p.parseTypeParams()
+	}
+	fn.Params = p.parseParamList()
+	if p.at(token.COLON) {
+		p.next()
+		fn.Result = p.parseTypeOrPredicate()
+	}
+	if p.at(token.LBRACE) {
+		fn.Body = p.parseBlock()
+	} else {
+		// The signature-only form, `function f(): void;` (D).
+		fn.Semi = p.expectSemi()
+	}
+	return fn
+}
+
+// parseFunctionAccel is AcceleratedFunctionDeclaration (D.4).
+//
+// One FuncDecl for plain, kernel, and graph functions, matching D.4's single
+// production. Async and Gen are recorded even though D.4 admits neither, so
+// `kernel async function f() {}` is rejected by name rather than by parse
+// failure (§5.3) — the check below is exactly that, and it runs here rather
+// than in a later phase only because the positions are at hand.
+func (p *parser) parseFunctionAccel(decorators []*ast.Decorator, accelPos token.Pos, accel ast.AccelKind) *ast.FuncDecl {
+	fn := p.parseFunction(decorators, token.NoPos, accel, false)
+	fn.AccelPos = accelPos
+	if fn.Async || fn.Gen {
+		what := "a generator"
+		if fn.Async {
+			what = "an async function"
+		}
+		p.errorAt(accelPos, fn.FuncPos, "an accelerated function cannot be %s", what)
+	}
+	return fn
+}
+
+// parseParamList is FormalParameters (D.1).
+func (p *parser) parseParamList() *ast.ParamList {
+	pl := &ast.ParamList{Lparen: p.expect(token.LPAREN)}
+	for !p.at(token.RPAREN) && !p.atEOF() {
+		before := p.i
+		switch {
+		case p.at(token.THIS) && pl.This == nil && len(pl.List) == 0:
+			// ThisParameter is always first (D.1).
+			t := p.next()
+			pl.This = &ast.ThisParam{ThisPos: t.Pos, Type: p.parseTypeAnnotation()}
+		case p.at(token.ELLIPSIS):
+			t := p.next()
+			r := &ast.RestElem{Ellipsis: t.Pos, X: p.parseBindingTarget()}
+			r.Type = p.parseTypeAnnotation()
+			pl.Rest = r
+		default:
+			pl.List = append(pl.List, p.parseParam())
+		}
+		if !p.got(token.COMMA) {
+			break
+		}
+		p.advanced(before)
+	}
+	if p.at(token.RPAREN) {
+		pl.Rparen = p.next().Pos
+	} else {
+		p.errorf(p.cur(), "expected `)` to close the parameter list, found %s", p.describe(p.cur()))
+	}
+	return pl
+}
+
+func (p *parser) parseParam() *ast.Param {
+	prm := &ast.Param{}
+	if p.at(token.AT) {
+		prm.Decorators = p.parseDecorators()
+	}
+	prm.Mods = p.parseModifiers(paramModifiers)
+	prm.Name = p.parseBindingTarget()
+	if p.at(token.QUESTION) {
+		prm.Optional = p.next().Pos
+	}
+	prm.Type = p.parseTypeAnnotation()
+	if p.at(token.ASSIGN) {
+		p.next()
+		prm.Init = p.parseAssign(allowIn)
+	}
+	return prm
+}
+
+// --- interfaces, aliases, enums, namespaces (H) -----------------------------
+
+func (p *parser) parseInterface() ast.Stmt {
+	d := &ast.InterfaceDecl{IfacePos: p.next().Pos}
+	d.Name = p.parseIdent()
+	if p.at(token.LT) {
+		d.TypeParams = p.parseTypeParams()
+	}
+	if p.at(token.EXTENDS) {
+		d.Extends = p.parseHeritage(token.EXTENDS)
+	}
+	d.Body = p.parseObjectType()
 	return d
 }
 
-// parseVariant parses one enum variant. Both suffixes are accepted on any
-// variant, so an explicit discriminant on a payload variant parses and can be
-// diagnosed as itself.
-func (p *parser) parseVariant() *ast.Variant {
-	v := &ast.Variant{Doc: p.leadComment}
-	v.Name = p.expectIdent()
-
-	if p.at(token.LPAREN) {
-		v.Lparen = p.open(token.LPAREN)
-		for !p.at(token.RPAREN) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			v.Payload = append(v.Payload, p.parseType())
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.stalled(before) {
-				continue
-			}
-		}
-		v.Rparen = p.close(token.RPAREN)
-	}
-	if p.at(token.ASSIGN) {
-		v.Assign = p.tok.Pos
-		p.advanceToken()
-		v.Value = p.parseExpr()
-	}
-	v.Comment = p.lineComment
-	return v
-}
-
-// parseTypeAliasDecl parses `type Name[params] = AliasTarget`. A target of
-// `abstract` makes the alias nominal and opaque.
-func (p *parser) parseTypeAliasDecl(doc *ast.CommentGroup) ast.Decl {
-	d := &ast.TypeAliasDecl{Doc: doc, Type: p.expect(token.TYPE)}
-	d.Name = p.expectIdent()
-	if p.at(token.LBRACK) {
-		d.TypeParams = p.parseTypeParamList()
+func (p *parser) parseTypeAlias() ast.Stmt {
+	d := &ast.TypeAliasDecl{TypePos: p.next().Pos}
+	d.Name = p.parseIdent()
+	if p.at(token.LT) {
+		d.TypeParams = p.parseTypeParams()
 	}
 	d.Assign = p.expect(token.ASSIGN)
-	d.Target = p.parseType()
+	d.Type = p.parseTypeOrPredicate()
+	d.Semi = p.expectSemi()
 	return d
 }
 
-// parseConstraintDecl parses a constraint declaration. There are no
-// interfaces; a constraint is its own declaration form, and that it is legal
-// only in a bracket position is a static rule. Elements are one per line and
-// form an intersection, so this body is terminator-significant.
-func (p *parser) parseConstraintDecl(doc *ast.CommentGroup) ast.Decl {
-	d := &ast.ConstraintDecl{Doc: doc, Constraint: p.expect(token.CONSTRAINT)}
-	d.Name = p.expectIdent()
-
-	saved := p.enterTerminated()
+func (p *parser) parseEnum(constPos token.Pos) ast.Stmt {
+	d := &ast.EnumDecl{ConstPos: constPos, EnumPos: p.expect(token.ENUM)}
+	d.Name = p.parseIdent()
+	if p.at(token.COLON) {
+		p.next()
+		// EnumUnderlyingType is a TypeReference only (H).
+		d.Underlying = p.parseType()
+	}
 	d.Lbrace = p.expect(token.LBRACE)
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		e := &ast.ConstraintElem{}
-		if p.at(token.FUNC) {
-			e.Method = p.parseMethodReq()
+	for !p.at(token.RBRACE) && !p.atEOF() {
+		before := p.i
+		m := &ast.EnumMember{}
+		if p.at(token.STRING) {
+			t := p.next()
+			m.Name = &ast.BasicLit{Kind: t.Kind, ValuePos: t.Pos, ValueEnd: t.End, HasEscape: t.HasEscape()}
 		} else {
-			// A single identifier parses as both a one-term type set and a
-			// constraint name, and is resolved by what the name denotes. One
-			// field holds both readings.
-			e.Set = p.parseConstraintExpr()
+			m.Name = p.parseIdentName()
 		}
-		d.Elems = append(d.Elems, e)
-		p.expectTerminator()
-		if p.stalled(before) {
-			continue
+		if p.at(token.ASSIGN) {
+			m.Assign = p.next().Pos
+			// Not folded to a constant — §1 forbids folding.
+			m.Value = p.parseAssign(allowIn)
 		}
-	}
-	d.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return d
-}
-
-// parseMethodReq parses a MethodRequirement. It takes a full Signature, so a
-// constraint can require a marked method.
-func (p *parser) parseMethodReq() *ast.MethodReq {
-	m := &ast.MethodReq{Doc: p.leadComment}
-	funcPos := p.expect(token.FUNC)
-	m.Func = funcPos
-	m.Name = p.expectIdent()
-	m.Type = p.parseSignature(funcPos, false)
-	return m
-}
-
-// ---------------------------------------------------------- declare blocks
-
-// parseDeclareDecl parses both declare block forms. `framework` and `module`
-// are contextual keywords meaningful only immediately after `declare`.
-func (p *parser) parseDeclareDecl(doc *ast.CommentGroup) *ast.DeclareDecl {
-	d := &ast.DeclareDecl{Doc: doc, Declare: p.expect(token.DECLARE)}
-
-	d.KindPos = p.tok.Pos
-	switch {
-	case p.atCtx(token.CtxFramework), p.atCtx(token.CtxModule):
-		d.Kind = p.tok.Lit
-		p.advanceToken()
-	default:
-		p.errorHere(diag.ExpectedToken, "'framework' or 'module'", p.describe(p.tok))
-		p.advance(declStart)
-		return d
-	}
-
-	// The variant tag is hoisted out of the module form, so a tagged framework
-	// block parses and is rejected with a message about `declare framework`
-	// rather than as a syntax error at the bracket.
-	if p.at(token.LBRACK) {
-		d.Variant = p.parseVariantTag()
-	}
-
-	d.Path = p.parseImportPath()
-
-	saved := p.enterTerminated()
-	d.Lbrace = p.expect(token.LBRACE)
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		d.Members = append(d.Members, p.parseForeignMember())
-		p.expectTerminator()
-		if p.stalled(before) {
-			continue
-		}
-	}
-	d.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return d
-}
-
-// parseVariantTag parses the bracketed tag set. The set is closed; membership
-// is a static rule, so any string list parses here.
-func (p *parser) parseVariantTag() *ast.VariantTag {
-	v := &ast.VariantTag{}
-	v.Lbrack = p.open(token.LBRACK)
-	for !p.at(token.RBRACK) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		v.Tags = append(v.Tags, p.parseImportPath())
+		d.Members = append(d.Members, m)
 		if !p.got(token.COMMA) {
 			break
 		}
-		if p.stalled(before) {
-			continue
-		}
+		p.advanced(before)
 	}
-	v.Rbrack = p.close(token.RBRACK)
-	return v
+	d.Rbrace = p.expect(token.RBRACE)
+	return d
 }
 
-// parseForeignMember parses one member of a declare body or a foreign class
-// body.
-//
-// A declare body admits a foreign function, a foreign class, and a nested
-// declare; a foreign class body admits a foreign function, a foreign
-// initializer, and a field. A nested declare and a field each parse and are
-// rejected, so both land here — a declare block describes call shapes only, and
-// the diagnostic should name the construct rather than fail at a token.
-func (p *parser) parseForeignMember() ast.ForeignMember {
-	doc := p.leadComment
-
-	// `init` is a prefix modifier on func, not a function name.
-	var initPos token.Pos
-	if p.atCtx(token.CtxInit) && p.peek().Kind == token.FUNC {
-		initPos = p.tok.Pos
-		p.advanceToken()
+func (p *parser) parseNamespace() ast.Stmt {
+	d := &ast.NamespaceDecl{NsPos: p.next().Pos}
+	// IdentifierPath: dotted names declare nested namespaces (H).
+	var name ast.Node = p.parseIdent()
+	for p.at(token.PERIOD) {
+		p.next()
+		name = &ast.QualifiedName{X: name, Sel: p.parseIdent()}
 	}
+	d.Name = name
+	d.Lbrace = p.expect(token.LBRACE)
+	d.Items = p.parseModuleItems(token.RBRACE)
+	d.Rbrace = p.expect(token.RBRACE)
+	return d
+}
+
+func (p *parser) parseModuleDecl() ast.Stmt {
+	t := p.next()
+	d := &ast.ModuleDecl{KeywordPos: t.Pos, KeywordEnd: t.End, IsGlobal: t.Ctx == token.CtxGlobal}
+	if !d.IsGlobal {
+		if p.at(token.STRING) {
+			s := p.next()
+			d.Name = &ast.BasicLit{Kind: s.Kind, ValuePos: s.Pos, ValueEnd: s.End, HasEscape: s.HasEscape()}
+		} else {
+			p.errorf(p.cur(), "expected a module name string")
+		}
+	}
+	if p.at(token.LBRACE) {
+		d.Lbrace = p.next().Pos
+		d.Items = p.parseModuleItems(token.RBRACE)
+		d.Rbrace = p.expect(token.RBRACE)
+		return d
+	}
+	// `module "x";` with no body (I).
+	d.Semi = p.expectSemi()
+	return d
+}
+
+// --- ambient declarations (I) -----------------------------------------------
+
+func (p *parser) parseAmbient() ast.Stmt {
+	d := &ast.AmbientDecl{DeclarePos: p.next().Pos}
 
 	switch {
-	case p.at(token.FUNC):
-		return p.parseForeignFunc(doc, initPos)
-
+	case p.at(token.VAR), p.at(token.CONST), p.atCtx(token.CtxLet):
+		d.Inner = p.parseVarDecl().(ast.Decl)
+	case p.at(token.FUNCTION):
+		d.Inner = p.parseFunction(nil, token.NoPos, ast.AccelNone, false)
 	case p.at(token.CLASS):
-		return p.parseForeignClass(doc)
-
-	case p.at(token.DECLARE):
-		return p.parseDeclareDecl(doc)
-
-	case p.at(token.IDENT) && p.peek().Kind == token.COLON:
-		// A field describes foreign-side layout and is banned. Parsed so the
-		// diagnostic can point at the field rather than at a stray colon.
-		return p.parseField()
+		d.Inner = p.parseClass(nil, token.NoPos)
+	case p.atCtx(token.CtxAbstract):
+		abstractPos := p.next().Pos
+		d.Inner = p.parseClass(nil, abstractPos)
+	case p.at(token.ENUM):
+		d.Inner = p.parseEnum(token.NoPos).(ast.Decl)
+	case p.at(token.CONST) && p.peek(1).Kind == token.ENUM:
+		d.Inner = p.parseEnum(p.next().Pos).(ast.Decl)
+	case p.atCtx(token.CtxNamespace):
+		d.Inner = p.parseNamespace().(ast.Decl)
+	case p.atCtx(token.CtxModule), p.atCtx(token.CtxGlobal):
+		d.Inner = p.parseModuleDecl().(ast.Decl)
+	case p.atCtx(token.CtxStruct):
+		// AmbientStructDeclaration: `struct [no LT] BindingIdentifier ;` (I).
+		// Body stays nil, which is how §5.3 marks the ambient form.
+		d.Inner = p.parseStruct(nil)
+	default:
+		p.errorf(p.cur(), "expected a declaration after `declare`, found %s", p.describe(p.cur()))
+		d.Inner = &ast.BadDecl{From: d.DeclarePos, To: p.end()}
 	}
-
-	p.errorHere(diag.ExpectedDecl, p.describe(p.tok))
-	p.advance(memberStart)
-	return &ast.ForeignFunc{
-		Doc:  doc,
-		Func: p.tok.Pos,
-		Type: &ast.FuncType{Func: p.tok.Pos, Params: &ast.ParamList{}},
-	}
-}
-
-// parseForeignFunc parses a foreign function or a foreign initializer.
-//
-// Name is nil only for the unnamed initializer form that bare `Type(...)`
-// construction resolves to. A body and a marker are both rejected forms, and
-// both are parsed: the body needs a node to hang the diagnostic on, and the
-// marker already has one, since the signature keeps every marker written.
-func (p *parser) parseForeignFunc(doc *ast.CommentGroup, initPos token.Pos) *ast.ForeignFunc {
-	f := &ast.ForeignFunc{Doc: doc, Init: initPos}
-	f.Func = p.expect(token.FUNC)
-
-	if p.at(token.IDENT) || !initPos.IsValid() {
-		f.Name = p.expectIdent()
-	}
-
-	f.Type = p.parseSignature(f.Func, false)
-
-	if p.at(token.LBRACE) {
-		f.Body = p.parseBlockStmt()
-	}
-	return f
-}
-
-func (p *parser) parseForeignClass(doc *ast.CommentGroup) *ast.ForeignClass {
-	c := &ast.ForeignClass{Doc: doc, Class: p.expect(token.CLASS)}
-	c.Name = p.expectIdent()
-
-	saved := p.enterTerminated()
-	c.Lbrace = p.expect(token.LBRACE)
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		c.Members = append(c.Members, p.parseForeignMember())
-		p.expectTerminator()
-		if p.stalled(before) {
-			continue
-		}
-	}
-	c.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return c
+	return d
 }

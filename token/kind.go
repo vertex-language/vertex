@@ -1,344 +1,406 @@
+// Package token defines the lexical vocabulary of Vertex: token kinds,
+// contextual-keyword identity, source positions, and diagnostics.
+//
+// It imports nothing from scanner, ast, or parser, and it never will
+// (compiler_frontend.md §2). Diagnostic lives here rather than in scanner
+// because both scanner and parser emit them (§3).
 package token
 
-import "strconv"
-
-// Kind classifies a token.
+// Kind classifies a token. It is deliberately uint8: Token must stay
+// pointer-free and small (§3).
 //
-// Values are assigned by iota in declaration order, and related kinds are
-// grouped into contiguous ranges bounded by unexported sentinels, so every
-// classification predicate below is a pair of comparisons rather than a switch.
-// Renumbering is safe as long as a group's sentinels move with it.
-type Kind int
+// Kinds are assigned in contiguous ranges bounded by unexported sentinels so
+// that IsLiteral, IsOperator, and IsReserved are range comparisons rather than
+// switches (§3). Do not reorder these constants without updating the sentinels;
+// the ranges are the API.
+//
+// Only ReservedWord (vertex_grammar.md A.2) gets a Kind. Contextual keywords
+// and strict reserved words scan as IDENT and carry identity in Ctx — see
+// ctx.go for why the strict words live there too.
+type Kind uint8
 
 const (
-	INVALID Kind = iota
-	EOF
-	COMMENT
+	INVALID Kind = iota // an unrecognized or malformed token
+	EOF                 // end of input; zero-width, positioned at len(src)
+	COMMENT             // MultiLineComment, SingleLineComment, or HashbangComment
 
-	// IDENT is every identifier: the blank identifier `_`, every contextual
-	// keyword, every predeclared type / tensor-element / constraint name, and
-	// every reserved builtin name. None of those are distinguished lexically,
-	// and the scanner does not know them.
-	IDENT
-
-	// Scanned literals. Each carries its raw source spelling in Token.Lit.
 	literalBeg
-	INT    // 42, 1_000, 0b1010, 0o600, 0xBadFace
-	FLOAT  // 1.5, 1e9, 6.674_28e-11, 0x1.8p3
-	CHAR   // 'A', '\n', '\u{1F600}'
-	STRING // "abc", `raw`
+	IDENT           // IdentifierName that is not a ReservedWord
+	PRIVATE_IDENT   // #foo
+	NUMBER          // DecimalLiteral or NonDecimalIntegerLiteral, raw spelling
+	BIGINT          // ...n
+	STRING          // "..." or '...'
+	REGEX           // /body/flags
+	TEMPLATE        // `...`     NoSubstitutionTemplate
+	TEMPLATE_HEAD   // `...${
+	TEMPLATE_MIDDLE // }...${
+	TEMPLATE_TAIL   // }...`
 	literalEnd
-
-	// Reserved literal keywords: literals syntactically, reserved lexically.
-	// Their spelling is fixed, so they carry no Lit — which is why they sit in
-	// their own range rather than with the scanned literals.
-	reservedLitBeg
-	TRUE
-	FALSE
-	NIL
-	reservedLitEnd
 
 	operatorBeg
 
-	LPAREN   // (
-	RPAREN   // )
-	LBRACK   // [
-	RBRACK   // ]
-	LBRACE   // {
-	RBRACE   // }
-	COMMA    // ,
-	PERIOD   // .
-	DOTDOT   // ..
-	ELLIPSIS // ...
-	COLON    // :
-	ARROW    // ->
+	// Grouping and punctuation.
+	LBRACE       // {
+	RBRACE       // }
+	LPAREN       // (
+	RPAREN       // )
+	LBRACK       // [
+	RBRACK       // ]
+	SEMI         // ;
+	COMMA        // ,
+	PERIOD       // .
+	ELLIPSIS     // ...
+	COLON        // :
+	QUESTION     // ?
+	QUESTION_DOT // ?.   OptionalChainingPunctuator; A.3 requires lookahead ∉ DecimalDigit
+	ARROW        // =>
+	AT           // @
+	HASH         // #    bare; PrivateIdentifier is one PRIVATE_IDENT token
 
-	assignBeg
-	ASSIGN // =
-	compoundAssignBeg
-	ADD_ASSIGN // +=
-	SUB_ASSIGN // -=
-	MUL_ASSIGN // *=
-	QUO_ASSIGN // /=
-	REM_ASSIGN // %=
-	AND_ASSIGN // &=
-	OR_ASSIGN  // |=
-	XOR_ASSIGN // ^=
-	SHL_ASSIGN // <<=
-	SHR_ASSIGN // >>=
-	compoundAssignEnd
-	assignEnd
+	// Comparison.
+	LT         // 
+	GT         // >
+	LEQ        // <=
+	GEQ        // >=    never emitted by the scanner; see §4.2 and JoinGT
+	EQL        // ==
+	NEQ        // !=
+	STRICT_EQL // ===
+	STRICT_NEQ // !==
 
-	ADD   // +
-	SUB   // -
-	MUL   // *
-	QUO   // /
-	REM   // %
-	TILDE // ~   bitwise-NOT, or underlying-type in a TypeSetTerm
-	AND   // &   address-of, dereference, or bitwise-AND
-	OR    // |
-	XOR   // ^
-	SHL   // 
-	SHR   // >>
+	// Arithmetic, bitwise, logical.
+	NOT      // !
+	TILDE    // ~
+	ADD      // +
+	SUB      // -
+	MUL      // *
+	QUO      // /
+	REM      // %
+	EXP      // **
+	INC      // ++
+	DEC      // --
+	SHL      // 
+	SHR      // >>    never emitted by the scanner
+	USHR     // >>>   never emitted by the scanner
+	AND      // &
+	OR       // |
+	XOR      // ^
+	LAND     // &&
+	LOR      // ||
+	COALESCE // ??
 
-	WRAP_ADD // &+
-	WRAP_SUB // &-
-	WRAP_MUL // &*
-
-	EQL           // ==
-	NEQ           // !=
-	LSS           // 
-	GTR           // >
-	LEQ           // <=
-	GEQ           // >=
-	IDENTICAL     // ===
-	NOT_IDENTICAL // !==
-
-	LAND // &&
-	LOR  // ||
-	NOT  // !
+	// Assignment.
+	ASSIGN          // =
+	ADD_ASSIGN      // +=
+	SUB_ASSIGN      // -=
+	MUL_ASSIGN      // *=
+	QUO_ASSIGN      // /=
+	REM_ASSIGN      // %=
+	EXP_ASSIGN      // **=
+	SHL_ASSIGN      // <<=
+	SHR_ASSIGN      // >>=   never emitted by the scanner
+	USHR_ASSIGN     // >>>=  never emitted by the scanner
+	AND_ASSIGN      // &=
+	OR_ASSIGN       // |=
+	XOR_ASSIGN      // ^=
+	LAND_ASSIGN     // &&=
+	LOR_ASSIGN      // ||=
+	COALESCE_ASSIGN // ??=
 
 	operatorEnd
 
-	keywordBeg
-	ABSTRACT
-	AS
-	ASYNC
+	reservedBeg
 	AWAIT
 	BREAK
 	CASE
-	CHAN
+	CATCH
 	CLASS
-	CONSTRAINT
+	CONST
 	CONTINUE
-	DECLARE
+	DEBUGGER
 	DEFAULT
-	DEFER
+	DELETE
+	DO
 	ELSE
 	ENUM
-	FALLTHROUGH
+	EXPORT
+	EXTENDS
+	FALSE
+	FINALLY
 	FOR
-	FUNC
-	GPU
+	FUNCTION
 	IF
 	IMPORT
 	IN
-	LET
-	MAP
-	MUT
-	NPU
-	PACKAGE
+	INSTANCEOF
+	NEW
+	NULL
 	RETURN
-	SELECT
-	SHARED
-	STRUCT
+	SUPER
 	SWITCH
-	TENSOR
-	THREAD
-	TYPE
-	TYPED_PTR
-	UNIQUE
+	THIS
+	THROW
+	TRUE
+	TRY
+	TYPEOF
 	VAR
-	VECTOR
-	WEAK
+	VOID
 	WHILE
-	keywordEnd
+	WITH
+	YIELD
+	reservedEnd
 )
 
-// names is indexed by Kind. Operators, keywords, and reserved literal keywords
-// hold their source spelling; everything else holds a category name.
-var names = [...]string{
+var kindNames = [...]string{
 	INVALID: "INVALID",
 	EOF:     "EOF",
 	COMMENT: "COMMENT",
-	IDENT:   "IDENT",
 
-	INT:    "INT",
-	FLOAT:  "FLOAT",
-	CHAR:   "CHAR",
-	STRING: "STRING",
+	IDENT:           "IDENT",
+	PRIVATE_IDENT:   "PRIVATE_IDENT",
+	NUMBER:          "NUMBER",
+	BIGINT:          "BIGINT",
+	STRING:          "STRING",
+	REGEX:           "REGEX",
+	TEMPLATE:        "TEMPLATE",
+	TEMPLATE_HEAD:   "TEMPLATE_HEAD",
+	TEMPLATE_MIDDLE: "TEMPLATE_MIDDLE",
+	TEMPLATE_TAIL:   "TEMPLATE_TAIL",
 
-	TRUE:  "true",
-	FALSE: "false",
-	NIL:   "nil",
+	LBRACE:       "{",
+	RBRACE:       "}",
+	LPAREN:       "(",
+	RPAREN:       ")",
+	LBRACK:       "[",
+	RBRACK:       "]",
+	SEMI:         ";",
+	COMMA:        ",",
+	PERIOD:       ".",
+	ELLIPSIS:     "...",
+	COLON:        ":",
+	QUESTION:     "?",
+	QUESTION_DOT: "?.",
+	ARROW:        "=>",
+	AT:           "@",
+	HASH:         "#",
 
-	LPAREN: "(", RPAREN: ")", LBRACK: "[", RBRACK: "]",
-	LBRACE: "{", RBRACE: "}", COMMA: ",", PERIOD: ".",
-	DOTDOT: "..", ELLIPSIS: "...", COLON: ":", ARROW: "->",
+	LT:         "<",
+	GT:         ">",
+	LEQ:        "<=",
+	GEQ:        ">=",
+	EQL:        "==",
+	NEQ:        "!=",
+	STRICT_EQL: "===",
+	STRICT_NEQ: "!==",
 
-	ASSIGN:     "=",
-	ADD_ASSIGN: "+=", SUB_ASSIGN: "-=", MUL_ASSIGN: "*=",
-	QUO_ASSIGN: "/=", REM_ASSIGN: "%=", AND_ASSIGN: "&=",
-	OR_ASSIGN: "|=", XOR_ASSIGN: "^=", SHL_ASSIGN: "<<=", SHR_ASSIGN: ">>=",
+	NOT:      "!",
+	TILDE:    "~",
+	ADD:      "+",
+	SUB:      "-",
+	MUL:      "*",
+	QUO:      "/",
+	REM:      "%",
+	EXP:      "**",
+	INC:      "++",
+	DEC:      "--",
+	SHL:      "<<",
+	SHR:      ">>",
+	USHR:     ">>>",
+	AND:      "&",
+	OR:       "|",
+	XOR:      "^",
+	LAND:     "&&",
+	LOR:      "||",
+	COALESCE: "??",
 
-	ADD: "+", SUB: "-", MUL: "*", QUO: "/", REM: "%",
-	TILDE: "~", AND: "&", OR: "|", XOR: "^", SHL: "<<", SHR: ">>",
-	WRAP_ADD: "&+", WRAP_SUB: "&-", WRAP_MUL: "&*",
+	ASSIGN:          "=",
+	ADD_ASSIGN:      "+=",
+	SUB_ASSIGN:      "-=",
+	MUL_ASSIGN:      "*=",
+	QUO_ASSIGN:      "/=",
+	REM_ASSIGN:      "%=",
+	EXP_ASSIGN:      "**=",
+	SHL_ASSIGN:      "<<=",
+	SHR_ASSIGN:      ">>=",
+	USHR_ASSIGN:     ">>>=",
+	AND_ASSIGN:      "&=",
+	OR_ASSIGN:       "|=",
+	XOR_ASSIGN:      "^=",
+	LAND_ASSIGN:     "&&=",
+	LOR_ASSIGN:      "||=",
+	COALESCE_ASSIGN: "??=",
 
-	EQL: "==", NEQ: "!=", LSS: "<", GTR: ">", LEQ: "<=", GEQ: ">=",
-	IDENTICAL: "===", NOT_IDENTICAL: "!==",
-	LAND: "&&", LOR: "||", NOT: "!",
-
-	ABSTRACT: "abstract", AS: "as", ASYNC: "async", AWAIT: "await",
-	BREAK: "break", CASE: "case", CHAN: "chan", CLASS: "class",
-	CONSTRAINT: "constraint", CONTINUE: "continue", DECLARE: "declare",
-	DEFAULT: "default", DEFER: "defer", ELSE: "else", ENUM: "enum",
-	FALLTHROUGH: "fallthrough", FOR: "for", FUNC: "func", GPU: "gpu",
-	IF: "if", IMPORT: "import", IN: "in", LET: "let", MAP: "map",
-	MUT: "mut", NPU: "npu", PACKAGE: "package", RETURN: "return",
-	SELECT: "select", SHARED: "shared", STRUCT: "struct", SWITCH: "switch",
-	TENSOR: "tensor", THREAD: "thread", TYPE: "type", TYPED_PTR: "typed_ptr",
-	UNIQUE: "unique", VAR: "var", VECTOR: "vector", WEAK: "weak",
-	WHILE: "while",
+	AWAIT:      "await",
+	BREAK:      "break",
+	CASE:       "case",
+	CATCH:      "catch",
+	CLASS:      "class",
+	CONST:      "const",
+	CONTINUE:   "continue",
+	DEBUGGER:   "debugger",
+	DEFAULT:    "default",
+	DELETE:     "delete",
+	DO:         "do",
+	ELSE:       "else",
+	ENUM:       "enum",
+	EXPORT:     "export",
+	EXTENDS:    "extends",
+	FALSE:      "false",
+	FINALLY:    "finally",
+	FOR:        "for",
+	FUNCTION:   "function",
+	IF:         "if",
+	IMPORT:     "import",
+	IN:         "in",
+	INSTANCEOF: "instanceof",
+	NEW:        "new",
+	NULL:       "null",
+	RETURN:     "return",
+	SUPER:      "super",
+	SWITCH:     "switch",
+	THIS:       "this",
+	THROW:      "throw",
+	TRUE:       "true",
+	TRY:        "try",
+	TYPEOF:     "typeof",
+	VAR:        "var",
+	VOID:       "void",
+	WHILE:      "while",
+	WITH:       "with",
+	YIELD:      "yield",
 }
 
-// Spelling returns k's fixed source text, or "" if k has none.
-//
-// Only operators, keywords, and reserved literal keywords have one. IDENT and
-// the scanned literals vary per token and carry their text in Token.Lit;
-// INVALID, EOF, and COMMENT are categories, not lexemes.
-func (k Kind) Spelling() string {
-	switch {
-	case k.IsOperator(), k.IsKeyword(), reservedLitBeg < k && k < reservedLitEnd:
-		return names[k]
-	}
-	return ""
-}
-
-// String renders k for diagnostics: its spelling where it has one, its category
-// name otherwise.
+// String returns the operator spelling for operators and reserved words, and
+// an uppercase category name otherwise. Golden token dumps (§7) depend on this
+// being stable, so treat changes as fixture-breaking.
 func (k Kind) String() string {
-	if k >= 0 && int(k) < len(names) && names[k] != "" {
-		return names[k]
+	if int(k) < len(kindNames) {
+		if s := kindNames[k]; s != "" {
+			return s
+		}
 	}
-	return "Kind(" + strconv.Itoa(int(k)) + ")"
+	return "Kind(" + itoa(int(k)) + ")"
 }
 
-var keywords map[string]Kind
+// IsLiteral reports whether k is a literal-ish token. IDENT is inside this
+// range, matching go/token; "literal" here means "carries source text that
+// must be read back with File.Slice", not "denotes a value".
+func (k Kind) IsLiteral() bool { return literalBeg < k && k < literalEnd }
 
-func init() {
-	keywords = make(map[string]Kind, (keywordEnd-keywordBeg)+3)
-	for k := keywordBeg + 1; k < keywordEnd; k++ {
-		keywords[names[k]] = k
-	}
-	// Reserved literal keywords are reserved lexically, so they share the
-	// table despite living in a separate Kind range.
-	keywords["true"] = TRUE
-	keywords["false"] = FALSE
-	keywords["nil"] = NIL
-}
-
-// Lookup maps an identifier spelling to its keyword Kind, or IDENT.
-//
-// Contextual keywords are deliberately absent: each is an ordinary identifier
-// everywhere except the single production that names it, so baking one in here
-// would make it reserved unconditionally. Predeclared type, tensor-element, and
-// constraint names, and reserved builtin names, are absent for a different
-// reason — they are identifiers pre-bound in an implicit outermost scope, and
-// the scanner must not know them at all.
-func Lookup(ident string) Kind {
-	if k, ok := keywords[ident]; ok {
-		return k
-	}
-	return IDENT
-}
-
-// IsLiteral reports whether k is a BasicLit kind: a scanned literal or a
-// reserved literal keyword. IDENT is not one — an identifier is an operand
-// name, not a literal.
-func (k Kind) IsLiteral() bool {
-	return literalBeg < k && k < literalEnd ||
-		reservedLitBeg < k && k < reservedLitEnd
-}
-
-// HasLit reports whether a token of kind k carries raw source text in Lit.
-func (k Kind) HasLit() bool {
-	return k == IDENT || k == COMMENT || k == INVALID ||
-		literalBeg < k && k < literalEnd
-}
-
+// IsOperator reports whether k is a Punctuator, DivPunctuator, or
+// RightBracePunctuator (A.3).
 func (k Kind) IsOperator() bool { return operatorBeg < k && k < operatorEnd }
-func (k Kind) IsKeyword() bool  { return keywordBeg < k && k < keywordEnd }
 
-// IsAssign reports whether k is `=` or a compound assignment operator.
-func (k Kind) IsAssign() bool { return assignBeg < k && k < assignEnd }
+// IsReserved reports whether k is a ReservedWord (A.2). StrictReservedWord is
+// not included: those scan as IDENT with a Ctx (see ctx.go).
+func (k Kind) IsReserved() bool { return reservedBeg < k && k < reservedEnd }
 
-// IsCompoundAssign reports whether k is one of the ten assign_op spellings,
-// excluding plain `=`. The compound form takes exactly one target and one
-// value; the plain form takes lists.
-func (k Kind) IsCompoundAssign() bool {
-	return compoundAssignBeg < k && k < compoundAssignEnd
-}
-
-// IsUnaryOp reports whether k is a unary_op. `&` is not one — it derives
-// through PointerPrimary and binds tighter than a selector — and neither
-// `await` nor `var` is, each being its own UnaryExpr alternative.
-func (k Kind) IsUnaryOp() bool {
-	switch k {
-	case SUB, NOT, TILDE:
-		return true
-	}
-	return false
-}
-
-// Precedence ladder. Higher binds tighter.
-//
-// Binary operators occupy the seven levels the grammar lists. CastPrec places
-// `as` above all of them, but Prec never returns it: `as` is written as
-// CastExpr rather than as a binary_op because its right operand is a Type, so
-// a precedence-climbing loop cannot consume it and must not try.
+// Precedence levels for the binary chain in vertex_grammar.md B.4.
 const (
-	LowestPrec  = 0 // not a binary operator
-	CastPrec    = 8 // `as`
-	UnaryPrec   = 9
-	HighestPrec = 10
+	LowestPrec  = 0  // non-binary
+	UnaryPrec   = 12 // above every binary operator
+	HighestPrec = 13
 )
 
-// Prec returns k's binary precedence, or LowestPrec if k is not a binary_op.
-func (k Kind) Prec() int {
-	switch k {
-	case LOR:
-		return 1
-	case LAND:
-		return 2
-	case EQL, NEQ, LSS, GTR, LEQ, GEQ, IDENTICAL, NOT_IDENTICAL:
-		return 3
-	case DOTDOT:
-		return 4
-	case ADD, SUB, OR, XOR, WRAP_ADD, WRAP_SUB:
-		return 5
-	case MUL, QUO, REM, AND, WRAP_MUL:
-		return 6
-	case SHL, SHR:
-		return 7
+var precedences = [...]int{
+	// CoalesceExpression and LogicalORExpression share a level. B.4 forbids
+	// mixing ?? with || / && in one chain, which a precedence table cannot
+	// express; the parser records the mix and rejects it later (§6.3).
+	COALESCE: 1,
+	LOR:      1,
+	LAND:     2,
+
+	OR:  3,
+	XOR: 4,
+	AND: 5,
+
+	EQL: 6, NEQ: 6, STRICT_EQL: 6, STRICT_NEQ: 6,
+
+	// RelationalExpression. `as`, `as const`, and `satisfies` also bind here,
+	// but they are IDENT tokens carrying CtxAs / CtxSatisfies and are handled
+	// at this level by the parser, not by this table.
+	LT: 7, GT: 7, LEQ: 7, GEQ: 7, INSTANCEOF: 7,
+	IN: 7, // only when [+In]; the guard is the parser's
+
+	SHL: 8, SHR: 8, USHR: 8,
+
+	ADD: 9, SUB: 9,
+
+	MUL: 10, QUO: 10, REM: 10,
+
+	// Right-associative, and its left operand is UpdateExpression rather than
+	// UnaryExpression (B.4). Both are special cases in the climb.
+	EXP: 11,
+}
+
+// Precedence returns the binary precedence of k, or LowestPrec if k is not a
+// binary operator. Exposed here so a formatter can decide which parentheses
+// are redundant without keeping a second copy of the table (§3).
+//
+// The joined forms >=, >>, >>>, >>=, and >>>= have precedences even though the
+// scanner never emits them (§4.2). The expression parser joins a run of GT
+// tokens with JoinGT and then asks this table for the result. Deleting them as
+// dead would break the climb.
+func (k Kind) Precedence() int {
+	if int(k) < len(precedences) {
+		return precedences[k]
 	}
 	return LowestPrec
 }
 
-// IsBinaryOp reports whether k may join two expressions.
-func (k Kind) IsBinaryOp() bool { return k.Prec() > LowestPrec }
+// IsBinaryOperator reports whether k can appear as an infix operator.
+func (k Kind) IsBinaryOperator() bool { return k.Precedence() > LowestPrec }
 
-// IsNonAssociative reports whether k may not be folded in either direction.
-// `..` is the only such operator: a..b..c is a compile error, and a precedence
-// table alone cannot say so.
-func (k Kind) IsNonAssociative() bool { return k == DOTDOT }
-
-// EndsOperand reports whether a token of kind k can close an operand, which is
-// the condition on the one restriction to longest-match scanning.
+// JoinGT maps a run of adjacent GT tokens, optionally followed by an adjacent
+// ASSIGN, to the operator kind it spells. The scanner deliberately
+// under-munches `>` so that Array<Box<int32>> comes apart in type context
+// (§4.2); the expression parser calls this after checking adjacency with
+// tok[i].End == tok[i+1].Pos.
 //
-// A float_lit may not begin immediately after a `.` whose own preceding token
-// has this property; there the scanner produces an int_lit and the inner `.`
-// scans separately, which is what makes `t.0.0` yield two TupleIndex chains
-// instead of `t` `.` `0.0`.
-//
-// The set is exactly the one written in the rule: identifier, `)`, `]`, `}`,
-// int_lit, float_lit, string_lit. char_lit and true/false/nil are absent, and
-// the scanner must not generalize the set — the restriction is narrow on
-// purpose, and `1.5` stays a float because its preceding token is not a `.`.
-func (k Kind) EndsOperand() bool {
-	switch k {
-	case IDENT, RPAREN, RBRACK, RBRACE, INT, FLOAT, STRING:
-		return true
+// Adjacency is the whitespace test, so `a > > b` never reaches this function
+// with gts == 2.
+func JoinGT(gts int, trailingAssign bool) Kind {
+	switch gts {
+	case 1:
+		if trailingAssign {
+			return GEQ
+		}
+		return GT
+	case 2:
+		if trailingAssign {
+			return SHR_ASSIGN
+		}
+		return SHR
+	case 3:
+		if trailingAssign {
+			return USHR_ASSIGN
+		}
+		return USHR
 	}
-	return false
+	return INVALID
+}
+
+// ScannerEmits reports whether the scanner can produce k directly. It is false
+// for exactly the five joined `>` forms. Used by the scanner's golden tests
+// (§7) to assert that no fixture ever contains one.
+func ScannerEmits(k Kind) bool {
+	switch k {
+	case GEQ, SHR, USHR, SHR_ASSIGN, USHR_ASSIGN:
+		return false
+	}
+	return true
+}
+
+// itoa avoids importing strconv into the lowest package for one debug path.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [8]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

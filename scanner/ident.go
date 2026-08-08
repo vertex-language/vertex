@@ -4,87 +4,148 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/vertex-language/vertex/diag"
+	"github.com/vertex-language/vertex/token"
 )
 
-// isIDStart reports whether ch has the Unicode ID_Start property.
+// scanIdent scans an IdentifierName (A.2) and classifies it. Returns false if
+// the byte at the cursor does not in fact start an identifier.
 //
-// ID_Start is derived as L + Nl + Other_ID_Start, minus Pattern_Syntax and
-// Pattern_White_Space. Go's unicode package exposes the pieces but not the
-// derived property, so it is assembled here.
-//
-// This should become a generated table pinned to a stated Unicode version. The
-// property set changes between versions, and an implementation must not derive
-// these from a host toolchain whose version may drift — a language whose
-// identifier rules move with its compiler's stdlib has made its grammar depend
-// on something outside its own specification.
-func isIDStart(ch rune) bool {
-	return unicode.In(ch, unicode.L, unicode.Nl, unicode.Other_ID_Start) &&
-		!unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space)
-}
-
-// isIDContinue reports whether ch has the Unicode ID_Continue property.
-func isIDContinue(ch rune) bool {
-	return unicode.In(ch,
-		unicode.L, unicode.Nl, unicode.Other_ID_Start,
-		unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc,
-		unicode.Other_ID_Continue,
-	) && !unicode.In(ch, unicode.Pattern_Syntax, unicode.Pattern_White_Space)
-}
-
-// isIdentStart matches the first factor of `identifier`: unicode_id_start or
-// '_'.
-func isIdentStart(ch rune) bool {
-	if ch < utf8.RuneSelf {
-		return ch == '_' ||
-			'a' <= ch && ch <= 'z' ||
-			'A' <= ch && ch <= 'Z'
+// Classification is one call to token.LookupIdent: a ReservedWord becomes its
+// own Kind, a ContextualKeyword becomes IDENT plus a Ctx, everything else is
+// a bare IDENT. Predeclared type names (int32, usize, float64) and every
+// PredefinedType member are ordinary identifiers here (§4.6) — the scanner
+// does not know they are types.
+func (s *scanner) scanIdent(start int) bool {
+	flags, ok := s.scanIdentStart()
+	if !ok {
+		return false
 	}
-	return ch != eof && isIDStart(ch)
-}
+	flags |= s.scanIdentTail()
 
-// isIdentPart matches the repeated factor of `identifier`: unicode_id_continue
-// or '_'.
-//
-// '$' is absent by construction. It is not an identifier character in any
-// position, and it is a diagnosed error rather than a silently unmatched
-// character, so scanIdent handles it explicitly instead.
-func isIdentPart(ch rune) bool {
-	if ch < utf8.RuneSelf {
-		return ch == '_' ||
-			'a' <= ch && ch <= 'z' ||
-			'A' <= ch && ch <= 'Z' ||
-			'0' <= ch && ch <= '9'
+	kind := token.IDENT
+	ctx := token.CtxNone
+	if flags&token.HasEscape == 0 {
+		// An escaped spelling never matches a keyword: `\u0069f` is an
+		// identifier named "if", not the IF token. This is the whole reason
+		// HasEscape exists on identifiers.
+		kind, ctx = token.LookupIdent(s.src[start:s.off])
 	}
-	return ch != eof && isIDContinue(ch)
+	s.emit(kind, ctx, start, flags)
+	return true
 }
 
-// scanIdent consumes an IdentifierName.
-//
-// A '$' anywhere in the run is consumed along with it and reported once over
-// the span it occupies, so one pasted foreign name yields one diagnostic and
-// one identifier token rather than a cascade of fragments. Keyword
-// classification happens in the caller through token.Lookup; the blank
-// identifier '_' falls out as an ordinary identifier, which is what
-// ast.Ident.IsBlank tests later.
-func (s *Scanner) scanIdent() string {
-	offs := s.offset
-	dollar := -1
-
-	for {
-		switch {
-		case isIdentPart(s.ch):
-			s.next()
-		case s.ch == '$':
-			if dollar < 0 {
-				dollar = s.offset
-			}
-			s.next()
-		default:
-			if dollar >= 0 {
-				s.errorSpan(diag.DollarInIdent, dollar, s.offset)
-			}
-			return string(s.src[offs:s.offset])
+func (s *scanner) scanIdentStart() (token.Flags, bool) {
+	if s.off >= len(s.src) {
+		return 0, false
+	}
+	c := s.src[s.off]
+	switch {
+	case c == '\\':
+		if !s.scanUnicodeEscape() {
+			return token.HasEscape, false
+		}
+		return token.HasEscape, true
+	case isIdentStartByte(c):
+		s.off++
+		return 0, true
+	case c >= 0x80:
+		r, size := utf8.DecodeRune(s.src[s.off:])
+		if isIdentStartRune(r) {
+			s.off += size
+			return 0, true
 		}
 	}
+	return 0, false
+}
+
+// scanIdentTail consumes IdentifierPart characters. Split out because
+// PRIVATE_IDENT (`#foo`) reuses it after the `#`.
+func (s *scanner) scanIdentTail() token.Flags {
+	var flags token.Flags
+	for s.off < len(s.src) {
+		c := s.src[s.off]
+		switch {
+		case isIdentPartByte(c):
+			s.off++
+		case c == '\\':
+			if !s.scanUnicodeEscape() {
+				return flags | token.HasEscape
+			}
+			flags |= token.HasEscape
+		case c >= 0x80:
+			r, size := utf8.DecodeRune(s.src[s.off:])
+			if !isIdentPartRune(r) {
+				return flags
+			}
+			s.off += size
+		default:
+			return flags
+		}
+	}
+	return flags
+}
+
+// scanUnicodeEscape consumes `\uXXXX` or `\u{...}`. The code point is not
+// decoded and not validated against IdentifierPart — that is a later phase's
+// job, and rejecting here would mean the scanner knows what an identifier
+// means rather than where it ends.
+func (s *scanner) scanUnicodeEscape() bool {
+	start := s.off
+	s.off++ // backslash
+	if s.at(0) != 'u' {
+		s.error(start, s.off, "expected unicode escape sequence in identifier")
+		return false
+	}
+	s.off++
+	if s.at(0) == '{' {
+		s.off++
+		n := 0
+		for s.off < len(s.src) && isHexDigit(s.src[s.off]) {
+			s.off++
+			n++
+		}
+		if n == 0 || s.at(0) != '}' {
+			s.error(start, s.off, "malformed unicode code point escape")
+			return false
+		}
+		s.off++
+		return true
+	}
+	for i := 0; i < 4; i++ {
+		if !isHexDigit(s.at(0)) {
+			s.error(start, s.off, "unicode escape requires four hex digits")
+			return false
+		}
+		s.off++
+	}
+	return true
+}
+
+func isIdentStartByte(c byte) bool {
+	return c == '$' || c == '_' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentPartByte(c byte) bool {
+	return isIdentStartByte(c) || (c >= '0' && c <= '9')
+}
+
+func isIdentStartRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.In(r, unicode.Nl, unicode.Other_ID_Start)
+}
+
+func isIdentPartRune(r rune) bool {
+	if isIdentStartRune(r) {
+		return true
+	}
+	if r == 0x200C || r == 0x200D { // ZWNJ, ZWJ
+		return true
+	}
+	return unicode.In(r, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
+}
+
+func isDecimalDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func isHexDigit(c byte) bool {
+	return isDecimalDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }

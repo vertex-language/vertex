@@ -2,384 +2,650 @@ package ast
 
 import "github.com/vertex-language/vertex/token"
 
-// Receiver is `( identifier : ReceiverType )`.
-//
-// Type may be wrapped in an *OwnershipType for the mut, var, and shared forms,
-// and carries a TypeParameters list as an *IndexExpr for a method on a generic
-// type. That list re-declares the receiver type's existing names rather than
-// introducing fresh ones.
-type Receiver struct {
-	Lparen token.Pos
-	Name   *Ident
-	Colon  token.Pos
-	Type   Expr
-	Rparen token.Pos
-}
+// Declarations — sections C.1, D, E, H, I, J.
 
-func (r *Receiver) Pos() token.Pos { return r.Lparen }
-func (r *Receiver) End() token.Pos { return r.Rparen + 1 }
+// VarKind distinguishes the binding forms in C.1.
+type VarKind uint8
 
-// FuncDecl is both FunctionDecl and MethodDecl, and with them the initializer
-// and deinitializer forms.
-//
-// Those get no shape of their own: `init` and `deinit` are contextual keywords
-// that are ordinary method names in a receiver declaration, so they arrive as
-// identifiers and land in Name like any other. Whether a given FuncDecl is one
-// is a question about its Name and Recv, answered by the analyzer.
-//
-// TypeParams is parsed on a method too, where it is rejected, so that the
-// diagnostic can point a caret at the bracket list rather than report a syntax
-// error.
-type FuncDecl struct {
-	Doc        *CommentGroup
-	Recv       *Receiver // nil for a free function
-	Name       *Ident
-	TypeParams *TypeParamList
-	Type       *FuncType
-	Body       *BlockStmt // nil only in error recovery
-}
+const (
+	VarVar VarKind = iota
+	VarLet
+	VarConst
+	VarUsing
+	VarAwaitUsing
+)
 
-// Field is one FieldDecl. It serves a struct body, a class body, and a foreign
-// class body, which are one production.
-//
-// A field list is newline-separated juxtaposition rather than a comma list, so
-// the enclosing brace is terminator-significant and two fields on one line do
-// not parse. Default is evaluated at construction for any omitted field.
-type Field struct {
-	Doc     *CommentGroup
-	Name    *Ident
-	Colon   token.Pos
-	Type    Expr
-	Assign  token.Pos
-	Default Expr
-	Comment *CommentGroup
-}
-
-func (f *Field) Pos() token.Pos { return f.Name.Pos() }
-func (f *Field) End() token.Pos {
-	if f.Default != nil {
-		return f.Default.End()
+type (
+	// VarDecl is VariableStatement, LexicalDeclaration, UsingDeclaration, and
+	// AwaitUsingDeclaration (C.1). AwaitPos is set only for VarAwaitUsing.
+	VarDecl struct {
+		AwaitPos token.Pos
+		KindPos  token.Pos
+		Kind     VarKind
+		List     []*Binding // len >= 1
+		Semi     token.Pos
 	}
-	return f.Type.End()
-}
 
-// RecordDecl is both StructDecl and ClassDecl.
-//
-// One node, because a class is byte-for-byte identical in layout to a struct
-// and differs only in its member and method model. The shapes are the same; Kw
-// carries the distinction and every consumer that cares reads it.
-type RecordDecl struct {
-	Doc        *CommentGroup
-	KwPos      token.Pos
-	Kw         token.Kind // STRUCT or CLASS
-	Name       *Ident
-	TypeParams *TypeParamList
-	Lbrace     token.Pos
-	Fields     []*Field
-	Rbrace     token.Pos
-}
-
-// Variant is one enum variant: a unit variant, a payload variant `Name(T, U)`,
-// or a unit variant with an explicit discriminant.
-//
-// Both suffixes are accepted on any variant, so an explicit discriminant on a
-// payload variant parses and can be diagnosed as itself.
-type Variant struct {
-	Doc     *CommentGroup
-	Name    *Ident
-	Lparen  token.Pos
-	Payload []Expr // types
-	Rparen  token.Pos
-	Assign  token.Pos
-	Value   Expr
-	Comment *CommentGroup
-}
-
-func (v *Variant) Pos() token.Pos { return v.Name.Pos() }
-func (v *Variant) End() token.Pos {
-	switch {
-	case v.Value != nil:
-		return v.Value.End()
-	case v.Rparen.IsValid():
-		return v.Rparen + 1
+	// Binding is one LexicalBinding, VariableDeclaration, or UsingBinding
+	// (C.1), and also one AmbientBinding (I).
+	//
+	// Name and Pattern are exclusive: exactly one is non-nil.
+	Binding struct {
+		Name     *Ident
+		Pattern  Expr // *ObjectPattern or *ArrayPattern
+		Definite token.Pos // DefiniteAssignmentAssertion `!`, NoPos if absent
+		Type     TypeExpr
+		Init     Expr
 	}
-	return v.Name.End()
-}
 
-// EnumDecl is an enum declaration. Its body is a comma-separated variant list
-// and is not terminator-significant, which is what lets a variant list span
-// lines.
-type EnumDecl struct {
-	Doc        *CommentGroup
-	Enum       token.Pos
-	Name       *Ident
-	TypeParams *TypeParamList
-	Colon      token.Pos
-	Discrim    Expr // DiscriminantType; nil if absent
-	Lbrace     token.Pos
-	Variants   []*Variant
-	Rbrace     token.Pos
-}
-
-// TypeAliasDecl is `type Name[params] = AliasTarget`. A Target of
-// *AbstractType makes the alias nominal and opaque; anything else is
-// transparent.
-type TypeAliasDecl struct {
-	Doc        *CommentGroup
-	Type       token.Pos
-	Name       *Ident
-	TypeParams *TypeParamList
-	Assign     token.Pos
-	Target     Expr
-}
-
-// ConstraintElem is one element of a constraint body. Exactly one field is
-// non-nil.
-//
-// Set holds a TypeSet and a constraint name undifferentiated, because a single
-// identifier parses as both and is resolved by what the name denotes. A union
-// is a *BinaryExpr with Op OR; a `~T` term is a *UnaryExpr with TILDE.
-type ConstraintElem struct {
-	Set    Expr
-	Method *MethodReq
-}
-
-// MethodReq is a MethodRequirement. It takes a full Signature, so a constraint
-// can require a marked method.
-type MethodReq struct {
-	Doc    *CommentGroup
-	Func   token.Pos
-	Name   *Ident
-	Type   *FuncType
-}
-
-func (m *MethodReq) Pos() token.Pos { return m.Func }
-func (m *MethodReq) End() token.Pos { return m.Type.End() }
-
-// ConstraintDecl is a constraint declaration. There are no interfaces; a
-// constraint is its own declaration form and is legal only in a bracket
-// position, which is a static rule. Multiple elements form an intersection.
-type ConstraintDecl struct {
-	Doc        *CommentGroup
-	Constraint token.Pos
-	Name       *Ident
-	Lbrace     token.Pos
-	Elems      []*ConstraintElem
-	Rbrace     token.Pos
-}
-
-// VarDecl is `let`/`var` with initializers, and bare `var Binding`.
-//
-// The bare form covers all three initializer-free spellings uniformly, `var w`
-// among them: statement-leading `var` is always a declaration, so a bare
-// transfer marker outside an owning position lands on a real declaration node
-// and is diagnosed as itself rather than as a syntax error.
-//
-// This is also a TopLevelDecl, where the initializer must be
-// compile-time-evaluable and the bare form is rejected. Both are static rules.
-type VarDecl struct {
-	Doc      *CommentGroup
-	KwPos    token.Pos
-	Kw       token.Kind // LET or VAR
-	Bindings []*Binding
-	Assign   token.Pos // NoPos for the bare form
-	Values   []Expr    // owning positions: any may be a *TransferExpr
-	Comment  *CommentGroup
-}
-
-// Binding is one entry of a BindingList.
-type Binding struct {
-	Name  *Ident
-	Colon token.Pos
-	Type  Expr // nil when inferred
-}
-
-func (b *Binding) Pos() token.Pos { return b.Name.Pos() }
-func (b *Binding) End() token.Pos {
-	if b.Type != nil {
-		return b.Type.End()
+	// FuncDecl is FunctionDeclaration, GeneratorDeclaration,
+	// AsyncFunctionDeclaration, AsyncGeneratorDeclaration (D), and
+	// AcceleratedFunctionDeclaration (D.4).
+	//
+	// One node for plain, kernel, and graph functions, matching D.4's single
+	// production. They differ in ways that aren't grammatical.
+	//
+	// Async and Gen are recorded even though D.4 admits neither on an
+	// accelerated function, so `kernel async function f() {}` can be rejected
+	// by name rather than by parse failure (§5.3, §8.4).
+	FuncDecl struct {
+		Decorators []*Decorator
+		Accel      AccelKind
+		AccelPos   token.Pos
+		FuncPos    token.Pos
+		Name       *Ident // nil for the export-default and expression forms
+		TypeParams *TypeParamList
+		Params     *ParamList
+		Result     TypeExpr   // may be *TypePredicate
+		Body       *BlockStmt // nil ⇒ signature only, the `;` form
+		Semi       token.Pos
+		Async, Gen bool
 	}
-	return b.Name.End()
+
+	// ClassDecl is ClassDeclaration and the shared shape behind ClassExpr (E).
+	ClassDecl struct {
+		Decorators  []*Decorator
+		AbstractPos token.Pos
+		ClassPos    token.Pos
+		Name        *Ident // nil for anonymous
+		TypeParams  *TypeParamList
+		Extends     *HeritageClause
+		Implements  *HeritageClause
+		Lbrace      token.Pos
+		Members     []Decl
+		Rbrace      token.Pos
+	}
+
+	// StructDecl is StructDeclaration (E.1).
+	//
+	// Extends is present even though E.1 has no ClassExtendsClause: §6.3
+	// requires `struct S extends B {}` to parse into a real StructDecl
+	// carrying its heritage clause, so the eventual message can name the
+	// construct instead of saying "unexpected token `extends`". A valid
+	// program leaves it nil. See the note in the package README.
+	//
+	// Body is nil for the ambient form, `declare struct S;` (I). Members live
+	// inside Body, so the nil case is unambiguous.
+	StructDecl struct {
+		Decorators []*Decorator
+		StructPos  token.Pos // the contextual `struct` identifier
+		Name       *Ident
+		TypeParams *TypeParamList
+		Extends    *HeritageClause // parse-first-reject-later; nil when valid
+		Implements *HeritageClause
+		Body       *StructBody // nil ⇒ ambient form
+		Semi       token.Pos
+	}
+
+	// StructBody holds struct members in source order, which is layout order
+	// (§5.3). Never sorted, canonicalized, or deduped (§5.4).
+	StructBody struct {
+		Lbrace  token.Pos
+		Members []Decl
+		Rbrace  token.Pos
+	}
+
+	// HeritageClause is ClassExtendsClause, ImplementsClause, or
+	// InterfaceExtendsClause (E, H). Types has len >= 1 in a valid clause.
+	HeritageClause struct {
+		KeywordPos token.Pos
+		Keyword    token.Kind // EXTENDS, or IDENT for the contextual `implements`
+		Types      []TypeExpr
+	}
+
+	// FieldDefinition (E), also a StructElement (E.1).
+	FieldDecl struct {
+		Decorators  []*Decorator
+		Mods        Modifiers
+		AccessorPos token.Pos // `accessor`, NoPos if absent
+		Name        Node      // *Ident, *BasicLit, *ComputedKey, or *PrivateIdent
+		Optional    token.Pos // OptionalMarker `?`
+		Definite    token.Pos // DefiniteAssignmentAssertion `!`
+		Type        TypeExpr
+		Init        Expr
+		Semi        token.Pos
+	}
+
+	// MethodDecl is MethodDefinition (D.3) in a class, struct, or object
+	// literal: plain, generator, async, async generator, get, and set.
+	MethodDecl struct {
+		Decorators []*Decorator
+		Mods       Modifiers
+		AsyncPos   token.Pos
+		StarPos    token.Pos // generator
+		Accessor   token.Ctx // CtxGet, CtxSet, or CtxNone
+		AccessorPos token.Pos
+		Name       Node
+		Optional   token.Pos // MethodOptionalMarker, only under [+Optional]
+		TypeParams *TypeParamList
+		Params     *ParamList
+		Result     TypeExpr
+		Body       *BlockStmt
+	}
+
+	// CtorDecl is ConstructorDeclaration (E). Body is nil for the `;` form.
+	CtorDecl struct {
+		Decorators []*Decorator
+		Mods       Modifiers
+		CtorPos    token.Pos
+		Params     *ParamList
+		Body       *BlockStmt
+		Semi       token.Pos
+	}
+
+	// StaticBlockDecl is ClassStaticBlock (E).
+	StaticBlockDecl struct {
+		StaticPos token.Pos
+		Body      *BlockStmt
+	}
+
+	// InterfaceDecl is InterfaceDeclaration (H).
+	InterfaceDecl struct {
+		IfacePos   token.Pos
+		Name       *Ident
+		TypeParams *TypeParamList
+		Extends    *HeritageClause
+		Body       *ObjectType
+	}
+
+	// TypeAliasDecl is TypeAliasDeclaration (H).
+	TypeAliasDecl struct {
+		TypePos    token.Pos
+		Name       *Ident
+		TypeParams *TypeParamList
+		Assign     token.Pos
+		Type       TypeExpr // may be *TypePredicate
+		Semi       token.Pos
+	}
+
+	// EnumDecl is EnumDeclaration (H).
+	EnumDecl struct {
+		ConstPos   token.Pos // NoPos unless `const enum`
+		EnumPos    token.Pos
+		Name       *Ident
+		Underlying TypeExpr // EnumUnderlyingType
+		Lbrace     token.Pos
+		Members    []*EnumMember
+		Rbrace     token.Pos
+	}
+
+	// EnumMember is EnumMember (H). Value is an AssignmentExpression, not
+	// folded to a constant — §1 forbids folding.
+	EnumMember struct {
+		Name  Node // *Ident or *BasicLit (StringLiteral)
+		Assign token.Pos
+		Value Expr
+	}
+
+	// NamespaceDecl is NamespaceDeclaration and AmbientNamespaceDeclaration
+	// (H, I).
+	NamespaceDecl struct {
+		NsPos  token.Pos
+		Name   Node // *Ident or *QualifiedName (IdentifierPath)
+		Lbrace token.Pos
+		Items  []Stmt
+		Rbrace token.Pos
+	}
+
+	// ModuleDecl is AmbientModuleDeclaration and AmbientGlobalAugmentation
+	// (I). Name is nil for `global`.
+	ModuleDecl struct {
+		KeywordPos token.Pos
+		KeywordEnd token.Pos
+		IsGlobal   bool
+		Name       *BasicLit // StringLiteral
+		Lbrace     token.Pos // NoPos for `module "x";`
+		Items      []Stmt
+		Rbrace     token.Pos
+		Semi       token.Pos
+	}
+
+	// AmbientDecl is `declare X` (I). Inner is the declaration it wraps.
+	//
+	// The wrapper is a real node rather than a Modifiers bit because
+	// AmbientDeclaration is its own production and its contents are a
+	// restricted grammar — the `declare` in `declare class` is not the
+	// ClassElementModifier `declare`.
+	AmbientDecl struct {
+		DeclarePos token.Pos
+		Inner      Decl
+	}
+)
+
+// AccelKind is the AcceleratedFunctionModifier (D.4).
+type AccelKind uint8
+
+const (
+	AccelNone AccelKind = iota
+	AccelKernel
+	AccelGraph
+)
+
+// --- Parameters (D.1) -------------------------------------------------------
+
+type (
+	// ParamList is FormalParameters (D.1).
+	ParamList struct {
+		Lparen token.Pos
+		This   *ThisParam // ThisParameter, always first when present
+		List   []*Param
+		Rest   *RestElem  // FunctionRestParameter, always last when present
+		Rparen token.Pos
+	}
+
+	// ThisParam is `this: T` (D.1). Not a Param: it takes no decorators, no
+	// modifiers, no initializer, and no optional marker.
+	ThisParam struct {
+		ThisPos token.Pos
+		Type    TypeExpr
+	}
+
+	// Param is FormalParameter (D.1).
+	//
+	// Mods carries the parameter-property modifiers (AccessibilityModifier,
+	// override, readonly). They are the same words as ClassElementModifier and
+	// share the bitset; whether they are legal here depends on the enclosing
+	// function being a constructor, which is not a parse question.
+	Param struct {
+		Decorators []*Decorator
+		Mods       Modifiers
+		Name       Expr // *Ident, *ObjectPattern, or *ArrayPattern
+		Optional   token.Pos
+		Type       TypeExpr
+		Init       Expr
+	}
+)
+
+// --- Decorators (F) ---------------------------------------------------------
+
+// Decorator is `@ expr` (F). X is a *Ident, *QualifiedName, *ParenExpr, or
+// *CallExpr, matching the three DecoratorMemberExpression forms.
+type Decorator struct {
+	At token.Pos
+	X  Expr
 }
 
-// ImportDecl is `import "path"` or `import ( ... )`. There is no aliasing form,
-// no dot-import, and no blank import, so there is nothing to record but paths —
-// the qualifier comes from the imported package's own package clause, and the
-// path is a locator, not a name.
-type ImportDecl struct {
-	Doc    *CommentGroup
-	Import token.Pos
-	Lparen token.Pos // NoPos for the single-path form
-	Paths  []*BasicLit
-	Rparen token.Pos
+// --- Imports and exports (J) ------------------------------------------------
+
+type (
+	// ImportDecl is ImportDeclaration (J.1).
+	//
+	// TypePos marks `import type`. Phase covers `import defer` and
+	// `import source`. Specs is nil for a bare side-effect import.
+	ImportDecl struct {
+		ImportPos token.Pos
+		TypePos   token.Pos
+		Phase     ImportPhase
+		PhasePos  token.Pos
+		Default   *Ident        // ImportedDefaultBinding
+		Namespace *Ident        // NameSpaceImport, `* as x`
+		NamedPos  token.Pos     // `{`, NoPos if no NamedImports
+		Named     []*ImportSpec
+		NamedEnd  token.Pos
+		FromPos   token.Pos
+		Path      *BasicLit
+		With      *WithClause
+		Semi      token.Pos
+	}
+
+	// ImportSpec is ImportSpecifier (J.1). Name is nil for the plain form.
+	ImportSpec struct {
+		TypePos token.Pos
+		Name    Node // ModuleExportName: *Ident or *BasicLit
+		AsPos   token.Pos
+		Local   *Ident
+	}
+
+	// ImportEqualsDecl is ImportEqualsDeclaration (J.1).
+	ImportEqualsDecl struct {
+		ImportPos  token.Pos
+		Name       *Ident
+		Assign     token.Pos
+		Entity     Node      // *Ident or *QualifiedName
+		RequirePos token.Pos // NoPos unless the require form
+		Path       *BasicLit
+		Rparen     token.Pos
+		Semi       token.Pos
+	}
+
+	// ExportDecl is ExportDeclaration (J.2). Exactly one of Decl, Star,
+	// Named, Default, and Assign describes the form.
+	ExportDecl struct {
+		ExportPos  token.Pos
+		TypePos    token.Pos // `export type`
+		DefaultPos token.Pos // `export default`
+		StarPos    token.Pos // `export *`
+		StarAs     Node      // ModuleExportName after `* as`
+		NamedPos   token.Pos
+		Named      []*ExportSpec
+		NamedEnd   token.Pos
+		Decl       Stmt      // the declaration or statement form
+		Value      Expr      // export default <expr>
+		AssignPos  token.Pos // `export = E`
+		Entity     Node      // E in `export = E`
+		NamespacePos token.Pos // `export as namespace X`
+		Namespace  *Ident
+		FromPos    token.Pos
+		Path       *BasicLit
+		With       *WithClause
+		Semi       token.Pos
+	}
+
+	// ExportSpec is ExportSpecifier (J.2).
+	ExportSpec struct {
+		TypePos token.Pos
+		Name    Node
+		AsPos   token.Pos
+		As      Node
+	}
+
+	// WithClause is WithClause (J.1) and the attribute list inside ImportType
+	// (G.1).
+	WithClause struct {
+		WithPos token.Pos
+		Lbrace  token.Pos
+		List    []*ImportAttr
+		Rbrace  token.Pos
+	}
+
+	// ImportAttr is ImportAttribute (J.1).
+	ImportAttr struct {
+		Key   Node // *Ident or *BasicLit
+		Colon token.Pos
+		Value *BasicLit
+	}
+)
+
+// --- spans ------------------------------------------------------------------
+
+func (d *VarDecl) Pos() token.Pos {
+	if d.AwaitPos != token.NoPos {
+		return d.AwaitPos
+	}
+	return d.KindPos
+}
+func (d *VarDecl) End() token.Pos {
+	return semiEnd(d.Semi, d.List[len(d.List)-1].End())
 }
 
-// --------------------------------------------------------- declare blocks
-
-// ForeignMember is a member of a declare body or a foreign class body.
-//
-// The declare body admits a foreign function, a foreign class, and a nested
-// declare declaration; the foreign class body admits a foreign function, a
-// foreign initializer, and a field. A nested declare and a field each parse and
-// are rejected, so both *DeclareDecl and *Field implement this.
-type ForeignMember interface {
-	Node
-	foreignMember()
+func (d *Binding) Pos() token.Pos {
+	if d.Name != nil {
+		return d.Name.Pos()
+	}
+	return d.Pattern.Pos()
 }
-
-// DeclareDecl is `declare framework "S" { }` or `declare module ["tag"] "S" { }`.
-// Kind is the contextual keyword, which scans as an identifier.
-//
-// The variant tag is hoisted out of the module form, so a tagged framework
-// block parses and is rejected with a message about `declare framework` rather
-// than as a syntax error at the bracket. The tag set is closed; membership is a
-// static rule.
-type DeclareDecl struct {
-	Doc     *CommentGroup
-	Declare token.Pos
-	KindPos token.Pos
-	Kind    string // "framework" or "module"
-	Variant *VariantTag
-	Path    *BasicLit
-	Lbrace  token.Pos
-	Members []ForeignMember
-	Rbrace  token.Pos
+func (d *Binding) End() token.Pos {
+	last := d.Pos()
+	if d.Name != nil {
+		last = d.Name.End()
+	} else {
+		last = d.Pattern.End()
+	}
+	if d.Definite != token.NoPos && d.Definite+1 > last {
+		last = d.Definite + 1
+	}
+	return endOf(last, d.Type, d.Init)
 }
-
-// VariantTag is the bracketed tag set.
-type VariantTag struct {
-	Lbrack token.Pos
-	Tags   []*BasicLit
-	Rbrack token.Pos
-}
-
-func (v *VariantTag) Pos() token.Pos { return v.Lbrack }
-func (v *VariantTag) End() token.Pos { return v.Rbrack + 1 }
-
-// ForeignFunc is both ForeignFuncDecl and ForeignInitDecl.
-//
-// Init marks the `init` prefix modifier, which is a modifier on func and not a
-// function name; Name is nil for the unnamed initializer form that bare
-// `Type(...)` construction resolves to.
-//
-// Body exists for the rejected form. A declare block describes call shapes
-// only, so a block on a foreign declaration must parse in order to be diagnosed
-// as itself. A marker on one is rejected the same way, and needs no field here
-// because Type already carries every marker written.
-type ForeignFunc struct {
-	Doc    *CommentGroup
-	Init   token.Pos // NoPos when absent
-	Func   token.Pos
-	Name   *Ident // nil for the unnamed initializer
-	Type   *FuncType
-	Body   *BlockStmt
-}
-
-// ForeignClass is a foreign class declaration. Its members are foreign
-// functions, foreign initializers, and — parsed only to be rejected — fields.
-type ForeignClass struct {
-	Doc     *CommentGroup
-	Class   token.Pos
-	Name    *Ident
-	Lbrace  token.Pos
-	Members []ForeignMember
-	Rbrace  token.Pos
-}
-
-// BadDecl marks an unparseable declaration span; see BadExpr.
-type BadDecl struct {
-	From, To token.Pos
-}
-
-// -------------------------------------------------------------- positions
-
-func (d *RecordDecl) Pos() token.Pos     { return d.KwPos }
-func (d *EnumDecl) Pos() token.Pos       { return d.Enum }
-func (d *TypeAliasDecl) Pos() token.Pos  { return d.Type }
-func (d *ConstraintDecl) Pos() token.Pos { return d.Constraint }
-func (d *VarDecl) Pos() token.Pos        { return d.KwPos }
-func (d *ImportDecl) Pos() token.Pos     { return d.Import }
-func (d *DeclareDecl) Pos() token.Pos    { return d.Declare }
-func (d *ForeignClass) Pos() token.Pos   { return d.Class }
-func (d *BadDecl) Pos() token.Pos        { return d.From }
 
 func (d *FuncDecl) Pos() token.Pos {
-	if d.Recv != nil {
-		return d.Recv.Pos()
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
 	}
-	return d.Type.Func
-}
-
-func (d *ForeignFunc) Pos() token.Pos {
-	if d.Init.IsValid() {
-		return d.Init
+	if d.AccelPos != token.NoPos {
+		return d.AccelPos
 	}
-	return d.Func
+	return d.FuncPos
 }
-
-// Exactly one of Set and Method is non-nil, so the element's extent is
-// whichever one is present.
-func (e *ConstraintElem) Pos() token.Pos {
-	if e.Set != nil {
-		return e.Set.Pos()
-	}
-	return e.Method.Pos()
-}
-
-func (e *ConstraintElem) End() token.Pos {
-	if e.Set != nil {
-		return e.Set.End()
-	}
-	return e.Method.End()
-}
-
-func (d *RecordDecl) End() token.Pos     { return d.Rbrace + 1 }
-func (d *EnumDecl) End() token.Pos       { return d.Rbrace + 1 }
-func (d *TypeAliasDecl) End() token.Pos  { return d.Target.End() }
-func (d *ConstraintDecl) End() token.Pos { return d.Rbrace + 1 }
-func (d *DeclareDecl) End() token.Pos    { return d.Rbrace + 1 }
-func (d *ForeignClass) End() token.Pos   { return d.Rbrace + 1 }
-func (d *BadDecl) End() token.Pos        { return d.To }
-
 func (d *FuncDecl) End() token.Pos {
 	if d.Body != nil {
 		return d.Body.End()
 	}
-	return d.Type.End()
+	last := endOf(d.Params.End(), d.Result)
+	return semiEnd(d.Semi, last)
 }
 
-func (d *ForeignFunc) End() token.Pos {
+func (d *ClassDecl) Pos() token.Pos {
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
+	}
+	if d.AbstractPos != token.NoPos {
+		return d.AbstractPos
+	}
+	return d.ClassPos
+}
+func (d *ClassDecl) End() token.Pos { return d.Rbrace + 1 }
+
+func (d *StructDecl) Pos() token.Pos {
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
+	}
+	return d.StructPos
+}
+func (d *StructDecl) End() token.Pos {
 	if d.Body != nil {
 		return d.Body.End()
 	}
-	return d.Type.End()
+	return semiEnd(d.Semi, d.Name.End())
 }
 
-func (d *VarDecl) End() token.Pos {
-	if n := len(d.Values); n > 0 {
-		return d.Values[n-1].End()
+func (d *StructBody) Pos() token.Pos     { return d.Lbrace }
+func (d *StructBody) End() token.Pos     { return d.Rbrace + 1 }
+func (d *HeritageClause) Pos() token.Pos { return d.KeywordPos }
+func (d *HeritageClause) End() token.Pos { return d.Types[len(d.Types)-1].End() }
+
+func (d *FieldDecl) Pos() token.Pos {
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
 	}
-	return d.Bindings[len(d.Bindings)-1].End()
+	if p := d.Mods.Pos(); p != token.NoPos {
+		return p
+	}
+	if d.AccessorPos != token.NoPos {
+		return d.AccessorPos
+	}
+	return d.Name.Pos()
+}
+func (d *FieldDecl) End() token.Pos {
+	last := d.Name.End()
+	for _, p := range []token.Pos{d.Optional, d.Definite} {
+		if p != token.NoPos && p+1 > last {
+			last = p + 1
+		}
+	}
+	return semiEnd(d.Semi, endOf(last, d.Type, d.Init))
 }
 
+func (d *MethodDecl) Pos() token.Pos {
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
+	}
+	if p := d.Mods.Pos(); p != token.NoPos {
+		return p
+	}
+	for _, p := range []token.Pos{d.AsyncPos, d.AccessorPos, d.StarPos} {
+		if p != token.NoPos {
+			return p
+		}
+	}
+	return d.Name.Pos()
+}
+func (d *MethodDecl) End() token.Pos {
+	if d.Body != nil {
+		return d.Body.End()
+	}
+	return endOf(d.Params.End(), d.Result)
+}
+
+func (d *CtorDecl) Pos() token.Pos {
+	if n := len(d.Decorators); n > 0 {
+		return d.Decorators[0].Pos()
+	}
+	if p := d.Mods.Pos(); p != token.NoPos {
+		return p
+	}
+	return d.CtorPos
+}
+func (d *CtorDecl) End() token.Pos {
+	if d.Body != nil {
+		return d.Body.End()
+	}
+	return semiEnd(d.Semi, d.Params.End())
+}
+
+func (d *StaticBlockDecl) Pos() token.Pos { return d.StaticPos }
+func (d *StaticBlockDecl) End() token.Pos { return d.Body.End() }
+func (d *InterfaceDecl) Pos() token.Pos   { return d.IfacePos }
+func (d *InterfaceDecl) End() token.Pos   { return d.Body.End() }
+func (d *TypeAliasDecl) Pos() token.Pos   { return d.TypePos }
+func (d *TypeAliasDecl) End() token.Pos   { return semiEnd(d.Semi, d.Type.End()) }
+
+func (d *EnumDecl) Pos() token.Pos {
+	if d.ConstPos != token.NoPos {
+		return d.ConstPos
+	}
+	return d.EnumPos
+}
+func (d *EnumDecl) End() token.Pos      { return d.Rbrace + 1 }
+func (d *EnumMember) Pos() token.Pos    { return d.Name.Pos() }
+func (d *EnumMember) End() token.Pos    { return endOf(d.Name.End(), d.Value) }
+func (d *NamespaceDecl) Pos() token.Pos { return d.NsPos }
+func (d *NamespaceDecl) End() token.Pos { return d.Rbrace + 1 }
+func (d *ModuleDecl) Pos() token.Pos    { return d.KeywordPos }
+func (d *ModuleDecl) End() token.Pos {
+	if d.Rbrace != token.NoPos {
+		return d.Rbrace + 1
+	}
+	return semiEnd(d.Semi, d.Name.End())
+}
+func (d *AmbientDecl) Pos() token.Pos { return d.DeclarePos }
+func (d *AmbientDecl) End() token.Pos { return d.Inner.End() }
+
+func (p *ParamList) Pos() token.Pos { return p.Lparen }
+func (p *ParamList) End() token.Pos { return p.Rparen + 1 }
+func (p *ThisParam) Pos() token.Pos { return p.ThisPos }
+func (p *ThisParam) End() token.Pos { return p.Type.End() }
+func (p *Param) Pos() token.Pos {
+	if n := len(p.Decorators); n > 0 {
+		return p.Decorators[0].Pos()
+	}
+	if q := p.Mods.Pos(); q != token.NoPos {
+		return q
+	}
+	return p.Name.Pos()
+}
+func (p *Param) End() token.Pos {
+	last := p.Name.End()
+	if p.Optional != token.NoPos && p.Optional+1 > last {
+		last = p.Optional + 1
+	}
+	return endOf(last, p.Type, p.Init)
+}
+
+func (d *Decorator) Pos() token.Pos { return d.At }
+func (d *Decorator) End() token.Pos { return d.X.End() }
+
+func (d *ImportDecl) Pos() token.Pos { return d.ImportPos }
 func (d *ImportDecl) End() token.Pos {
-	if d.Rparen.IsValid() {
-		return d.Rparen + 1
+	last := d.ImportPos + 6
+	if d.Path != nil {
+		last = d.Path.End()
 	}
-	return d.Paths[len(d.Paths)-1].End()
+	return semiEnd(d.Semi, endOf(last, d.With))
+}
+func (d *ImportSpec) Pos() token.Pos {
+	if d.TypePos != token.NoPos {
+		return d.TypePos
+	}
+	return spanOf(d.Local.Pos(), d.Name)
+}
+func (d *ImportSpec) End() token.Pos { return d.Local.End() }
+
+func (d *ImportEqualsDecl) Pos() token.Pos { return d.ImportPos }
+func (d *ImportEqualsDecl) End() token.Pos {
+	if d.Rparen != token.NoPos {
+		return semiEnd(d.Semi, d.Rparen+1)
+	}
+	return semiEnd(d.Semi, d.Entity.End())
 }
 
-func (*FuncDecl) declNode()       {}
-func (*RecordDecl) declNode()     {}
-func (*EnumDecl) declNode()       {}
-func (*TypeAliasDecl) declNode()  {}
-func (*ConstraintDecl) declNode() {}
-func (*VarDecl) declNode()        {}
-func (*ImportDecl) declNode()     {}
-func (*DeclareDecl) declNode()    {}
-func (*BadDecl) declNode()        {}
+func (d *ExportDecl) Pos() token.Pos { return d.ExportPos }
+func (d *ExportDecl) End() token.Pos {
+	last := d.ExportPos + 6
+	for _, n := range []Node{d.Decl, d.Value, d.Entity, d.Namespace, d.Path, d.With} {
+		if !isNil(n) && n.End() > last {
+			last = n.End()
+		}
+	}
+	if d.NamedEnd+1 > last {
+		last = d.NamedEnd + 1
+	}
+	if !isNil(d.Decl) {
+		return last // a declaration carries its own terminator
+	}
+	return semiEnd(d.Semi, last)
+}
+func (d *ExportSpec) Pos() token.Pos {
+	if d.TypePos != token.NoPos {
+		return d.TypePos
+	}
+	return d.Name.Pos()
+}
+func (d *ExportSpec) End() token.Pos { return endOf(d.Name.End(), d.As) }
 
-func (*ForeignFunc) foreignMember()  {}
-func (*ForeignClass) foreignMember() {}
-func (*DeclareDecl) foreignMember()  {}
-func (*Field) foreignMember()        {}
+func (d *WithClause) Pos() token.Pos { return d.WithPos }
+func (d *WithClause) End() token.Pos { return d.Rbrace + 1 }
+func (d *ImportAttr) Pos() token.Pos { return d.Key.Pos() }
+func (d *ImportAttr) End() token.Pos { return d.Value.End() }
+
+// Declarations are also statements; see the note in node.go.
+func (*VarDecl) declNode()          {}
+func (*VarDecl) stmtNode()          {}
+func (*FuncDecl) declNode()         {}
+func (*FuncDecl) stmtNode()         {}
+func (*ClassDecl) declNode()        {}
+func (*ClassDecl) stmtNode()        {}
+func (*StructDecl) declNode()       {}
+func (*StructDecl) stmtNode()       {}
+func (*InterfaceDecl) declNode()    {}
+func (*InterfaceDecl) stmtNode()    {}
+func (*TypeAliasDecl) declNode()    {}
+func (*TypeAliasDecl) stmtNode()    {}
+func (*EnumDecl) declNode()         {}
+func (*EnumDecl) stmtNode()         {}
+func (*NamespaceDecl) declNode()    {}
+func (*NamespaceDecl) stmtNode()    {}
+func (*ModuleDecl) declNode()       {}
+func (*ModuleDecl) stmtNode()       {}
+func (*AmbientDecl) declNode()      {}
+func (*AmbientDecl) stmtNode()      {}
+func (*ImportDecl) declNode()       {}
+func (*ImportDecl) stmtNode()       {}
+func (*ImportEqualsDecl) declNode() {}
+func (*ImportEqualsDecl) stmtNode() {}
+func (*ExportDecl) declNode()       {}
+func (*ExportDecl) stmtNode()       {}
+
+func (*FieldDecl) declNode()       {}
+func (*MethodDecl) declNode()      {}
+func (*CtorDecl) declNode()        {}
+func (*StaticBlockDecl) declNode() {}

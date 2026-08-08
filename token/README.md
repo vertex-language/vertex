@@ -4,75 +4,72 @@
 import "github.com/vertex-language/vertex/token"
 ```
 
-Package `token` defines the lexical vocabulary and source-position machinery shared by every stage of the Vertex toolchain. It depends on nothing else — every other package (`scanner`, `parser`, `ast`, `diag`) sits above it.
+Package `token` defines the lexical vocabulary of Vertex: token kinds, contextual-keyword identity, source positions, and diagnostics. It imports nothing from `scanner`, `ast`, or `parser`, and it never will — it is the bottom of the dependency graph, and `Diagnostic` lives here rather than in `scanner` precisely because both `scanner` and `parser` need to emit them and neither can import the other.
 
-## Design philosophy
-
-### No statement terminator token
-
-There is no `SEMICOLON` kind and no automatic semicolon insertion. A terminator is a *run* of line terminators, and a run of any length is one terminator — so line structure reaches the parser as a single flag (`Token.NLBefore`) on the token that follows, rather than as a token of its own.
-
-A dedicated `NEWLINE` token wouldn't work here, because whether a line terminator actually terminates a statement depends on the innermost enclosing bracketing construct — significant inside a `Block`, ordinary white space inside a `LiteralValue` — and whether a given `{` opens one or the other is a *parsing* question, not a lexical one. So the scanner emits every line terminator and interprets none; the parser is the only phase equipped to decide what one means.
-
-### Contextual keywords are just identifiers
-
-Contextual keywords (`build`, `test`, `init`, `deinit`, `framework`, `module`, `blocks`, `threads`, `Expected`, `error`, and every `BuildTag` spelling) mint no `Kind` of their own. Each scans as plain `IDENT` and is recognized only at the one production that names it, via `Token.IsCtx` and the `Ctx*` string constants. This is why they're absent from `Lookup`: baking one into keyword lookup would make it reserved unconditionally, when in fact each is an ordinary name everywhere except its own recognition site.
-
-## Package layout
-
-| File | Contents |
-|---|---|
-| `token.go` | `Token`, contextual-keyword constants, type-operator names, and the reserved-builtin set |
-| `kind.go` | `Kind`, its classification predicates, the keyword table, and the precedence ladder |
-| `pos.go` | `Pos`, `Position`, `File`, and `FileSet` — the position machinery |
-| `buildtag.go` | `BuildTag` and its lookup |
-
-## Core types
-
-### `Token`
+## Token
 
 ```go
 type Token struct {
-	Kind     Kind
-	Pos      Pos
-	Lit      string // raw source text; empty when Kind has a fixed spelling
-	NLBefore bool   // one or more line terminators precede this token
+	Kind  Kind
+	Ctx   Ctx
+	Flags Flags
+	Pos   Pos
+	End   Pos
 }
 ```
 
-`Lit` is deliberately raw, not decoded — escape sequences and digit separators survive exactly as written, because a formatter needs the original spelling and decoding is a later phase's job. `Text()` returns `Lit` where present and falls back to `Kind.Spelling()` otherwise; `End()` derives a token's extent from `Text()`, which is why keywords and punctuation get correct extents without needing their own stored length.
+A `Token` is a lexeme: a classification and a span. It carries no literal text — recover that with `File.Slice`, since the scanner allocates no strings. The struct is pointer-free and packs to twelve bytes, which matters because the parser buffers whole files as a `[]Token`; a pointer-bearing element would put that buffer under GC scan.
 
-### `Kind`
+`Adjacent` reports whether one token begins exactly where another ends, with no intervening whitespace or comment — this is the test the expression parser uses when joining a run of `GT` tokens, which is why `a > > b` never becomes a shift. `IsContextual` reports whether a token spells a given contextual keyword; whether it *declares* anything at that position is a parse question, not a token question.
 
-`Kind` values are assigned by `iota` in declaration order, with related kinds grouped into contiguous ranges bounded by unexported sentinels (`literalBeg`/`literalEnd`, `operatorBeg`/`operatorEnd`, `keywordBeg`/`keywordEnd`, etc.). Every classification predicate — `IsLiteral`, `IsOperator`, `IsKeyword`, `IsAssign`, `IsCompoundAssign` — is therefore a pair of comparisons rather than a switch. Renumbering is safe as long as each group's sentinels move together with it.
+### Flags
 
-Notable predicates:
+`Flags` records lexical facts with no home in `Kind`:
 
-- **`Prec()`** returns one of seven binary-precedence levels. `as` (cast) is *not* among them despite `CastPrec` being defined above `UnaryPrec` — `as`'s right operand is a `Type`, not an `Expr`, so a precedence-climbing loop can't consume it and `Prec` never returns `CastPrec` for it. Casts are folded by the parser as their own production instead.
-- **`EndsOperand()`** backs the *one* deliberate exception to longest-match scanning: a float literal may not begin immediately after a `.` whose preceding token also satisfies this predicate. This is what lets `t.0.0` scan as two tuple-index accesses instead of `t` `.` `0.0`. The set is narrow by design (`IDENT`, `)`, `]`, `}`, `INT`, `FLOAT`, `STRING`) and must not be generalized — `char_lit` and `true`/`false`/`nil` are deliberately excluded, so `1.5` still scans as a plain float.
-- **`IsNonAssociative()`** is true only for `DOTDOT`: `a..b..c` is a compile error that a precedence table alone can't express, so the parser checks this explicitly.
+- `NLBefore` marks a line terminator between the previous token and this one. A newline is never a token of its own — whether it ends a statement is answered later by `expectSemi` and the grammar's `[no LineTerminator here]` restrictions. A comment spanning a newline sets this on the next real token regardless of whether comments are being retained.
+- `HasEscape` marks an identifier containing a Unicode escape, a string or template containing an escape sequence, or a numeric literal containing a separator. Keyword lookup must be skipped for an escaped identifier — `\u0069f` is an `IDENT` named `if`, never the `IF` keyword — and this flag is what tells the scanner to skip the `LookupIdent` call.
+- `Unterminated` marks a string, template, comment, or regex that ran to end of input or end of line. The token still gets an exact span, so recovery can proceed and every node keeps a non-zero span.
 
-### `Pos` / `Position` / `File` / `FileSet`
+## Kind
 
-`Pos` is a compact integer offset into a `FileSet`'s shared global address space — `NoPos` (zero) means "no position." `Position` is what you get after resolving a `Pos` against its file: filename, byte offset, 1-based line, 1-based column.
+`Kind` classifies a token and is deliberately `uint8`. Kinds are laid out in contiguous ranges bounded by unexported sentinels, so `IsLiteral`, `IsOperator`, and `IsReserved` are range comparisons rather than switches — the ranges *are* the API, and reordering constants without updating the sentinels breaks them silently.
+
+Only `ReservedWord` gets a `Kind`. Contextual keywords and strict reserved words scan as `IDENT` and carry their identity in `Ctx` instead (see below).
+
+Five operator kinds — `GEQ`, `SHR`, `USHR`, `SHR_ASSIGN`, `USHR_ASSIGN` — exist in the table but are never produced by the scanner; `ScannerEmits` reports this so golden scanner tests can assert no fixture ever contains one. They exist because the scanner deliberately under-munches `>` so that `Array<Box<int32>>` tokenizes as two `GT`s in type context, and the expression parser's `JoinGT` reassembles a run of adjacent `GT`s (plus an optional trailing `=`) back into the joined form when it's looking for a binary operator. Adjacency, not just sequence, is the test — `Token.Adjacent` is what keeps `a > > b` from joining.
+
+`Precedence` gives the binary precedence of a `Kind` for the precedence-climbing parser, including precedences for the joined forms even though the scanner can't emit them directly. `CoalesceExpression` and `LogicalORExpression` share a precedence level because the grammar forbids mixing `??` with `||`/`&&` in one chain — a fact a precedence table can't express, so the parser records the mix and rejects it later instead.
+
+## Ctx
+
+`Ctx` is the identity of a contextual keyword. It's zero (`CtxNone`) unless `Kind == IDENT`. This is how contextual keywords stay contextual: the token remains an `IDENT` and stays usable as a binding name, while the parser tests `tok.Ctx == CtxStruct` in O(1) with no string comparison anywhere downstream.
+
+`Ctx` also holds the grammar's `StrictReservedWord` list (`implements`, `interface`, `let`, `package`, `private`, `protected`, `public`, `static`), which has no grammar productions of its own — strict-mode restrictions are early errors, not grammar, so those words are `Ctx` values rather than `Kind` values. Keeping them here lets `ClassElementModifier` be a single contiguous range test instead of a mix of `Kind` and `Ctx` checks. `let` in particular must stay unconditionally non-reserved, since `ExpressionStatement`'s lookahead restriction (`∉ { let [ }`) depends on being able to see it as a plain `IDENT` with `CtxLet`.
+
+`identTable` is the single lookup for every `IdentifierName`, built once at `init` from both `kindNames` and `ctxNames` so a word can't be added to one table and forgotten in the other — a duplicate entry panics at startup rather than silently shadowing. `LookupIdent` classifies a name into a reserved `Kind` with `CtxNone`, or `IDENT` with a `Ctx`, or plain `IDENT` for an ordinary name; callers must not invoke it for an identifier whose source spelling contained an escape, which is `Flags.HasEscape`'s job to flag upstream.
+
+## Pos and File
 
 ```go
-fset := token.NewFileSet()
-f := fset.AddFile("main.vs", len(src))
-pos := f.Pos(offset)
+type Pos uint32
 ```
 
-`FileSet` exists so that every file in one compilation shares one position space — a diagnostic can span two files without needing to carry a file reference alongside each position. `AddFile` leaves a one-`Pos` gap after each file so a one-past-the-end position can never collide with the next file's first character.
+`Pos` is a 1-based byte offset into one translation unit, in a per-unit address space. There is deliberately no `FileSet` — a global position space across files would be a cross-file dependency at the one layer that must not have any, so positions travel with their `File`. The offset is biased by one so `NoPos == 0` is distinguishable from a file's first byte; only `File.Slice`, `File.Between`, and `File.Position` unbias, each at its own boundary.
 
-`File.lines` is mutex-guarded because `AddLine` runs on the scanner's goroutine while `Position`/`LineCount` run on whatever goroutine renders a diagnostic — a driver may stream diagnostics as they're produced, concurrently with scanning.
+`File` is one translation unit: a name, its bytes, and the arithmetic to turn a `Pos` back into text or a line and column. It's safe for concurrent use once constructed, since files may be parsed in parallel — one `File` per goroutine — with diagnostics rendered afterward from any goroutine. The line index backing `Position` is built lazily on first use rather than in `NewFile`, because most files are parsed without any diagnostic ever being rendered.
 
-### `BuildTag`
+`Slice` returns a token's raw bytes with no decoding — `1_024` yields exactly those five bytes, separators and all, because decoding belongs to a later phase that knows the target type. `Between` takes two `Pos` values rather than an `ast.Node`, on purpose: `token` must not import `ast`.
 
-`BuildTag` lives here — not in `parser` — because the parser, the loader, and the driver all need it, and because it changes what's admissible: a file's tag is what licenses an `ExpectedType` result (see `LicensesTest`). `LookupBuildTag`'s second return value is load-bearing: an unrecognized tag is a compile error, never a silently excluded file, so a caller must be able to distinguish "unknown spelling" from `TagNone`'s "no clause at all" — something a bare zero-value return couldn't express.
+## Diagnostic
 
-## Reserved names
+```go
+type Diagnostic struct {
+	Pos Pos
+	End Pos
+	Msg string
+}
+```
 
-Two disjoint sets of "special" identifiers live in `token.go`:
+`Diagnostic` lives in `token` rather than `scanner` or `parser` because both of those packages emit them, and either choice of home would otherwise need a shared package above `token`. It carries no severity and no code — a cap on reported errors, and any grouping or coloring, are presentation decisions that belong to whatever renders the diagnostics, not to this type. `End` is `NoPos` for a point diagnostic; `IsSpan` reports whether it instead covers a range.
 
-- **Type operators** (`sizeof`, `alignof`, `reinterpret`) — the only call forms that take a `Type` in argument position. The parser recognizes them by name via `IsTypeOperator`, which is sound only because reserved builtin names may not be shadowed.
-- **Reserved builtins** (`new`, `delete`, `resize`, `copy`, `zero`, `addr`, `sizeof`, `alignof`, `reinterpret`, `upgrade`, `drop`, `panic`, `blend`, `min`, `max`, `clamp`, `transfer`) — pre-bound in the implicit outermost scope and checked via `IsReservedBuiltin`. Notably, `transfer` is reserved and bound to *nothing*, purely so that `x.transfer()` is diagnosed as a misspelled ownership marker (the real syntax is the `var` prefix) rather than as an ordinary unknown-name error.
+`SortDiagnostics` orders by `Pos`, then `End`, then `Msg`, so output stays reproducible when two diagnostics share a position. It does not define ordering across files, and can't: a bare `Pos` has no meaning outside its own unit, so a caller holding several units must key on `(unit index, Pos)` itself.

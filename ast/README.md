@@ -4,88 +4,103 @@
 import "github.com/vertex-language/vertex/ast"
 ```
 
-Package `ast` defines the Vertex syntax tree. It is the parser's sole output and the analyzer's sole input.
+Package `ast` defines the syntax tree for Vertex. It records shape, never meaning: nodes carry spans, not strings, and text is recovered from the `token.File` that produced them. Nothing in this package resolves a name, decodes a literal, folds a constant, or knows what a type means.
 
-## Design philosophy
+`ast` imports `token` and nothing else. It doesn't know who built the tree — no import of `scanner` or `parser` is legal here.
 
-The tree records **shape, never meaning**. Several constructs in Vertex are ambiguous at the syntax level and are resolved only by what an operand denotes — something only the analyzer knows:
+## Node
 
-| Construct | Reading A | Reading B | Resolved by |
-|---|---|---|---|
-| `Index` node | `Index` expression | `TypeArgs` list | whether the operand denotes a generic declaration |
-| `&x` | address-of | dereference | whether `x` is a `typed_ptr` |
-| `~x` | bitwise-NOT | underlying-type | expression vs. `TypeSetTerm` position |
-| single-identifier constraint element | one-term `TypeSet` | constraint name | what the name denotes |
-
-The parser doesn't attempt to disambiguate these — it can't, and doesn't need to. Each is a static rule checked over an already-parsed tree, which is exactly what the analyzer does.
-
-A corollary of this is that **types are `Expr`s**. There is no separate type-tree: a `TypeName` is an `*Ident`, one bracket node (`*IndexExpr`) serves both `Index` and `TypeArgs`, and a tuple type is a tuple literal (`*TupleExpr`). Conversion to a proper type representation happens downstream, in the analyzer.
-
-## What the tree deliberately omits
-
-Two things leave no trace in the tree:
-
-- **Terminator significance.** Whether a line terminator ends a statement depends on the innermost enclosing bracketing construct, which the parser resolves as it goes. No node records this.
-- **Trailing commas**, with one exception: `TupleExpr.TrailingComma`. A one-element tuple is distinguished from a parenthesized expression by nothing else, so it must survive. Everywhere else a trailing comma is optional and inert (`TypeArgs`, `Parameters`, `ArrayLit`, `LiteralValue`) and is not recorded.
-
-Conversely, syntax that is *licensed by context* survives, because it is syntax: the `var` transfer marker (`*TransferExpr`) is the entire difference between a move and a deep copy, so it gets a node even though only some positions accept it.
-
-## Package layout
-
-| File | Contents |
-|---|---|
-| `ast.go` | Core interfaces (`Node`, `Expr`, `Stmt`, `Decl`), comments, identifiers, and shared parts (`Param`, `TypeParam`, `Marker`) shared across declarations and types |
-| `expr.go` | Expressions, operators, and types (types are exprs) |
-| `stmt.go` | Statements, including `switch`/`select` clauses and patterns |
-| `decl.go` | Declarations: functions, records (struct/class), enums, aliases, constraints, vars, imports, and `declare` blocks for foreign interop |
-| `file.go` | `File` and `Package` containers, plus `NewPackage` construction/validation |
-| `walk.go` | `Visitor`, `Walk`, and `Inspect` for tree traversal |
-
-## Core interfaces
+Every node satisfies:
 
 ```go
 type Node interface {
-	Pos() token.Pos // first character of the node
-	End() token.Pos // one past the last character
-}
-
-type Expr interface {
-	Node
-	exprNode()
-}
-
-type Stmt interface {
-	Node
-	stmtNode()
-}
-
-type Decl interface {
-	Node
-	declNode()
+	Pos() token.Pos
+	End() token.Pos
 }
 ```
 
-Every node reports its own `Pos`/`End`, computed from its children rather than stored, except where a leading token (a keyword, a marker) makes storing a start position necessary.
+`Pos()`/`End()` are computed from a node's children, not stored redundantly, except where a leading keyword or contextual identifier makes storage necessary. `End()` is exact — not "roughly the closing brace" — because runtime traps depend on it. Every node has a non-zero span; a node with no children of its own (an unrecoverable parse) is a `Bad*` node that stores its own bounds.
 
-## Notable node shapes
+Four hierarchies sit on top of `Node`: `Decl`, `Stmt`, `Expr`, and `TypeExpr`. Declaration nodes implement both `Decl` and `Stmt` — there is no synthesized `DeclStmt` wrapper, since the parser synthesizes nothing.
 
-- **`RecordDecl`** is both `StructDecl` and `ClassDecl`. A class is byte-for-byte identical in layout to a struct and differs only in its member and method model; `Kw` (`STRUCT` or `CLASS`) carries the distinction.
-- **`FuncDecl`** is `FunctionDecl`, `MethodDecl`, and the initializer/deinitializer forms. `init`/`deinit` are contextual keywords parsed as ordinary identifiers into `Name`; whether a given `FuncDecl` is one is a question for the analyzer, not the parser.
-- **`ConstraintElem`** has exactly one of `Set` or `Method` non-nil. `Set` holds a `TypeSet` and a constraint name undifferentiated — again, resolved by what the name denotes.
-- **`ForeignMember`** is implemented by `*ForeignFunc`, `*ForeignClass`, `*DeclareDecl`, and `*Field` — some of those only so a rejected construct (a nested `declare`, a field in a `declare` body) can parse and be diagnosed as itself rather than surfacing as a raw syntax error.
-- **`BadExpr` / `BadStmt` / `BadDecl`** mark unparseable spans so recovery still yields a walkable tree; the analyzer skips them silently since a diagnostic was already reported at parse time.
+Types are a separate hierarchy from expressions, entered at type annotations, type arguments, heritage clauses, and the `< Type >` assertion. The parser always knows which side of that boundary it's on.
 
-## Traversal
+There is no `Ident.Obj` field and there never will be — identifier resolution isn't computable without types, so it doesn't belong on the node that exists before types are known.
+
+## Walking a tree
 
 ```go
-func Walk(v Visitor, node Node)
-func Inspect(node Node, f func(Node) bool)
+ast.Inspect(n, func(node ast.Node) bool {
+	if id, ok := node.(*ast.Ident); ok {
+		fmt.Println(id.NamePos)
+	}
+	return true // descend
+})
 ```
 
-`Walk` visits exactly a node's declared children in depth-first order and panics on an unrecognized type — a deliberate tripwire meaning the switch in `walk.go` must be extended whenever a node type is added. `Inspect` wraps `Walk` with a plain `func(Node) bool`, called again with `nil` after each subtree finishes.
+`Walk`/`Inspect` traverse in source order, depth first. `Walk` **panics** on a node type it doesn't recognize. That's a tripwire, not a defect: it's what keeps the traversal switch from falling behind a new node type, and it fires just as usefully in your code if you hand `Walk` a node from an `ast` newer than the one you compiled against.
 
-## Files and packages
+For write-your-own traversal, implement `Visitor`:
 
-`File` holds one parsed source file: an optional `Build` clause, its `Imports`, its `Decls`, and a flat `Comments` list (kept alongside `Doc`/trailing-comment attachments so a printer can recover anything the attachment heuristic missed).
+```go
+type Visitor interface{ Visit(Node) Visitor }
+```
 
-`Package` is a validated container of `Files` — no I/O, no import resolution, no scopes. `NewPackage` checks only what makes the container internally coherent: at least one file, agreement on the package clause name, and agreement with the target build tag. Files are sorted by filename so the result is byte-reproducible. Everything else (import resolution, scoping) belongs to the loader and analyzer.
+`Inspect` is a thin adapter over `Visitor` for the common case of a single closure.
+
+## Dumping a tree
+
+```go
+if err := ast.Fdump(os.Stdout, file); err != nil {
+	log.Fatal(err)
+}
+```
+
+`Fdump` writes a deterministic debug rendering — struct fields in declaration order, slices in source order, no map iteration anywhere. The format is **not** part of this package's contract and can change between commits. Golden tests that consume it are expected to be regenerated, not hand-edited, so a format change shows up as a diff across every fixture rather than as a silent behavior change elsewhere.
+
+## Files and arenas
+
+```go
+tree, err := parser.ParseFile(fset, "main.vx", src, 0)
+if err != nil {
+	// ...
+}
+defer tree.Release()
+
+// use tree...
+```
+
+A `*File` pairs with the `token.File` that produced it; positions are byte offsets in a per-unit address space and are meaningless without that pairing. The file's name and source text are deliberately not stored on the node.
+
+`File.Release()` frees the arena backing the tree (via the `Releaser` interface, so this package doesn't import an allocator package). After `Release`, every node reachable from the tree is invalid — including any `token.Pos` a caller copied out earlier, which stay readable as plain integers and are exactly the trap: read the text you need *before* releasing. `Release` is idempotent, so pairing an explicit release with `defer tree.Release()` is safe, and because arenas are per-file, one file's tree can be released as soon as it's consumed — a whole-program build never has to hold every tree in memory at once.
+
+## Optional children and nil
+
+Optional children are typed pointers stored in interface-typed fields (e.g. an `Expr`-typed field holding a nil `*Ident`), so a plain `== nil` check on the interface doesn't work. Use the package's own nil-safe span helpers (`spanOf`, `endOf`) when writing new span methods, and don't compare an optional `Node`-typed field to `nil` directly.
+
+## Modifiers
+
+`Modifiers` records a modifier sequence twice: `Set` (a `ModifierSet` bitset) for membership queries, and `List` (`[]ModifierTok`, source order) for diagnostics that need to point at a specific word. The two must always agree — `List` is the source of truth and `Set` is derived from it during parsing; a test in this package checks the invariant. Use `Has` for "is this modifier present" and `Find` when you need the token to blame in an error.
+
+## `StructDecl.Extends`
+
+`StructDecl` carries an `Extends *HeritageClause` field even though the grammar has no `ClassExtendsClause` production for structs. This is deliberate: `struct S extends B {}` must still parse into a real `StructDecl` carrying its heritage clause, so that a later, name-based check can report *"structs don't support `extends`"* instead of the parser failing early with a bare "unexpected token `extends`". In any valid program this field is `nil`; a non-nil value only ever appears on a tree that a later pass is expected to reject.
+
+## Stripping parentheses
+
+```go
+switch x := ast.Unparen(expr).(type) {
+case *ast.CallExpr:
+	// ...
+}
+```
+
+`ParenExpr`/`ParenType` are retained in the tree rather than folded away — `(makeBox<boolean>)(true)` doesn't mean the same thing without the parens present. Most consumers don't care about them, so `Unparen`/`UnparenType` strip them on demand rather than every call site reimplementing the loop.
+
+## Recovering literal text
+
+`BasicLit` and friends store only spans, never a decoded value — `1_024` and `0b1010` need the target width to decode, which is a later phase's job. Get the raw spelling from the originating `token.File`:
+
+```go
+text := file.Between(lit.Pos(), lit.End())
+```

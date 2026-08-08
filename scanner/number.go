@@ -1,210 +1,188 @@
 package scanner
 
-import (
-	"github.com/vertex-language/vertex/diag"
-	"github.com/vertex-language/vertex/token"
-)
+import "github.com/vertex-language/vertex/token"
 
-// digitVal returns the value of ch as a hexadecimal digit, or 16.
-func digitVal(ch rune) int {
-	switch {
-	case '0' <= ch && ch <= '9':
-		return int(ch - '0')
-	case 'a' <= ch && ch <= 'f':
-		return int(ch-'a') + 10
-	case 'A' <= ch && ch <= 'F':
-		return int(ch-'A') + 10
-	}
-	return 16
-}
-
-func baseName(base int) string {
-	switch base {
-	case 2:
-		return "binary"
-	case 8:
-		return "octal"
-	case 16:
-		return "hexadecimal"
-	}
-	return "decimal"
-}
-
-// scanDigits consumes one digit run in the given base, enforcing the separator
-// rules: '_' may appear between successive digits, and may not lead a run,
-// trail one, or be doubled. It returns the number of digits consumed,
-// separators excluded.
+// scanNumber finds the extent of a NumericLiteral (A.4) and validates its
+// shape. It does not decode: `1_024` yields the bytes as written, with no
+// value, no width, and no separator stripping (§4.6, §8.3). Decoding belongs
+// to a phase that knows the target type.
 //
-// A decimal digit out of range for a narrow base is consumed rather than
-// terminating the run, so 0b1234 produces one diagnostic per bad digit instead
-// of a literal followed by a spurious second literal.
-func (s *Scanner) scanDigits(base int) int {
-	count := 0
-	started := false
-	prevSep := false
-	sepOffset := -1
+// Validation still happens here, because the extent and the shape are the same
+// walk — a malformed separator changes where the literal ends.
+func (s *scanner) scanNumber(start int) {
+	kind := token.NUMBER
+	var flags token.Flags
 
-	for {
-		switch {
-		case s.ch == '_':
-			switch {
-			case !started:
-				s.error(diag.SeparatorLeads, s.offset)
-			case prevSep:
-				s.error(diag.SeparatorDoubled, s.offset)
-			}
-			sepOffset = s.offset
-			prevSep = true
-			started = true
-			s.next()
-
-		case digitVal(s.ch) < base:
-			count++
-			prevSep = false
-			started = true
-			s.next()
-
-		case base < 10 && '0' <= s.ch && s.ch <= '9':
-			s.error(diag.DigitOutOfRange, s.offset, s.ch, baseName(base))
-			count++
-			prevSep = false
-			started = true
-			s.next()
-
-		default:
-			if prevSep {
-				s.error(diag.SeparatorTrails, sepOffset)
-			}
-			return count
-		}
-	}
-}
-
-// scanNumber consumes a NumericLiteral and reports whether it is an integer or
-// a float. Each base has its own tail because the three do not share a shape:
-// only hexadecimal has a binary-exponent float form, only decimal has a bare
-// exponent, and the two define a fractional part differently. There is no
-// prefix-free octal form, so 0600 is the decimal integer 600.
-//
-// Two decisions here are load-bearing beyond this function:
-//
-//   - A decimal fractional part, if a point is written, must be non-empty, so
-//     `1.` is not a literal. That is what makes `1..5` scan as
-//     int_lit ".." int_lit without lookahead surgery elsewhere.
-//   - A hexadecimal float requires its binary exponent, so `0xC.3` is
-//     diagnosed as an incomplete float rather than silently accepted or split
-//     into three tokens.
-//
-// A `.` immediately followed by another `.` is never consumed as a point, which
-// is what keeps a range operator intact after any base.
-func (s *Scanner) scanNumber() (token.Kind, string) {
-	offs := s.offset
-	kind := token.INT
-	base := 10
-	prefix := ""
-
-	if s.ch == '0' {
-		switch s.peek() {
-		case 'b', 'B':
-			prefix, base = "0b", 2
-			s.next()
-			s.next()
-		case 'o', 'O':
-			prefix, base = "0o", 8
-			s.next()
-			s.next()
-		case 'x', 'X':
-			prefix, base = "0x", 16
-			s.next()
-			s.next()
-		}
-	}
-
-	switch base {
-	case 16:
-		n := s.scanDigits(16)
-		if n == 0 {
-			s.error(diag.EmptyDigits, offs, "'"+prefix+"'")
-		}
-		hasPoint := false
-		if s.ch == '.' && s.peek() != '.' {
-			s.next()
-			// The hexadecimal fraction may be empty; the exponent below is
-			// what makes the literal well formed, not this digit run.
-			s.scanDigits(16)
-			hasPoint = true
-		}
-		switch {
-		case s.ch == 'p' || s.ch == 'P':
-			kind = token.FLOAT
-			s.next()
-			if s.ch == '+' || s.ch == '-' {
-				s.next()
-			}
-			if s.scanDigits(10) == 0 {
-				s.error(diag.MissingExponentDigit, s.offset)
-			}
-		case hasPoint:
-			s.error(diag.HexFloatNoExponent, offs)
-			kind = token.FLOAT
-		}
-
-	case 2, 8:
-		if s.scanDigits(base) == 0 {
-			s.error(diag.EmptyDigits, offs, "'"+prefix+"'")
-		}
-
-	default:
-		s.scanDigits(10)
-		if s.ch == '.' && '0' <= s.peek() && s.peek() <= '9' {
-			kind = token.FLOAT
-			s.next()
-			s.scanDigits(10)
-		}
-		if s.ch == 'e' || s.ch == 'E' {
-			kind = token.FLOAT
-			s.next()
-			if s.ch == '+' || s.ch == '-' {
-				s.next()
-			}
-			if s.scanDigits(10) == 0 {
-				s.error(diag.MissingExponentDigit, s.offset)
-			}
-		}
-	}
-
-	s.rejectJoinedIdent()
-	return kind, string(s.src[offs:s.offset])
-}
-
-// scanTupleIndex consumes the digit run of a positional tuple access.
-//
-// It is entered only where the selector-dot restriction applies, and its whole
-// job is to produce an int_lit where longest match would have produced a
-// float: no point is consumed and no exponent is recognized, so the next `.`
-// ends this run and the rule fires again, which is what makes a chain compose.
-//
-// Separators are enforced here as they are in any other digit run, because the
-// token produced is an ordinary int_lit. That a tuple index must additionally
-// be written in decimal with no '_' is a static rule over the spelling this
-// returns, not a lexical one.
-func (s *Scanner) scanTupleIndex() string {
-	offs := s.offset
-	s.scanDigits(10)
-	s.rejectJoinedIdent()
-	return string(s.src[offs:s.offset])
-}
-
-// rejectJoinedIdent consumes any identifier characters directly following a
-// numeric literal and reports them as one span, so `123abc` is one diagnosed
-// token rather than an int_lit followed by an identifier.
-func (s *Scanner) rejectJoinedIdent() {
-	if !isIdentPart(s.ch) {
+	if s.src[s.off] == '.' {
+		s.off++
+		flags |= s.scanDigits(10)
+		flags |= s.scanExponent()
+		s.finishNumber(start, kind, flags)
 		return
 	}
-	bad := s.offset
-	for isIdentPart(s.ch) {
-		s.next()
+
+	if s.src[s.off] == '0' {
+		s.off++
+		switch c := s.at(0); {
+		case c == 'b' || c == 'B':
+			s.off++
+			flags |= s.scanRadix(start, 2, "binary")
+			kind, flags = s.maybeBigInt(kind, flags)
+			s.finishNumber(start, kind, flags)
+			return
+		case c == 'o' || c == 'O':
+			s.off++
+			flags |= s.scanRadix(start, 8, "octal")
+			kind, flags = s.maybeBigInt(kind, flags)
+			s.finishNumber(start, kind, flags)
+			return
+		case c == 'x' || c == 'X':
+			s.off++
+			flags |= s.scanRadix(start, 16, "hexadecimal")
+			kind, flags = s.maybeBigInt(kind, flags)
+			s.finishNumber(start, kind, flags)
+			return
+		case c == 'n':
+			s.off++ // DecimalBigIntegerLiteral: `0n`
+			s.finishNumber(start, token.BIGINT, flags)
+			return
+		case isDecimalDigit(c):
+			// A.4 has no LegacyOctalIntegerLiteral. `0123` is not a literal.
+			for isDecimalDigit(s.at(0)) {
+				s.off++
+			}
+			s.error(start, s.off, "leading zeros are not permitted in numeric literals")
+			s.finishNumber(start, kind, flags)
+			return
+		}
+		// Plain `0`, possibly followed by a fraction or exponent.
+	} else {
+		flags |= s.scanDigits(10)
 	}
-	s.errorSpan(diag.NumberJoinedToIdent, bad, s.offset)
+
+	if s.at(0) == 'n' {
+		s.off++
+		s.finishNumber(start, token.BIGINT, flags)
+		return
+	}
+
+	fractional := false
+	if s.at(0) == '.' {
+		fractional = true
+		s.off++
+		flags |= s.scanDigitsOpt(10)
+	}
+	if e := s.scanExponent(); e != 0 || s.hadExponent {
+		fractional = true
+		flags |= e
+	}
+	if fractional && s.at(0) == 'n' {
+		s.off++
+		s.error(start, s.off, "bigint literal must be an integer")
+		s.finishNumber(start, token.BIGINT, flags)
+		return
+	}
+	s.finishNumber(start, kind, flags)
+}
+
+func (s *scanner) maybeBigInt(kind token.Kind, flags token.Flags) (token.Kind, token.Flags) {
+	if s.at(0) == 'n' {
+		s.off++
+		return token.BIGINT, flags
+	}
+	return kind, flags
+}
+
+// finishNumber emits, after checking that the literal is not immediately
+// followed by an identifier character. `3in` and `0x1p` would otherwise scan
+// as two tokens and produce a confusing parse error instead of a lexical one.
+func (s *scanner) finishNumber(start int, kind token.Kind, flags token.Flags) {
+	if c := s.at(0); isIdentStartByte(c) || isDecimalDigit(c) || c == '\\' || c >= 0x80 {
+		bad := s.off
+		s.scanIdentTail()
+		s.error(bad, s.off, "identifier cannot immediately follow a numeric literal")
+	}
+	s.emit(kind, token.CtxNone, start, flags)
+}
+
+// hadExponent is set by scanExponent so that `1e5n` is caught. It is reset on
+// entry; the scanner is single-threaded per file.
+func (s *scanner) scanExponent() token.Flags {
+	s.hadExponent = false
+	if c := s.at(0); c != 'e' && c != 'E' {
+		return 0
+	}
+	mark := s.off
+	s.off++
+	if c := s.at(0); c == '+' || c == '-' {
+		s.off++
+	}
+	if !isDecimalDigit(s.at(0)) {
+		s.error(mark, s.off, "exponent has no digits")
+		return 0
+	}
+	s.hadExponent = true
+	return s.scanDigits(10)
+}
+
+// scanRadix handles the digits after 0b / 0o / 0x, where at least one digit is
+// required (A.4 uses BinaryDigits[+Sep] with no _opt).
+func (s *scanner) scanRadix(start, base int, name string) token.Flags {
+	before := s.off
+	flags := s.scanDigitsOpt(base)
+	if s.off == before {
+		s.error(start, s.off, name+" literal has no digits")
+	}
+	return flags
+}
+
+func (s *scanner) scanDigits(base int) token.Flags { return s.scanDigitsOpt(base) }
+
+// scanDigitsOpt consumes digits and NumericLiteralSeparators, diagnosing a
+// leading, trailing, or doubled separator while still consuming it — the raw
+// spelling must cover the whole literal or the span is wrong.
+func (s *scanner) scanDigitsOpt(base int) token.Flags {
+	var flags token.Flags
+	lastWasSep := false
+	first := true
+
+	for s.off < len(s.src) {
+		c := s.src[s.off]
+		if c == '_' {
+			flags |= token.HasEscape // "raw spelling needs decoding"
+			if first {
+				s.error(s.off, s.off+1, "numeric separator cannot appear at the start of a digit sequence")
+			} else if lastWasSep {
+				s.error(s.off, s.off+1, "numeric separator cannot appear twice in a row")
+			}
+			lastWasSep = true
+			first = false
+			s.off++
+			continue
+		}
+		if !digitInBase(c, base) {
+			break
+		}
+		lastWasSep = false
+		first = false
+		s.off++
+	}
+	if lastWasSep {
+		s.error(s.off-1, s.off, "numeric separator cannot appear at the end of a digit sequence")
+	}
+	return flags
+}
+
+func digitInBase(c byte, base int) bool {
+	switch base {
+	case 2:
+		return c == '0' || c == '1'
+	case 8:
+		return c >= '0' && c <= '7'
+	case 10:
+		return isDecimalDigit(c)
+	case 16:
+		return isHexDigit(c)
+	}
+	return false
 }

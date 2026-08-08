@@ -2,499 +2,529 @@ package ast
 
 import "github.com/vertex-language/vertex/token"
 
-// -------------------------------------------------------------- primaries
+// Expressions — vertex_grammar.md section B.
 
-// BasicLit is an int_lit, float_lit, char_lit, string_lit, or one of the
-// reserved literal keywords. Value is the raw source spelling — escapes
-// unresolved, digit separators intact — because a formatter needs the original
-// and the analyzer does its own decoding.
-type BasicLit struct {
-	ValuePos token.Pos
-	Kind     token.Kind // INT, FLOAT, CHAR, STRING, TRUE, FALSE, NIL
-	Value    string
-}
+type (
+	// BasicLit is a Literal (B.1): NullLiteral, BooleanLiteral,
+	// NumericLiteral, StringLiteral, and RegularExpressionLiteral.
+	//
+	// The value is not here and never will be. `1_024` is five bytes of raw
+	// spelling, `0b1010` is six; decoding needs the target width and belongs
+	// to a phase that knows it (§4.6, §8.3). Recover the text with
+	// file.Between(lit.Pos(), lit.End()).
+	BasicLit struct {
+		Kind     token.Kind // NUMBER, BIGINT, STRING, REGEX, TRUE, FALSE, NULL
+		ValuePos token.Pos
+		ValueEnd token.Pos
+		HasEscape bool // separators or escape sequences present in the spelling
+	}
 
-// NamespaceExpr is a NamespaceName: async, gpu, or npu. It appears only as the
-// operand of a Selector. `chan` is not one — it has its own constructor
-// production — so the two never compete.
+	// TemplateLit is a TemplateLiteral (A.6). Quasis and Exprs interleave:
+	// len(Quasis) == len(Exprs)+1, always.
+	//
+	// A tagged template is TaggedTemplateExpr wrapping this one.
+	TemplateLit struct {
+		Quasis []*TemplateElem // len >= 1
+		Exprs  []Expr          // len == len(Quasis)-1
+	}
+
+	// TemplateElem is one NoSubstitutionTemplate, TemplateHead,
+	// TemplateMiddle, or TemplateTail token. Raw spelling, uncooked: whether a
+	// NotEscapeSequence is legal depends on tagging, which is not this node's
+	// business.
+	TemplateElem struct {
+		Kind  token.Kind
+		Start token.Pos
+		Stop  token.Pos
+	}
+
+	// ArrayLit is an ArrayLiteral (B.2). Elts may contain *Elision.
+	ArrayLit struct {
+		Lbrack token.Pos
+		Elts   []Expr
+		Rbrack token.Pos
+	}
+
+	// Elision is a hole in an array literal (B.2). It is a real node rather
+	// than a nil slot: a hole is meaningful, and §5.4's "omit what's inert"
+	// covers trailing commas, not these.
+	Elision struct {
+		Comma token.Pos
+	}
+
+	// ObjectLit is an ObjectLiteral (B.2).
+	//
+	// CoverInit marks that at least one PropertyDef used CoverInitializedName
+	// (grammar K) — `{ a = 1 }`. That form is legal only after reinterpretation
+	// to an ObjectAssignmentPattern (B.6), which is the grammar's only cover
+	// and the only in-parser reinterpretation (§5.1). If this flag survives to
+	// a node that was never reinterpreted, a later phase rejects it by name.
+	ObjectLit struct {
+		Lbrace    token.Pos
+		Props     []Expr // *PropertyDef, *SpreadElem, *Ident (shorthand), *MethodDef
+		Rbrace    token.Pos
+		CoverInit bool
+	}
+
+	// PropertyDef is `key: value`, `key = init` (the cover form), or a
+	// computed key (B.2).
+	PropertyDef struct {
+		Key      Expr // *Ident, *BasicLit, or *ComputedKey
+		Colon    token.Pos // NoPos for the cover form
+		Value    Expr
+		IsCover  bool // CoverInitializedName; Colon is NoPos and Value is the initializer
+	}
+
+	// ComputedKey is ComputedPropertyName (B.2), `[expr]`.
+	ComputedKey struct {
+		Lbrack token.Pos
+		X      Expr
+		Rbrack token.Pos
+	}
+
+	// SpreadElem is `... expr` in an array literal, object literal, or
+	// argument list (B.2, B.3).
+	SpreadElem struct {
+		Ellipsis token.Pos
+		X        Expr
+	}
+
+	// ParenExpr is retained rather than folded away (§5.4):
+	// `(makeBox<boolean>)(true)` does not read the same without it. Consumers
+	// that don't care use Unparen.
+	ParenExpr struct {
+		Lparen token.Pos
+		X      Expr
+		Rparen token.Pos
+	}
+
+	// FuncExpr is FunctionExpression, GeneratorExpression,
+	// AsyncFunctionExpression, or AsyncGeneratorExpression (D).
+	//
+	// It holds a *FuncDecl rather than repeating its fields, mirroring the way
+	// ClassExpression and ClassDeclaration share ClassTail (E). Decl.Name is
+	// nil for the anonymous forms.
+	FuncExpr struct {
+		Fn *FuncDecl
+	}
+
+	// ClassExpr is ClassExpression (E), sharing ClassDecl for the same reason.
+	ClassExpr struct {
+		Class *ClassDecl
+	}
+
+	// ArrowFunc is ArrowFunction or AsyncArrowFunction (D.2).
+	//
+	// Params is nil when the head was a bare BindingIdentifier, in which case
+	// Ident is set. The two forms are not normalized into one: a bare
+	// identifier head has no parentheses to point at, and inventing them would
+	// be synthesis (§1).
+	ArrowFunc struct {
+		AsyncPos   token.Pos // NoPos if not async
+		Ident      *Ident    // set iff Params == nil
+		TypeParams *TypeParamList
+		Params     *ParamList
+		Result     TypeExpr // may be *TypePredicate
+		Arrow      token.Pos
+		Body       Node // Expr (ExpressionBody) or *BlockStmt
+	}
+
+	// MemberExpr is `x.name`, `x?.name`, `x.#name`, and `x?.#name` (B.3).
+	MemberExpr struct {
+		X        Expr
+		Optional bool  // reached through ?.
+		Dot      token.Pos
+		Sel      Node  // *Ident or *PrivateIdent
+	}
+
+	// IndexExpr is `x[i]` and `x?.[i]` (B.3).
+	IndexExpr struct {
+		X        Expr
+		Optional bool
+		Lbrack   token.Pos
+		Index    Expr
+		Rbrack   token.Pos
+	}
+
+	// CallExpr is CallExpression, SuperCall, and the optional-chain call forms
+	// (B.3). TypeArgs is set for `f<T>(x)`.
+	CallExpr struct {
+		Fun      Expr
+		Optional bool
+		TypeArgs *TypeArgList
+		Lparen   token.Pos
+		Args     []Expr // may contain *SpreadElem
+		Rparen   token.Pos
+	}
+
+	// NewExpr is `new C(...)` and the bare `new C` form (B.3), where Lparen is
+	// NoPos and Args is nil.
+	NewExpr struct {
+		NewPos   token.Pos
+		Callee   Expr
+		TypeArgs *TypeArgList
+		Lparen   token.Pos
+		Args     []Expr
+		Rparen   token.Pos
+	}
+
+	// TaggedTemplateExpr is `tag`...`` (B.3).
+	TaggedTemplateExpr struct {
+		Tag      Expr
+		TypeArgs *TypeArgList
+		Template *TemplateLit
+	}
+
+	// SuperExpr is the `super` keyword in SuperProperty and SuperCall (B.3).
+	// It is a leaf; the property or call wrapping it is a MemberExpr,
+	// IndexExpr, or CallExpr.
+	SuperExpr struct {
+		SuperPos token.Pos
+		SuperEnd token.Pos
+	}
+
+	// ThisExpr is `this` (B.1).
+	ThisExpr struct {
+		ThisPos token.Pos
+		ThisEnd token.Pos
+	}
+
+	// MetaProp is NewTarget or ImportMeta (B.3).
+	MetaProp struct {
+		MetaPos token.Pos
+		Meta    token.Kind // NEW or IMPORT
+		Prop    *Ident     // target or meta
+	}
+
+	// ImportCall is ImportCall (B.3), including the `import.defer(...)` and
+	// `import.source(...)` phase forms.
+	ImportCall struct {
+		ImportPos token.Pos
+		Phase     ImportPhase
+		PhasePos  token.Pos // NoPos when Phase == PhaseEval
+		Lparen    token.Pos
+		Args      []Expr // 1 or 2; a second is the options object
+		Rparen    token.Pos
+	}
+
+	// InstantiationExpr is `f<T>` with no call following (B.3) — an
+	// instantiation expression, committed only when TypeArguments closes and
+	// the next token is in InstantiationFollowSet. See §6.1.
+	InstantiationExpr struct {
+		X        Expr
+		TypeArgs *TypeArgList
+	}
+
+	// NonNullExpr is the postfix `!` (B.3), under a [no LineTerminator here]
+	// restriction.
+	NonNullExpr struct {
+		X    Expr
+		Bang token.Pos
+		BangEnd token.Pos
+	}
+
+	// TypeAssertExpr is the prefix form `<Type> x` (B.4).
+	//
+	// There is exactly one reading of a prefix `<` because there is one goal
+	// symbol and no per-file mode (§1). Nothing competes for this position.
+	TypeAssertExpr struct {
+		Langle token.Pos
+		Type   TypeExpr
+		Rangle token.Pos
+		X      Expr
+	}
+
+	// AsExpr is `x as T`, `x as const`, and `x satisfies T` (B.4). One node
+	// for three because they differ only in the keyword and in what a later
+	// phase does with them.
+	AsExpr struct {
+		X       Expr
+		OpPos   token.Pos
+		Op      token.Ctx // CtxAs or CtxSatisfies
+		IsConst bool      // `as const`; Type is nil
+		Type    TypeExpr
+		ConstEnd token.Pos // set iff IsConst
+	}
+
+	// UnaryExpr is delete, void, typeof, +, -, ~, ! (B.4).
+	UnaryExpr struct {
+		OpPos token.Pos
+		Op    token.Kind
+		X     Expr
+	}
+
+	// UpdateExpr is ++ and --, prefix or postfix (B.4).
+	UpdateExpr struct {
+		OpPos   token.Pos
+		OpEnd   token.Pos
+		Op      token.Kind
+		Prefix  bool
+		X       Expr
+	}
+
+	// AwaitExpr is AwaitExpression (B.5).
+	AwaitExpr struct {
+		AwaitPos token.Pos
+		X        Expr
+	}
+
+	// YieldExpr is YieldExpression (B.5). X is nil for a bare `yield`.
+	YieldExpr struct {
+		YieldPos token.Pos
+		YieldEnd token.Pos
+		Delegate bool // yield *
+		X        Expr
+	}
+
+	// BinaryExpr covers the whole binary chain in B.4, including `in`,
+	// `instanceof`, the logical operators, and `??`.
+	//
+	// Op is the joined kind for a `>` run: the scanner emits single GT tokens
+	// (§4.2) and the expression parser rejoins them with token.JoinGT before
+	// building this node. OpEnd therefore covers the whole run.
+	//
+	// Mixing `??` with `||` or `&&` without parentheses is ungrammatical in
+	// B.4 but parses here, per §6.3, and is rejected by name later.
+	BinaryExpr struct {
+		X     Expr
+		OpPos token.Pos
+		OpEnd token.Pos
+		Op    token.Kind
+		Y     Expr
+	}
+
+	// AssignExpr is simple and compound assignment, including &&=, ||=, ??=
+	// (B.5). Lhs may be a pattern after reinterpretation (B.6).
+	AssignExpr struct {
+		Lhs   Expr
+		OpPos token.Pos
+		OpEnd token.Pos
+		Op    token.Kind
+		Rhs   Expr
+	}
+
+	// CondExpr is ConditionalExpression (B.4).
+	CondExpr struct {
+		Cond  Expr
+		Quest token.Pos
+		Then  Expr
+		Colon token.Pos
+		Else  Expr
+	}
+
+	// SeqExpr is the comma operator (B.5). len(Exprs) >= 2.
+	SeqExpr struct {
+		Exprs []Expr
+	}
+)
+
+// ImportPhase distinguishes the ImportCall forms in B.3.
+type ImportPhase uint8
+
+const (
+	PhaseEval ImportPhase = iota
+	PhaseDefer
+	PhaseSource
+)
+
+// --- Destructuring patterns (B.6, C.2) ------------------------------------
 //
-// The lookahead that separates `npu Dot(a, b)` from `npu.Dot(a, b)` is a parser
-// decision and leaves no trace: the namespace reading is simply a SelectorExpr
-// over this node.
-type NamespaceExpr struct {
-	KwPos token.Pos
-	Kw    token.Kind // ASYNC, GPU, NPU
-}
-
-// ParenExpr is `( Expression )`, and also the parenthesized-type alternative of
-// Type. One node, since a parenthesized single type is that type.
-type ParenExpr struct {
-	Lparen token.Pos
-	X      Expr
-	Rparen token.Pos
-}
-
-// TupleExpr is both TupleType and TupleLit.
+// One family serves both. ObjectBindingPattern (C.2) parses directly into
+// these nodes, since declaration position is known without a cover.
+// ObjectAssignmentPattern (B.6) arrives by reinterpreting an ObjectLit, which
+// §5.1 identifies as the only in-parser reinterpretation.
 //
-// One node, because the two are the same shape once types are Exprs: a
-// TupleElem is `[identifier ":"] Type` and a TupleElemValue is
-// `[identifier ":"] OwningExpr`. A named element is a *KeyValueExpr.
-//
-// Elems is never empty — a tuple has at least one element, and there is no unit
-// type. A single element requires TrailingComma; without it the construct is a
-// ParenExpr instead, which is why this is the one trailing comma the tree
-// records.
-type TupleExpr struct {
-	Lparen        token.Pos
-	Elems         []Expr // len >= 1
-	TrailingComma bool
-	Rparen        token.Pos
+// They are Exprs because DestructuringAssignmentTarget is a
+// LeftHandSideExpression (B.6), and a binding position that admits a pattern
+// admits nothing an Expr could not hold.
+
+type (
+	// ObjectPattern is ObjectBindingPattern (C.2) or a reinterpreted
+	// ObjectAssignmentPattern (B.6).
+	ObjectPattern struct {
+		Lbrace token.Pos
+		Props  []Expr // *PropertyPattern or *RestElem
+		Rbrace token.Pos
+	}
+
+	// ArrayPattern is ArrayBindingPattern or ArrayAssignmentPattern. Elts may
+	// contain *Elision and a trailing *RestElem.
+	ArrayPattern struct {
+		Lbrack token.Pos
+		Elts   []Expr
+		Rbrack token.Pos
+	}
+
+	// PropertyPattern is one BindingProperty or AssignmentProperty. Key is nil
+	// for the shorthand form, where Value is the *Ident or *AssignPattern.
+	PropertyPattern struct {
+		Key   Expr // nil for shorthand
+		Colon token.Pos
+		Value Expr
+	}
+
+	// AssignPattern is a target with a default: `a = 1` in a binding or
+	// assignment pattern. Distinct from AssignExpr, which is an operator.
+	AssignPattern struct {
+		Lhs   Expr
+		Assign token.Pos
+		Rhs   Expr
+	}
+
+	// RestElem is BindingRestElement, BindingRestProperty,
+	// AssignmentRestElement, or AssignmentRestProperty. Type is set only in a
+	// FunctionRestParameter (D.1).
+	RestElem struct {
+		Ellipsis token.Pos
+		X        Expr
+		Type     TypeExpr
+	}
+)
+
+// --- spans ------------------------------------------------------------------
+
+func (x *BasicLit) Pos() token.Pos     { return x.ValuePos }
+func (x *BasicLit) End() token.Pos     { return x.ValueEnd }
+func (x *TemplateElem) Pos() token.Pos { return x.Start }
+func (x *TemplateElem) End() token.Pos { return x.Stop }
+func (x *TemplateLit) Pos() token.Pos  { return x.Quasis[0].Pos() }
+func (x *TemplateLit) End() token.Pos  { return x.Quasis[len(x.Quasis)-1].End() }
+func (x *ArrayLit) Pos() token.Pos     { return x.Lbrack }
+func (x *ArrayLit) End() token.Pos     { return x.Rbrack + 1 }
+func (x *Elision) Pos() token.Pos      { return x.Comma }
+func (x *Elision) End() token.Pos      { return x.Comma + 1 }
+func (x *ObjectLit) Pos() token.Pos    { return x.Lbrace }
+func (x *ObjectLit) End() token.Pos    { return x.Rbrace + 1 }
+func (x *PropertyDef) Pos() token.Pos  { return x.Key.Pos() }
+func (x *PropertyDef) End() token.Pos  { return endOf(x.Key.End(), x.Value) }
+func (x *ComputedKey) Pos() token.Pos  { return x.Lbrack }
+func (x *ComputedKey) End() token.Pos  { return x.Rbrack + 1 }
+func (x *SpreadElem) Pos() token.Pos   { return x.Ellipsis }
+func (x *SpreadElem) End() token.Pos   { return x.X.End() }
+func (x *ParenExpr) Pos() token.Pos    { return x.Lparen }
+func (x *ParenExpr) End() token.Pos    { return x.Rparen + 1 }
+func (x *FuncExpr) Pos() token.Pos     { return x.Fn.Pos() }
+func (x *FuncExpr) End() token.Pos     { return x.Fn.End() }
+func (x *ClassExpr) Pos() token.Pos    { return x.Class.Pos() }
+func (x *ClassExpr) End() token.Pos    { return x.Class.End() }
+
+func (x *ArrowFunc) Pos() token.Pos {
+	if x.AsyncPos != token.NoPos {
+		return x.AsyncPos
+	}
+	return spanOf(x.Arrow, x.Ident, x.TypeParams, x.Params)
 }
+func (x *ArrowFunc) End() token.Pos { return x.Body.End() }
 
-// ArrayLit is `[ ElementList ]`. Elements are owning positions, so any may be a
-// *TransferExpr.
-type ArrayLit struct {
-	Lbrack token.Pos
-	Elems  []Expr
-	Rbrack token.Pos
-}
-
-// CompositeLit is `LiteralType LiteralValue`, where LiteralType is a TypeName
-// with optional TypeArgs. Type is never nil — a bare `{...}` is a MapLit.
-//
-// The punctuation is load-bearing: a composite literal constructs a struct, and
-// a class is constructed by calling an initializer. The reader tells the two
-// apart from the syntax alone, so the tree keeps them distinct too.
-type CompositeLit struct {
-	Type   Expr   // *Ident, *SelectorExpr, or *IndexExpr
-	Lbrace token.Pos
-	Elems  []Expr // *KeyValueExpr; the key is an identifier
-	Rbrace token.Pos
-}
-
-// MapLit is a braced literal with no type prefix. Its keys are arbitrary
-// expressions, unlike a CompositeLit's field names.
-type MapLit struct {
-	Lbrace token.Pos
-	Elems  []Expr // *KeyValueExpr
-	Rbrace token.Pos
-}
-
-// KeyValueExpr covers every `X : Y` pair — a FieldValue, a map KeyValue, a
-// named tuple element, and a named Argument.
-type KeyValueExpr struct {
-	Key   Expr
-	Colon token.Pos
-	Value Expr
-}
-
-// EnumShorthand is `.identifier` or `.identifier(args)` in expression position.
-// Legal only where the enum type is fixed by context, which is a static rule.
-//
-// In Pattern position a leading `.` is never this; see EnumPattern.
-type EnumShorthand struct {
-	Dot    token.Pos
-	Name   *Ident
-	Lparen token.Pos // NoPos when there is no argument list
-	Args   []Expr
-	Rparen token.Pos
-}
-
-// FuncLit is `func Signature Block`. It begins with all enclosing parse context
-// cleared and re-establishes it from its own marker, so a closure written
-// inside an async body does not inherit that body's context.
-type FuncLit struct {
-	Type *FuncType
-	Body *BlockStmt
-}
-
-// ChanConstructor is `chan [ Type ] ( [ Expression ] )`, the only expression
-// form of chan. Cap is the optional capacity.
-//
-// It gets a node because nothing else produces this shape: a ChanType writes no
-// brackets, so there is no bracket node to reuse and no reading to defer.
-type ChanConstructor struct {
-	Chan   token.Pos
-	Lbrack token.Pos
-	Elem   Expr
-	Rbrack token.Pos
-	Lparen token.Pos
-	Cap    Expr // nil when omitted
-	Rparen token.Pos
-}
-
-// HeapConstructor is `unique(x)`, `shared(x)`, or `weak(x)`.
-//
-// It gets a node because without one the shape collides: `unique (T)` is an
-// OwnershipType over a ParenExpr, and once types are Exprs that is
-// indistinguishable from the constructor. The keyword spelling is what makes
-// this a constructor rather than a call over a reserved name, so the tree says
-// which reading the parser took.
-type HeapConstructor struct {
-	KwPos  token.Pos
-	Kw     token.Kind // UNIQUE, SHARED, WEAK
-	Lparen token.Pos
-	X      Expr
-	Rparen token.Pos
-}
-
-// --------------------------------------------------------------- postfix
-
-type SelectorExpr struct {
-	X   Expr
-	Dot token.Pos
-	Sel *Ident
-}
-
-// TupleIndexExpr is positional tuple access, `t.0`. Chains compose: `t.0.0`.
-//
-// The scanner has already decided this is an index rather than a float, under
-// the one restriction to longest-match scanning, so the digits arrive as their
-// own token. Text is the raw spelling; that it must be decimal and free of `_`
-// is a static rule, and decoding belongs with every other literal's decoding, in
-// the analyzer.
-type TupleIndexExpr struct {
-	X        Expr
-	Dot      token.Pos
-	IndexPos token.Pos
-	Text     string
-}
-
-// IndexExpr is both Index and TypeArgs: `a[i]`, `a[low..high]`, and
-// `Stack[int32]` are one node.
-//
-// Which reading applies is settled by what the operand denotes, not by shape,
-// so the parser records the brackets and stops. Indices holds one expression
-// for the Index reading and a TypeList for the TypeArgs reading; a slice is the
-// Index reading whose single entry is a *BinaryExpr with Op DOTDOT.
-//
-// The same node carries a receiver type's TypeParameters and an OperandName's
-// TypeArgs, which are the same brackets in another position.
-type IndexExpr struct {
-	X       Expr
-	Lbrack  token.Pos
-	Indices []Expr // len >= 1
-	Rbrack  token.Pos
-}
-
-// CallExpr is `PrimaryExpr Arguments`, and with it three forms the grammar
-// names separately but does not shape differently.
-//
-// A TypeOperatorCall — sizeof, alignof, reinterpret — is this node with an
-// *Ident callee. Those are the only calls taking a Type in argument position,
-// and the parser recognizes them by name, which is sound because a reserved
-// builtin name may not be shadowed. The type argument leaves its own trace: a
-// `[3]int32` first argument is an *ArrayType where an expression would have
-// been an *ArrayLit.
-//
-// A VectorCall is this node with a *VectorType callee, which is what marks it
-// as one; no ordinary call reading applies. An ExpectedType is this node with
-// an *Ident callee spelled `Expected`, since that name and `error` are ordinary
-// identifiers. Arity and argument shape are static rules in every case.
-type CallExpr struct {
-	Fun    Expr
-	Lparen token.Pos
-	Args   []Expr // *KeyValueExpr for a named argument; owning positions
-	Rparen token.Pos
-}
-
-// LaunchExpr is a launch prefix applied to a call: thread, async, gpu, or npu.
-// A prefix modifies scheduling only, never the callee's signature. Config is
-// written only on gpu.
-type LaunchExpr struct {
-	KwPos  token.Pos
-	Kw     token.Kind // THREAD, ASYNC, GPU, NPU
-	Config *LaunchConfig
-	Call   Expr // *CallExpr
-}
-
-// LaunchConfig is `( "blocks" : E , "threads" : E )`. Fixed arity and fixed
-// names, so it is not a general argument list and the names are not recorded.
-type LaunchConfig struct {
-	Lparen  token.Pos
-	Blocks  Expr
-	Threads Expr
-	Rparen  token.Pos
-}
-
-// AwaitExpr is `await X`. It parses unconditionally; whether the enclosing body
-// licenses it is a static rule.
-type AwaitExpr struct {
-	Await token.Pos
-	X     Expr
-}
-
-// -------------------------------------------------------------- operators
-
-// UnaryExpr covers the three unary_op spellings `-`, `!`, `~`, and also `&`,
-// which is not a unary_op but derives through PointerPrimary and so binds
-// tighter than a selector: `&p.add(1)` is `(&p).add(1)`.
-//
-// Two of the four are deliberately unresolved here. `&` is address-of on a
-// value and dereference on a typed_ptr, read from the operand's statically
-// written type. `~` is bitwise-NOT in an expression and underlying-type in a
-// TypeSetTerm. Neither is distinguished syntactically, so both are this node
-// and the analyzer decides.
-type UnaryExpr struct {
-	OpPos token.Pos
-	Op    token.Kind // SUB, NOT, TILDE, AND
-	X     Expr
-}
-
-// BinaryExpr is one binary_op applied to two operands. The seven precedence
-// levels are a property of the operator, read from token.Kind.Prec, not a
-// nesting of tree shapes.
-//
-// DOTDOT is this node too. It is non-associative, which the parser rejects
-// rather than folding — `a..b..c` is a compile error either way it might have
-// been read.
-type BinaryExpr struct {
-	X     Expr
-	OpPos token.Pos
-	Op    token.Kind
-	Y     Expr
-}
-
-// CastExpr is `x as T`. Left-associative and binding tighter than every binary
-// operator, and written as its own production rather than as a binary_op
-// because its right operand is a Type.
-type CastExpr struct {
-	X    Expr
-	As   token.Pos
-	Type Expr
-}
-
-// TransferExpr is the ownership marker, `var` applied to a UnaryExpr.
-//
-// It is a node rather than a flag because the marker is one production serving
-// six owning positions, and one node covers all of them without six flags. Its
-// presence is the entire difference between a move and a deep copy, so it must
-// survive parsing as syntax and must never be normalized away.
-//
-// Target is written as a full UnaryExpr so that `var f(a)` and `var items[0]`
-// parse. That the operand must be a binding or a field path is a static rule;
-// there is no TransferTarget production, and nothing else in the grammar
-// competes for this text.
-type TransferExpr struct {
-	Var    token.Pos
-	Target Expr
-}
-
-// ------------------------------------------------------------------ types
-
-// OwnershipType is `mut T`, `var T`, `unique T`, `shared T`, or `weak T`.
-// Qualifiers do not stack; the recursion is unguarded so a stacked form parses
-// and can be diagnosed as itself.
-type OwnershipType struct {
-	KwPos token.Pos
-	Kw    token.Kind // MUT, VAR, UNIQUE, SHARED, WEAK
-	X     Expr
-}
-
-// ArrayType is both ArrayType and SliceType: `[N]T` and `[]T`. Len == nil is
-// the slice form.
-type ArrayType struct {
-	Lbrack token.Pos
-	Len    Expr // nil for a slice
-	Rbrack token.Pos
-	Elem   Expr
-}
-
-type MapType struct {
-	Map    token.Pos
-	Lbrack token.Pos
-	Key    Expr
-	Rbrack token.Pos
-	Value  Expr
-}
-
-// FuncType is a FunctionType, and also the signature half of a FuncDecl and a
-// FuncLit. In a bare FunctionType every Param has a nil Name.
-//
-// Markers holds every FunctionMarker written. A signature carries at most one,
-// but the repetition is written so that more than one parses, so all of them
-// are kept and the extras are rejected later.
-//
-// Result carries `-> Type`, or an ExpectedType on a declaration, where it is a
-// *CallExpr. Omitting it is the void form; there is no `void` type name.
-type FuncType struct {
-	Func    token.Pos
-	Params  *ParamList
-	Markers []*Marker
-	Arrow   token.Pos
-	Result  Expr
-}
-
-// ChanType is `chan T`. A channel type carries no direction.
-type ChanType struct {
-	Chan token.Pos
-	Elem Expr
-}
-
-// PointerType is `typed_ptr T`. One may not be the direct base of another, so a
-// nested form is written with parentheses and arrives with Elem a *ParenExpr.
-type PointerType struct {
-	Kw   token.Pos
-	Elem Expr
-}
-
-// TensorType is `tensor[T, dims...]`. Legal only inside an npu-marked function
-// body or that function's own signature; elsewhere it parses and is rejected.
-type TensorType struct {
-	Tensor token.Pos
-	Lbrack token.Pos
-	Elem   Expr
-	Shape  []Expr // int_lits, len >= 1
-	Rbrack token.Pos
-}
-
-// VectorType is `vector[T, N]`. It is legal wherever a Type is; where it may
-// actually appear is a static rule. As the callee of a CallExpr it makes that
-// call a VectorCall.
-type VectorType struct {
-	Vector token.Pos
-	Lbrack token.Pos
-	Elem   Expr
-	Comma  token.Pos
-	Len    Expr // int_lit
-	Rbrack token.Pos
-}
-
-// AbstractType is the bare `abstract`, legal only as an alias target.
-type AbstractType struct {
-	Abstract token.Pos
-}
-
-// BadExpr marks a span the parser could not make sense of. It exists so that
-// recovery yields a tree the analyzer can still walk; the analyzer skips it
-// silently, a diagnostic having already been reported at parse time.
-type BadExpr struct {
-	From, To token.Pos
-}
-
-// -------------------------------------------------------------- positions
-
-func (x *BasicLit) Pos() token.Pos        { return x.ValuePos }
-func (x *NamespaceExpr) Pos() token.Pos   { return x.KwPos }
-func (x *ParenExpr) Pos() token.Pos       { return x.Lparen }
-func (x *TupleExpr) Pos() token.Pos       { return x.Lparen }
-func (x *ArrayLit) Pos() token.Pos        { return x.Lbrack }
-func (x *CompositeLit) Pos() token.Pos    { return x.Type.Pos() }
-func (x *MapLit) Pos() token.Pos          { return x.Lbrace }
-func (x *KeyValueExpr) Pos() token.Pos    { return x.Key.Pos() }
-func (x *EnumShorthand) Pos() token.Pos   { return x.Dot }
-func (x *FuncLit) Pos() token.Pos         { return x.Type.Pos() }
-func (x *ChanConstructor) Pos() token.Pos { return x.Chan }
-func (x *HeapConstructor) Pos() token.Pos { return x.KwPos }
-func (x *SelectorExpr) Pos() token.Pos    { return x.X.Pos() }
-func (x *TupleIndexExpr) Pos() token.Pos  { return x.X.Pos() }
-func (x *IndexExpr) Pos() token.Pos       { return x.X.Pos() }
-func (x *CallExpr) Pos() token.Pos        { return x.Fun.Pos() }
-func (x *LaunchExpr) Pos() token.Pos      { return x.KwPos }
-func (x *LaunchConfig) Pos() token.Pos    { return x.Lparen }
-func (x *AwaitExpr) Pos() token.Pos       { return x.Await }
-func (x *UnaryExpr) Pos() token.Pos       { return x.OpPos }
-func (x *BinaryExpr) Pos() token.Pos      { return x.X.Pos() }
-func (x *CastExpr) Pos() token.Pos        { return x.X.Pos() }
-func (x *TransferExpr) Pos() token.Pos    { return x.Var }
-func (x *OwnershipType) Pos() token.Pos   { return x.KwPos }
-func (x *ArrayType) Pos() token.Pos       { return x.Lbrack }
-func (x *MapType) Pos() token.Pos         { return x.Map }
-func (x *FuncType) Pos() token.Pos        { return x.Func }
-func (x *ChanType) Pos() token.Pos        { return x.Chan }
-func (x *PointerType) Pos() token.Pos     { return x.Kw }
-func (x *TensorType) Pos() token.Pos      { return x.Tensor }
-func (x *VectorType) Pos() token.Pos      { return x.Vector }
-func (x *AbstractType) Pos() token.Pos    { return x.Abstract }
-func (x *BadExpr) Pos() token.Pos         { return x.From }
-
-func (x *BasicLit) End() token.Pos      { return x.ValuePos + token.Pos(len(x.Value)) }
-func (x *ParenExpr) End() token.Pos     { return x.Rparen + 1 }
-func (x *TupleExpr) End() token.Pos     { return x.Rparen + 1 }
-func (x *ArrayLit) End() token.Pos      { return x.Rbrack + 1 }
-func (x *CompositeLit) End() token.Pos  { return x.Rbrace + 1 }
-func (x *MapLit) End() token.Pos        { return x.Rbrace + 1 }
-func (x *KeyValueExpr) End() token.Pos  { return x.Value.End() }
-func (x *FuncLit) End() token.Pos       { return x.Body.End() }
-func (x *ChanConstructor) End() token.Pos { return x.Rparen + 1 }
-func (x *HeapConstructor) End() token.Pos { return x.Rparen + 1 }
-func (x *SelectorExpr) End() token.Pos  { return x.Sel.End() }
-func (x *IndexExpr) End() token.Pos     { return x.Rbrack + 1 }
-func (x *CallExpr) End() token.Pos      { return x.Rparen + 1 }
-func (x *LaunchExpr) End() token.Pos    { return x.Call.End() }
-func (x *LaunchConfig) End() token.Pos  { return x.Rparen + 1 }
-func (x *AwaitExpr) End() token.Pos     { return x.X.End() }
-func (x *UnaryExpr) End() token.Pos     { return x.X.End() }
-func (x *BinaryExpr) End() token.Pos    { return x.Y.End() }
-func (x *CastExpr) End() token.Pos      { return x.Type.End() }
-func (x *TransferExpr) End() token.Pos  { return x.Target.End() }
-func (x *OwnershipType) End() token.Pos { return x.X.End() }
-func (x *ArrayType) End() token.Pos     { return x.Elem.End() }
-func (x *MapType) End() token.Pos       { return x.Value.End() }
-func (x *ChanType) End() token.Pos      { return x.Elem.End() }
-func (x *PointerType) End() token.Pos   { return x.Elem.End() }
-func (x *TensorType) End() token.Pos    { return x.Rbrack + 1 }
-func (x *VectorType) End() token.Pos    { return x.Rbrack + 1 }
-func (x *BadExpr) End() token.Pos       { return x.To }
-
-func (x *NamespaceExpr) End() token.Pos {
-	return x.KwPos + token.Pos(len(x.Kw.Spelling()))
-}
-
-func (x *AbstractType) End() token.Pos {
-	return x.Abstract + token.Pos(len(token.ABSTRACT.Spelling()))
-}
-
-func (x *TupleIndexExpr) End() token.Pos {
-	return x.IndexPos + token.Pos(len(x.Text))
-}
-
-func (x *EnumShorthand) End() token.Pos {
-	if x.Rparen.IsValid() {
+func (x *MemberExpr) Pos() token.Pos { return x.X.Pos() }
+func (x *MemberExpr) End() token.Pos { return x.Sel.End() }
+func (x *IndexExpr) Pos() token.Pos  { return x.X.Pos() }
+func (x *IndexExpr) End() token.Pos  { return x.Rbrack + 1 }
+func (x *CallExpr) Pos() token.Pos   { return x.Fun.Pos() }
+func (x *CallExpr) End() token.Pos   { return x.Rparen + 1 }
+func (x *NewExpr) Pos() token.Pos    { return x.NewPos }
+func (x *NewExpr) End() token.Pos {
+	if x.Rparen != token.NoPos {
 		return x.Rparen + 1
 	}
-	return x.Name.End()
+	return endOf(x.Callee.End(), x.TypeArgs)
 }
-
-func (x *FuncType) End() token.Pos {
-	if x.Result != nil {
-		return x.Result.End()
+func (x *TaggedTemplateExpr) Pos() token.Pos { return x.Tag.Pos() }
+func (x *TaggedTemplateExpr) End() token.Pos { return x.Template.End() }
+func (x *SuperExpr) Pos() token.Pos          { return x.SuperPos }
+func (x *SuperExpr) End() token.Pos          { return x.SuperEnd }
+func (x *ThisExpr) Pos() token.Pos           { return x.ThisPos }
+func (x *ThisExpr) End() token.Pos           { return x.ThisEnd }
+func (x *MetaProp) Pos() token.Pos           { return x.MetaPos }
+func (x *MetaProp) End() token.Pos           { return x.Prop.End() }
+func (x *ImportCall) Pos() token.Pos         { return x.ImportPos }
+func (x *ImportCall) End() token.Pos         { return x.Rparen + 1 }
+func (x *InstantiationExpr) Pos() token.Pos  { return x.X.Pos() }
+func (x *InstantiationExpr) End() token.Pos  { return x.TypeArgs.End() }
+func (x *NonNullExpr) Pos() token.Pos        { return x.X.Pos() }
+func (x *NonNullExpr) End() token.Pos        { return x.BangEnd }
+func (x *TypeAssertExpr) Pos() token.Pos     { return x.Langle }
+func (x *TypeAssertExpr) End() token.Pos     { return x.X.End() }
+func (x *AsExpr) Pos() token.Pos             { return x.X.Pos() }
+func (x *AsExpr) End() token.Pos {
+	if x.IsConst {
+		return x.ConstEnd
 	}
-	if n := len(x.Markers); n > 0 {
-		return x.Markers[n-1].End()
-	}
-	return x.Params.End()
+	return x.Type.End()
 }
+func (x *UnaryExpr) Pos() token.Pos { return x.OpPos }
+func (x *UnaryExpr) End() token.Pos { return x.X.End() }
+func (x *UpdateExpr) Pos() token.Pos {
+	if x.Prefix {
+		return x.OpPos
+	}
+	return x.X.Pos()
+}
+func (x *UpdateExpr) End() token.Pos {
+	if x.Prefix {
+		return x.X.End()
+	}
+	return x.OpEnd
+}
+func (x *AwaitExpr) Pos() token.Pos { return x.AwaitPos }
+func (x *AwaitExpr) End() token.Pos { return x.X.End() }
+func (x *YieldExpr) Pos() token.Pos { return x.YieldPos }
+func (x *YieldExpr) End() token.Pos { return endOf(x.YieldEnd, x.X) }
+func (x *BinaryExpr) Pos() token.Pos { return x.X.Pos() }
+func (x *BinaryExpr) End() token.Pos { return x.Y.End() }
+func (x *AssignExpr) Pos() token.Pos { return x.Lhs.Pos() }
+func (x *AssignExpr) End() token.Pos { return x.Rhs.End() }
+func (x *CondExpr) Pos() token.Pos   { return x.Cond.Pos() }
+func (x *CondExpr) End() token.Pos   { return x.Else.End() }
+func (x *SeqExpr) Pos() token.Pos    { return x.Exprs[0].Pos() }
+func (x *SeqExpr) End() token.Pos    { return x.Exprs[len(x.Exprs)-1].End() }
 
-func (*BasicLit) exprNode()        {}
-func (*NamespaceExpr) exprNode()   {}
-func (*ParenExpr) exprNode()       {}
-func (*TupleExpr) exprNode()       {}
-func (*ArrayLit) exprNode()        {}
-func (*CompositeLit) exprNode()    {}
-func (*MapLit) exprNode()          {}
-func (*KeyValueExpr) exprNode()    {}
-func (*EnumShorthand) exprNode()   {}
-func (*FuncLit) exprNode()         {}
-func (*ChanConstructor) exprNode() {}
-func (*HeapConstructor) exprNode() {}
-func (*SelectorExpr) exprNode()    {}
-func (*TupleIndexExpr) exprNode()  {}
-func (*IndexExpr) exprNode()       {}
-func (*CallExpr) exprNode()        {}
-func (*LaunchExpr) exprNode()      {}
-func (*AwaitExpr) exprNode()       {}
-func (*UnaryExpr) exprNode()       {}
-func (*BinaryExpr) exprNode()      {}
-func (*CastExpr) exprNode()        {}
-func (*TransferExpr) exprNode()    {}
-func (*OwnershipType) exprNode()   {}
-func (*ArrayType) exprNode()       {}
-func (*MapType) exprNode()         {}
-func (*FuncType) exprNode()        {}
-func (*ChanType) exprNode()        {}
-func (*PointerType) exprNode()     {}
-func (*TensorType) exprNode()      {}
-func (*VectorType) exprNode()      {}
-func (*AbstractType) exprNode()    {}
-func (*BadExpr) exprNode()         {}
+func (x *ObjectPattern) Pos() token.Pos   { return x.Lbrace }
+func (x *ObjectPattern) End() token.Pos   { return x.Rbrace + 1 }
+func (x *ArrayPattern) Pos() token.Pos    { return x.Lbrack }
+func (x *ArrayPattern) End() token.Pos    { return x.Rbrack + 1 }
+func (x *PropertyPattern) Pos() token.Pos { return spanOf(x.Value.Pos(), x.Key) }
+func (x *PropertyPattern) End() token.Pos { return x.Value.End() }
+func (x *AssignPattern) Pos() token.Pos   { return x.Lhs.Pos() }
+func (x *AssignPattern) End() token.Pos   { return x.Rhs.End() }
+func (x *RestElem) Pos() token.Pos        { return x.Ellipsis }
+func (x *RestElem) End() token.Pos        { return endOf(x.X.End(), x.Type) }
+
+func (*BasicLit) exprNode()           {}
+func (*TemplateLit) exprNode()        {}
+func (*ArrayLit) exprNode()           {}
+func (*Elision) exprNode()            {}
+func (*ObjectLit) exprNode()          {}
+func (*PropertyDef) exprNode()        {}
+func (*ComputedKey) exprNode()        {}
+func (*SpreadElem) exprNode()         {}
+func (*ParenExpr) exprNode()          {}
+func (*FuncExpr) exprNode()           {}
+func (*ClassExpr) exprNode()          {}
+func (*ArrowFunc) exprNode()          {}
+func (*MemberExpr) exprNode()         {}
+func (*IndexExpr) exprNode()          {}
+func (*CallExpr) exprNode()           {}
+func (*NewExpr) exprNode()            {}
+func (*TaggedTemplateExpr) exprNode() {}
+func (*SuperExpr) exprNode()          {}
+func (*ThisExpr) exprNode()           {}
+func (*MetaProp) exprNode()           {}
+func (*ImportCall) exprNode()         {}
+func (*InstantiationExpr) exprNode()  {}
+func (*NonNullExpr) exprNode()        {}
+func (*TypeAssertExpr) exprNode()     {}
+func (*AsExpr) exprNode()             {}
+func (*UnaryExpr) exprNode()          {}
+func (*UpdateExpr) exprNode()         {}
+func (*AwaitExpr) exprNode()          {}
+func (*YieldExpr) exprNode()          {}
+func (*BinaryExpr) exprNode()         {}
+func (*AssignExpr) exprNode()         {}
+func (*CondExpr) exprNode()           {}
+func (*SeqExpr) exprNode()            {}
+func (*ObjectPattern) exprNode()      {}
+func (*ArrayPattern) exprNode()       {}
+func (*PropertyPattern) exprNode()    {}
+func (*AssignPattern) exprNode()      {}
+func (*RestElem) exprNode()           {}

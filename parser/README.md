@@ -4,107 +4,77 @@
 import "github.com/vertex-language/vertex/parser"
 ```
 
-Package `parser` turns Vertex source into an `ast.File` or an `ast.Package`. It depends on `ast` (its output), `diag` (its rejections), `scanner` (its input), and `token`.
+Package `parser` builds a Vertex [`ast`](../ast) tree from source. It is recursive descent with precedence climbing over the binary chain (`vertex_grammar.md` B.4), and it always returns a non-nil tree — a partial parse is still a usable one (`compiler_frontend.md` §6). There is one goal symbol, no pre-scan, and no per-file mode that changes what gets parsed; `Mode` is a bitset of *options*, never a goal-symbol selector.
 
-## Design philosophy
-
-Two grammar-wide mechanisms shape everything in this package.
-
-### Statement termination by bracket depth, not by token
-
-Whether a line terminator ends a statement is **not** a property of any token — it's a property of the innermost enclosing bracketing construct. `(`, `[`, and every brace that does *not* open a terminator-significant body push a depth counter; the ones that do — a block, a struct/class body, a constraint body, a switch/select body, a declare body, a foreign class body — reset depth to zero instead, and the source file itself starts at zero.
-
-```go
-func (p *parser) continues() bool { return p.depth > 0 || !p.tok.NLBefore }
-```
-
-At depth zero, a token carrying `NLBefore` ends the statement and cannot continue a postfix or binary chain. Two pairs of helpers manage this:
-
-- `open`/`close` — increment/decrement depth around a bracket that suspends termination (parens, index brackets, argument lists).
-- `enterTerminated`/`leave` — save the current `(depth, noLit)` state and reset depth to zero for a body that *is* terminator-significant, restoring it afterward.
-
-Because a run of consecutive terminators collapses into a single `NLBefore` flag on the following token, `[ terminator ]` at the head of a list needs no code at all.
-
-### The literal-in-header ambiguity
-
-This is the one place the parser must resolve something the grammar leaves to prose: a `CompositeLit` or `MapLit` written unparenthesized between a control-flow keyword (`if`, `while`, `for`, `switch`) and its block brace reads as the block. `noLit` (plus `headerKw`, which names the construct for the diagnostic) suppresses the literal reading while a header is being parsed, and `withLit` locally re-enables it inside any bracketed group — parentheses are the grammar's prescribed escape hatch, and an index bracket or argument list encloses a literal just as effectively.
-
-```go
-func (p *parser) parseHeaderExpr(kw string) ast.Expr {
-	savedLit, savedKw := p.noLit, p.headerKw
-	p.noLit, p.headerKw = true, kw
-	x := p.parseExpr()
-	p.noLit, p.headerKw = savedLit, savedKw
-	...
-}
-```
-
-A composite literal is caught in `parseHeaderExpr` itself, by lookahead for the two tokens (`identifier`, `:`) that can only begin a field value; a map literal is caught earlier, in `parsePrimaryExpr`, where the brace is reached with an operand expected.
-
-### Everything else parses and is rejected later
-
-Every other construct the grammar forbids — a stacked ownership qualifier, `tensor` outside an npu body, `var` on a computed expression, a body on a foreign declaration, a repeated marker — is parsed into a real node rather than rejected at the token level. This is deliberate: it lets the diagnostic (raised later, by the analyzer) name the construct itself instead of pointing at a bare token.
-
-## Package layout
-
-| File | Contents |
-|---|---|
-| `parser.go` | The `parser` struct, token flow (`advanceToken`, `peekAt`), diagnostics helpers, termination (`continues`, `expectTerminator`, `enterTerminated`), recovery (`advance`, `stalled`), and the entry points `ParseFile`/`ParseDir` |
-| `expr.go` | Expressions, operators, types (types are exprs, per `ast`), and signatures |
-| `stmt.go` | Statements, `switch`/`select` clauses, and patterns |
-| `decl.go` | Top-level declarations, `declare` blocks, and foreign members |
+`parser` imports `ast`, `scanner`, and `token`. Nothing sits below it except an unexported `arena`, which lives inside this package on purpose — an allocator package would be a fifth package under a diagram that only has four, and `ast` depends on it only through the one-method `ast.Releaser` interface, so no import edge is added.
 
 ## Entry points
 
 ```go
-func ParseFile(fset *token.FileSet, filename string, src []byte, rep diag.Reporter, mode Mode) (*ast.File, error)
-func ParseDir(fset *token.FileSet, dir, importPath string, target token.BuildTag, rep diag.Reporter, mode Mode) (*ast.Package, error)
+tree, diags := parser.ParseFile(file, 0)
 ```
 
-`ParseFile` always returns a non-nil `*ast.File`, even when errors were reported — recovery produces `Bad*` nodes so later phases and editor tooling can still walk a partial tree. If `rep` is `nil`, diagnostics are collected internally, sorted, deduplicated, and returned as the `error`.
+`ParseFile` scans and parses in one call. `ParseFileTokens` takes an already-scanned buffer, for callers that scanned for their own reasons and want the tree too — the parser buffers its input anyway, so handing it a pre-scanned slice costs nothing extra.
 
-`ParseDir` runs two passes over every `.vs` file in a directory:
-
-1. **Probe pass** — each file is parsed with `PackageClauseOnly` against a throwaway `FileSet`, just far enough to read its build tag. A file whose tag doesn't match `target` is excluded from the build outright, so this filter must run before any file is fully parsed.
-2. **Full pass** — the surviving files are fully parsed against the real `FileSet` and handed to `ast.NewPackage`, which checks that they agree on a package clause name.
-
-Both passes are required rather than opportunistic: the qualifier under which an imported package's symbols are reached comes from that package's own package clause, so surviving files' names must agree before anything can resolve.
-
-### Modes
+Two fragment entry points exist for REPLs, debuggers, and hover providers:
 
 ```go
-const (
-	PackageClauseOnly Mode = 1 << iota // stop after package + build clauses
-	ImportsOnly                        // stop after import declarations
-	ParseComments                      // retain comments in the tree
-)
+x, diags := parser.ParseExpr(file)
+t, diags := parser.ParseTypeExpr(file)
 ```
 
-`PackageClauseOnly` is load-bearing for `ParseDir`'s probe pass, not an optimization.
+There are two rather than one because expressions and types are separate node hierarchies with no common return type to guess at — see `ast`'s note on `Decl`/`Stmt`/`Expr`/`TypeExpr`. Both fragment parses detach their arena instead of freeing it: the caller has no `ast.File` to call `Release` on, so the nodes are left for the GC rather than handed a lifetime they can't discharge.
 
-## Parsing structure
+`Mode` is a bitset:
 
-The parser is a straightforward recursive-descent/precedence-climbing hybrid:
+- `ParseComments` retains comments on `ast.File.Comments`. The scanner always emits `COMMENT` tokens; this only controls whether the parser keeps them instead of dropping them at consumption.
+- `ImportsOnly` stops after the import prologue — including re-exports, since `export ... from` is a dependency edge too — so a build driver can discover the dependency graph without paying for a full parse. It stops the *parser*, not the scanner: the file is still tokenized whole.
+- `Trace` prints a production trace to stderr for debugging.
 
-- **Expressions** (`expr.go`) climb seven binary precedence levels (`parseBinaryExpr`), folding `as`-casts separately (`parseCastExpr`) since a cast's right operand is a `Type`, not an `Expr`, and a precedence loop can't consume it.
-- **Types are parsed by `parseType`**, consistent with `ast`'s "types are Exprs" design. `parseExprOrType` and `parseBracketedTypeOrArray` resolve the genuinely ambiguous positions — an index bracket vs. a type-argument list, an array literal vs. an array/slice type — by shape where possible and by trailing context (`startsType`) where not.
-- **Statements** (`stmt.go`) dispatch on leading keyword in `parseStmt`; anything else falls through to `parseSimpleStmt`, which parses an expression and only *then* decides, from what follows, whether it was actually an assignment target list.
-- **Declarations** (`decl.go`) similarly dispatch by keyword in `parseTopLevelDecl`, with shared machinery for the constructs that reappear inside `declare` blocks (`parseForeignMember`, `parseForeignFunc`, `parseForeignClass`).
+## Speculation
+
+Several constructs are prefixes of something else: an arrow-function head is a prefix of a parenthesized expression, and `< Type >` competes with a generic arrow head. Rather than a cover grammar, ambiguous sites checkpoint and retry:
+
+```go
+ok := p.speculate(func() bool {
+	// try a reading; return true to commit
+})
+```
+
+A `mark` captures a token index, a diagnostic count, and an arena mark. Because the token buffer is immutable, resetting the diagnostic slice and truncating the arena back to the mark makes speculation side-effect-free by construction — no diagnostic escapes a failed attempt, and no node from a discarded reading leaks into the tree the caller walks. The bool `speculate` receives is a *commit* signal, not a success signal: instantiation expressions, for instance, commit only after the inner parse already succeeded, on a lookahead test that runs afterward.
+
+Recursion depth is capped (`maxDepth`, currently 1000). Exceeding it is a diagnostic, never a hang — deeply nested but legal input exists (generated code full of parenthesization), so the cap is generous, and every unbounded recursive entry point (`parseAssign`, `parseBinary`, `parseType`, `parseStmt`) calls `enter`/`leave` around itself.
 
 ## Recovery
 
-Unbounded body loops (import lists, field lists, argument lists, etc.) universally follow the same pattern:
+A parse never aborts. When a list-parsing loop fails to make progress, `advanced` force-advances by one token so nothing can spin, and `advanceTo` skips forward to the next token in a per-context `syncSet` (declaration starts, statement starts, member starts, or type-member starts). `skipBalanced` advances past a whole bracketed group in one step, rather than one token at a time, so recovery can't stop on a token that only *looks* like a synchronization point because it's nested inside `(...)`, `[...]`, or `{...}`.
 
-```go
-for !p.at(token.RPAREN) && !p.at(token.EOF) {
-	before := p.tok.Pos
-	// ... parse one element ...
-	if p.stalled(before) {
-		continue
-	}
-}
-```
+Repeated resync at the same position is capped at one retry (`maxResync`); past that, `advanceTo` returns `false` and the caller must propagate the failure up to its own enclosing sync set rather than loop forever at a position recovery can't get past.
 
-`stalled` checks whether the current position actually advanced since the loop iteration began; if not, it force-advances one token. This guarantees no such loop can spin forever on a malformed element that consumes nothing.
+Member and statement lists that skip a broken slot still record a `Bad*` node for it, so downstream offsets don't silently shift.
 
-For coarser recovery, `advance(to map[token.Kind]bool)` skips tokens until one in a synchronization set is reached (`stmtStart`, `declStart`, `memberStart`, `clauseStart`), so one malformed construct doesn't cascade into spurious errors for everything that follows. A `syncPos`/`syncCnt` guard caps repeated resync attempts at the same position, the standard defense against a recovery loop that never actually consumes input.
+## Semicolon insertion
+
+`expectSemi` implements automatic semicolon insertion for the `TerminatedByASI` nonterminals in grammar section L: an explicit `;`, a line break before the next token, a following `}`, or EOF all terminate; anything else is a diagnostic. It returns the position of a written `;`, or `NoPos` when the terminator was inserted, so a node's span stops at its last real token instead of covering a semicolon that was never there.
+
+`expectMemberSep` is the same idea for the seven `TypeMember` signature forms, which additionally accept `,` as a separator. Newline-separated interface bodies — `interface U { id: string\n name: string }` — are entirely this function's job; property signatures are deliberately included in the ASI-terminated set precisely so that case doesn't regress while method signatures keep working.
+
+## Arenas
+
+Nodes for one file are allocated together and freed together. `File.Release()` (via the single-method `ast.Releaser` interface) truncates or drops the arena's slabs in one step, so a whole-program build never has to hold every file's tree in memory just because one file was parsed early.
+
+The arena hands out `*ast.Ident` from a fixed-capacity slab and falls back to the heap once the slab fills. Growing the slab with `append` would be wrong — `append` can reallocate, which would silently invalidate every pointer already handed out to the tree the caller is building — so the slab has fixed capacity and overflow is deliberately routed to the GC instead.
+
+`speculate`'s rollback truncates the arena back to its mark as well as the token cursor: pointers into the truncated region belong to nodes the parser just discarded mid-speculation, so nothing dangles and nothing leaks.
+
+## Contextual keywords and lookahead
+
+Words like `struct`, `kernel`, `type`, `interface`, `namespace`, `declare`, `abstract`, and `using` are ordinary identifiers that only sometimes introduce a declaration. `ExpressionStatement`'s grammar lookahead restriction names just `{`, `function`, `async function`, `class`, and `let [` — it says nothing about these words, so the decision of when they start a declaration versus an expression is this package's own policy (`tryContextualDecl`), not a rule the grammar states directly.
+
+The general shape of that policy is a `[no LineTerminator here]` check before a following token that could plausibly complete a declaration head: a line break forces the identifier reading, which is what keeps `struct` and `kernel` usable as ordinary variable names.
+
+`>` is a related case at the token level rather than the identifier level: the scanner never merges adjacent `>` characters, so `Array<Box<int32>>` tokenizes as two `GT`s and the *expression* parser is what joins a run of them back into `>>`, `>>>`, or one of their `=`-suffixed forms when it's looking for a binary operator. Adjacency — no whitespace between the tokens — is the test, which is why `a > > b` never joins into a shift.
+
+## Grammar forms that parse before they're rejected
+
+A few constructs the grammar rules out are still parsed into real nodes rather than failing early, so that a later, name-based pass can give a specific diagnostic instead of a bare "unexpected token." `struct S extends B {}` is the canonical example: structs have no `ClassExtendsClause` production, but `parseStruct` still builds a `StructDecl` carrying a heritage clause and reports *"structs don't support `extends`"* at the clause's own span. `kernel async function` is the same idea one level up — accepted by the parser, rejected by name once `Accel` and `Async` are both set on the resulting `FuncDecl`.

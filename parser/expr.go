@@ -2,992 +2,839 @@ package parser
 
 import (
 	"github.com/vertex-language/vertex/ast"
-	"github.com/vertex-language/vertex/diag"
 	"github.com/vertex-language/vertex/token"
 )
 
-// open and close bracket the depth counter. Every group that suspends
-// statement termination goes through these; the braces that do not — a Block, a
-// record or constraint body, a switch or select body, a declare or foreign
-// class body — go through enterTerminated instead.
-func (p *parser) open(k token.Kind) token.Pos  { p.depth++; return p.expect(k) }
-func (p *parser) close(k token.Kind) token.Pos { p.depth--; return p.expect(k) }
+// Expressions — vertex_grammar.md section B.
 
-// withLit runs f with a suppressed literal re-enabled. Every bracketed group
-// does this: parentheses are the escape hatch the grammar prescribes for a
-// literal in a header, and an index bracket or argument list encloses the
-// literal just as effectively.
-func (p *parser) withLit(f func()) {
-	saved := p.noLit
-	p.noLit = false
-	f()
-	p.noLit = saved
+// inFlag is the [In] parameter threaded through B.4 and B.5. It controls
+// exactly one thing: whether `in` is a RelationalExpression operator. The
+// three-clause `for` head clears it.
+type inFlag bool
+
+const (
+	allowIn inFlag = true
+	noIn    inFlag = false
+)
+
+// parseExpr is Expression (B.5): the comma operator over
+// AssignmentExpressions.
+func (p *parser) parseExpr(in inFlag) ast.Expr {
+	defer p.trace("Expr")()
+
+	x := p.parseAssign(in)
+	if !p.at(token.COMMA) {
+		return x
+	}
+	seq := &ast.SeqExpr{Exprs: []ast.Expr{x}}
+	for p.got(token.COMMA) {
+		seq.Exprs = append(seq.Exprs, p.parseAssign(in))
+	}
+	return seq
 }
 
-// ------------------------------------------------------------ expressions
+// parseAssign is AssignmentExpression (B.5).
+func (p *parser) parseAssign(in inFlag) ast.Expr {
+	defer p.trace("AssignmentExpression")()
+	if !p.enter() {
+		return p.badExpr()
+	}
+	defer p.leave()
 
-func (p *parser) parseExpr() ast.Expr { return p.parseBinaryExpr(1) }
+	// YieldExpression is gated on [+Yield] in the grammar, but the parser does
+	// not thread Yield/Await as flags: §1 makes [+Await] unconditional at file
+	// scope, and a `yield` outside a generator is an early error, not a parse
+	// failure (§6.3). So both are parsed wherever they appear and rejected by
+	// name later.
+	if p.at(token.YIELD) {
+		return p.parseYield(in)
+	}
 
-// parseHeaderExpr parses a control-flow header, where an unparenthesized
-// composite or map literal is ambiguous against the block brace that follows.
-//
-// The literal's brace is read as the block's, which is what the grammar
-// prescribes; the fix is to parenthesize. A composite literal is caught here,
-// after the header expression, by the two tokens that can only begin a field
-// value; a map literal is caught in parsePrimaryExpr, where the brace is
-// reached with an operand expected.
-func (p *parser) parseHeaderExpr(kw string) ast.Expr {
-	savedLit, savedKw := p.noLit, p.headerKw
-	p.noLit, p.headerKw = true, kw
-	x := p.parseExpr()
-	p.noLit, p.headerKw = savedLit, savedKw
+	// Arrow functions must be tried before the conditional chain: their heads
+	// are prefixes of ParenthesizedExpression and of a type assertion.
+	if x, ok := p.tryArrow(in); ok {
+		return x
+	}
 
-	if p.at(token.LBRACE) && p.isTypeLike(x) &&
-		p.peekAt(0).Kind == token.IDENT && p.peekAt(1).Kind == token.COLON {
-		p.reportLiteralInHeader(x.Pos(), kw)
+	x := p.parseConditional(in)
+
+	if op := p.kind(); isAssignOp(op) {
+		t := p.next()
+		return &ast.AssignExpr{
+			Lhs: p.toTarget(x, op), OpPos: t.Pos, OpEnd: t.End, Op: op,
+			Rhs: p.parseAssign(in),
+		}
 	}
 	return x
 }
 
-func (p *parser) reportLiteralInHeader(pos token.Pos, kw string) {
-	d := diag.At(diag.LiteralInHeader, pos, kw)
-	d.WithInsert(pos, "(", "parenthesize the literal")
-	p.report(d)
-}
-
-// isTypeLike reports whether x has the shape of a LiteralType: a type name,
-// possibly qualified, possibly instantiated.
-func (p *parser) isTypeLike(x ast.Expr) bool {
-	switch t := x.(type) {
-	case *ast.Ident:
+func isAssignOp(k token.Kind) bool {
+	switch k {
+	case token.ASSIGN, token.ADD_ASSIGN, token.SUB_ASSIGN, token.MUL_ASSIGN,
+		token.QUO_ASSIGN, token.REM_ASSIGN, token.EXP_ASSIGN, token.SHL_ASSIGN,
+		token.SHR_ASSIGN, token.USHR_ASSIGN, token.AND_ASSIGN, token.OR_ASSIGN,
+		token.XOR_ASSIGN, token.LAND_ASSIGN, token.LOR_ASSIGN, token.COALESCE_ASSIGN:
 		return true
-	case *ast.SelectorExpr:
-		return p.isTypeLike(t.X)
-	case *ast.IndexExpr:
-		return p.isTypeLike(t.X)
 	}
 	return false
 }
 
-// parseBinaryExpr is precedence climbing over the seven binary levels.
+// toTarget reinterprets an ObjectLit or ArrayLit on the left of `=` as a
+// destructuring pattern (B.6).
 //
-// `as` is deliberately absent from this loop even though it binds tighter than
-// every operator in it: its right operand is a Type, not an Expression, so a
-// precedence-climbing loop cannot consume it and must not try. It is folded in
-// parseCastExpr, where the type parser is reachable.
-func (p *parser) parseBinaryExpr(minPrec int) ast.Expr {
-	x := p.parseCastExpr()
-
-	for {
-		if !p.continues() {
-			return x
-		}
-		op := p.tok.Kind
-		prec := op.Prec()
-		if op == token.AS || prec == token.LowestPrec || prec < minPrec {
-			return x
-		}
-		opPos := p.tok.Pos
-		p.advanceToken()
-
-		y := p.parseBinaryExpr(prec + 1)
-		x = &ast.BinaryExpr{X: x, OpPos: opPos, Op: op, Y: y}
-
-		// `..` is non-associative: `a..b..c` is a compile error, folded
-		// neither left nor right. The second range is consumed so recovery
-		// continues at the statement rather than at the operator.
-		if op.IsNonAssociative() && p.continues() && p.at(op) {
-			p.errorHere(diag.RangeNotAssociative)
-			p.advanceToken()
-			p.parseBinaryExpr(prec + 1)
-		}
+// This is the grammar's only cover (K) and the only in-parser reinterpretation
+// (§5.1). It runs only for simple assignment: `[a] += 1` has no pattern
+// reading, and reinterpreting there would invent a node the grammar does not
+// derive.
+func (p *parser) toTarget(x ast.Expr, op token.Kind) ast.Expr {
+	if op != token.ASSIGN {
+		return x
 	}
-}
-
-// parseCastExpr folds `x as T` chains, which are left-associative: two
-// conversions, not one.
-func (p *parser) parseCastExpr() ast.Expr {
-	x := p.parseUnaryExpr()
-	for p.continues() && p.at(token.AS) {
-		as := p.tok.Pos
-		p.advanceToken()
-		x = &ast.CastExpr{X: x, As: as, Type: p.parseType()}
+	switch x := x.(type) {
+	case *ast.ObjectLit:
+		return p.objectToPattern(x)
+	case *ast.ArrayLit:
+		return p.arrayToPattern(x)
 	}
 	return x
 }
 
-func (p *parser) parseUnaryExpr() ast.Expr {
-	switch p.tok.Kind {
-	case token.SUB, token.NOT, token.TILDE:
-		op, pos := p.tok.Kind, p.tok.Pos
-		p.advanceToken()
-		return &ast.UnaryExpr{OpPos: pos, Op: op, X: p.parseUnaryExpr()}
+func (p *parser) objectToPattern(o *ast.ObjectLit) ast.Expr {
+	pat := &ast.ObjectPattern{Lbrace: o.Lbrace, Rbrace: o.Rbrace}
+	for _, prop := range o.Props {
+		switch prop := prop.(type) {
+		case *ast.PropertyDef:
+			if prop.IsCover {
+				// `{ a = 1 }` — the CoverInitializedName finally becomes legal.
+				pat.Props = append(pat.Props, &ast.PropertyPattern{
+					Value: &ast.AssignPattern{Lhs: prop.Key, Assign: token.NoPos, Rhs: prop.Value},
+				})
+				continue
+			}
+			pat.Props = append(pat.Props, &ast.PropertyPattern{
+				Key: prop.Key, Colon: prop.Colon, Value: p.toNestedPattern(prop.Value),
+			})
+		case *ast.SpreadElem:
+			pat.Props = append(pat.Props, &ast.RestElem{Ellipsis: prop.Ellipsis, X: prop.X})
+		case *ast.Ident:
+			pat.Props = append(pat.Props, &ast.PropertyPattern{Value: prop})
+		default:
+			p.errorAt(prop.Pos(), prop.End(), "not a valid assignment target")
+			pat.Props = append(pat.Props, prop)
+		}
+	}
+	return pat
+}
+
+func (p *parser) arrayToPattern(a *ast.ArrayLit) ast.Expr {
+	pat := &ast.ArrayPattern{Lbrack: a.Lbrack, Rbrack: a.Rbrack}
+	for _, elt := range a.Elts {
+		switch elt := elt.(type) {
+		case *ast.SpreadElem:
+			pat.Elts = append(pat.Elts, &ast.RestElem{Ellipsis: elt.Ellipsis, X: elt.X})
+		case *ast.Elision:
+			pat.Elts = append(pat.Elts, elt)
+		default:
+			pat.Elts = append(pat.Elts, p.toNestedPattern(elt))
+		}
+	}
+	return pat
+}
+
+func (p *parser) toNestedPattern(x ast.Expr) ast.Expr {
+	switch x := x.(type) {
+	case *ast.ObjectLit:
+		return p.objectToPattern(x)
+	case *ast.ArrayLit:
+		return p.arrayToPattern(x)
+	case *ast.AssignExpr:
+		if x.Op == token.ASSIGN {
+			return &ast.AssignPattern{Lhs: p.toNestedPattern(x.Lhs), Assign: x.OpPos, Rhs: x.Rhs}
+		}
+	}
+	return x
+}
+
+func (p *parser) parseYield(in inFlag) ast.Expr {
+	t := p.next()
+	y := &ast.YieldExpr{YieldPos: t.Pos, YieldEnd: t.End}
+
+	// `yield [no LineTerminator here] AssignmentExpression` and the `*` form.
+	// A line break makes it a bare yield, which is the whole point of the
+	// restriction.
+	if p.nlBefore() {
+		return y
+	}
+	if p.at(token.MUL) {
+		p.next()
+		y.Delegate = true
+		y.X = p.parseAssign(in)
+		return y
+	}
+	if p.startsExpr() {
+		y.X = p.parseAssign(in)
+	}
+	return y
+}
+
+// parseConditional is ConditionalExpression (B.4).
+func (p *parser) parseConditional(in inFlag) ast.Expr {
+	cond := p.parseBinary(in, 1)
+	if !p.at(token.QUESTION) {
+		return cond
+	}
+	q := p.next().Pos
+	// The consequent is [+In] unconditionally, per B.4.
+	then := p.parseAssign(allowIn)
+	colon := p.expect(token.COLON)
+	return &ast.CondExpr{Cond: cond, Quest: q, Then: then, Colon: colon, Else: p.parseAssign(in)}
+}
+
+// parseBinary climbs the binary chain in B.4 using the precedence table on
+// token.Kind (§3, §6).
+//
+// Mixing `??` with `||` or `&&` is ungrammatical but parses here and is
+// rejected by name later (§6.3), so the message can say what to parenthesize.
+func (p *parser) parseBinary(in inFlag, minPrec int) ast.Expr {
+	if !p.enter() {
+		return p.badExpr()
+	}
+	defer p.leave()
+
+	x := p.parseUnary()
+
+	for {
+		op, opPos, opEnd, width := p.binaryOp(in)
+		prec := op.Precedence()
+		if prec < minPrec {
+			break
+		}
+		for n := 0; n < width; n++ {
+			p.next()
+		}
+
+		// ** is right-associative and its left operand is an
+		// UpdateExpression, not a UnaryExpression (B.4). Both are exceptions
+		// to the plain climb.
+		next := prec + 1
+		if op == token.EXP {
+			next = prec
+		}
+		y := p.parseBinary(in, next)
+		x = &ast.BinaryExpr{X: x, OpPos: opPos, OpEnd: opEnd, Op: op, Y: y}
+
+		if op == token.COALESCE || op == token.LOR || op == token.LAND {
+			p.checkCoalesceMix(x.(*ast.BinaryExpr))
+		}
+	}
+	return x
+}
+
+// binaryOp identifies the infix operator at the cursor, joining a run of
+// adjacent GT tokens (§4.2). width is how many tokens to consume.
+//
+// The scanner under-munches `>` so that `Array<Box<int32>>` comes apart in
+// type context; joining is the expression parser's job and this is where it
+// happens. Adjacency is the whitespace test, so `a > > b` never joins.
+func (p *parser) binaryOp(in inFlag) (op token.Kind, pos, end token.Pos, width int) {
+	t := p.cur()
+
+	switch t.Kind {
+	case token.GT:
+		gts, assign, w := 1, false, 1
+		for {
+			nx := p.peek(w)
+			if !p.peek(w - 1).Adjacent(nx) {
+				break
+			}
+			if nx.Kind == token.GT && gts < 3 && !assign {
+				gts++
+				w++
+				continue
+			}
+			if nx.Kind == token.ASSIGN {
+				assign = true
+				w++
+			}
+			break
+		}
+		joined := token.JoinGT(gts, assign)
+		return joined, t.Pos, p.peek(w - 1).End, w
+
+	case token.IN:
+		if in == noIn {
+			return token.INVALID, token.NoPos, token.NoPos, 0
+		}
+		return token.IN, t.Pos, t.End, 1
+
+	case token.IDENT:
+		// `as`, `as const`, and `satisfies` bind at relational precedence but
+		// are IDENT tokens, so they are not in the precedence table (§3). They
+		// are handled by parsePostfixTypeOps instead, which runs below unary.
+		return token.INVALID, token.NoPos, token.NoPos, 0
+	}
+
+	if t.Kind.IsBinaryOperator() {
+		return t.Kind, t.Pos, t.End, 1
+	}
+	return token.INVALID, token.NoPos, token.NoPos, 0
+}
+
+func (p *parser) checkCoalesceMix(x *ast.BinaryExpr) {
+	mixes := func(y ast.Expr) bool {
+		b, ok := y.(*ast.BinaryExpr)
+		if !ok {
+			return false
+		}
+		switch x.Op {
+		case token.COALESCE:
+			return b.Op == token.LOR || b.Op == token.LAND
+		default:
+			return b.Op == token.COALESCE
+		}
+	}
+	if mixes(x.X) || mixes(x.Y) {
+		p.errorAt(x.OpPos, x.OpEnd,
+			"`??` cannot be mixed with `||` or `&&` without parentheses")
+	}
+}
+
+// parseUnary is UnaryExpression (B.4).
+func (p *parser) parseUnary() ast.Expr {
+	if !p.enter() {
+		return p.badExpr()
+	}
+	defer p.leave()
+
+	switch k := p.kind(); k {
+	case token.DELETE, token.VOID, token.TYPEOF, token.ADD, token.SUB,
+		token.TILDE, token.NOT:
+		t := p.next()
+		return &ast.UnaryExpr{OpPos: t.Pos, Op: k, X: p.parseUnary()}
 
 	case token.AWAIT:
-		// Parsed unconditionally. Whether the enclosing body licenses it is a
-		// static rule, and a keyword needs no context to recognize.
-		pos := p.tok.Pos
-		p.advanceToken()
-		return &ast.AwaitExpr{Await: pos, X: p.parseUnaryExpr()}
+		t := p.next()
+		return &ast.AwaitExpr{AwaitPos: t.Pos, X: p.parseUnary()}
 
-	case token.VAR:
-		// The ownership marker. Its operand is written as a full unary
-		// expression so that `var f(a)` and `var items[0]` parse and reach the
-		// analyzer as transfers of a computed value rather than as syntax
-		// errors. There is no TransferTarget production to restrict it to.
-		pos := p.tok.Pos
-		p.advanceToken()
-		return &ast.TransferExpr{Var: pos, Target: p.parseUnaryExpr()}
-	}
-	return p.parsePostfixExpr()
-}
+	case token.INC, token.DEC:
+		t := p.next()
+		return &ast.UpdateExpr{OpPos: t.Pos, OpEnd: t.End, Op: k, Prefix: true, X: p.parseUnary()}
 
-// parsePostfixExpr handles a launch prefix, then the `&` chain, then the
-// postfix operators.
-func (p *parser) parsePostfixExpr() ast.Expr {
-	if x := p.tryParseLaunch(); x != nil {
-		return x
-	}
-	return p.parsePostfixOps(p.parsePointerPrimary())
-}
-
-// tryParseLaunch parses a launch expression, or returns nil.
-//
-// The one-token lookahead is the whole reason for the peek: it is what keeps
-// `npu.Dot(a, b)` a namespace member access rather than a launch of a member
-// call, and it applies uniformly to async, gpu, and npu. `thread` is not a
-// namespace and needs no lookahead.
-func (p *parser) tryParseLaunch() ast.Expr {
-	kw := p.tok.Kind
-	switch kw {
-	case token.THREAD:
-	case token.ASYNC, token.GPU, token.NPU:
-		if p.peek().Kind == token.PERIOD {
-			return nil
-		}
-	default:
-		return nil
+	case token.LT:
+		// `< Type > UnaryExpression` (B.4).
+		//
+		// §1 claims this production owns the prefix-`<` position with no
+		// competing reading. It does not: a generic arrow head is also `<`
+		// (D.2, via ArrowFormalParameters), and §6.1 item 3 says as much. The
+		// generic-arrow attempt already ran in tryArrow before we got here, so
+		// reaching this point means it failed — which makes the assertion
+		// reading correct by elimination rather than by uniqueness.
+		return p.parseTypeAssert()
 	}
 
-	x := &ast.LaunchExpr{KwPos: p.tok.Pos, Kw: kw}
-	p.advanceToken()
-
-	// A launch config is written only on gpu. A config on another prefix has
-	// no production, so `async (blocks: …)` reads as an ordinary call and is
-	// diagnosed by whatever the call turns out to be.
-	if kw == token.GPU && p.at(token.LPAREN) {
-		x.Config = p.parseLaunchConfig()
-	}
-
-	call := p.parsePostfixOps(p.parsePointerPrimary())
-	x.Call = p.requireCall(call, kw.Spelling())
+	x := p.parsePostfix(p.parseLHS())
 	return x
 }
 
-// parseLaunchConfig parses `( "blocks" : E , "threads" : E )`. Fixed arity and
-// fixed names, so it is not a general argument list and the names are not
-// recorded.
-func (p *parser) parseLaunchConfig() *ast.LaunchConfig {
-	c := &ast.LaunchConfig{}
-	c.Lparen = p.open(token.LPAREN)
-	p.withLit(func() {
-		if !p.atCtx(token.CtxBlocks) {
-			p.errorHere(diag.ExpectedToken, "'blocks'", p.describe(p.tok))
-		} else {
-			p.advanceToken()
-		}
-		p.expect(token.COLON)
-		c.Blocks = p.parseExpr()
-		p.expect(token.COMMA)
-		if !p.atCtx(token.CtxThreads) {
-			p.errorHere(diag.ExpectedToken, "'threads'", p.describe(p.tok))
-		} else {
-			p.advanceToken()
-		}
-		p.expect(token.COLON)
-		c.Threads = p.parseExpr()
-	})
-	c.Rparen = p.close(token.RPAREN)
-	return c
+func (p *parser) parseTypeAssert() ast.Expr {
+	langle := p.next().Pos
+	t := p.parseType()
+	rangle := p.expect(token.GT)
+	return &ast.TypeAssertExpr{Langle: langle, Type: t, Rangle: rangle, X: p.parseUnary()}
 }
 
-// parsePointerPrimary implements `Operand | "&" PointerPrimary`.
-//
-// `&` binds tighter than member access, so it wraps an operand and the postfix
-// loop runs outside it: `&p.add(1)` is `(&p).add(1)`.
-func (p *parser) parsePointerPrimary() ast.Expr {
-	if p.at(token.AND) {
-		pos := p.tok.Pos
-		p.advanceToken()
-		return &ast.UnaryExpr{OpPos: pos, Op: token.AND, X: p.parsePointerPrimary()}
-	}
-	return p.parsePrimaryExpr()
-}
-
-func (p *parser) parsePostfixOps(x ast.Expr) ast.Expr {
-	for {
-		if !p.continues() {
-			return x
-		}
-		switch p.tok.Kind {
-		case token.PERIOD:
-			dot := p.tok.Pos
-			p.advanceToken()
-			if p.at(token.INT) {
-				// Positional tuple access. The scanner has already decided
-				// this is an index rather than a float, under the one
-				// restriction to longest-match scanning, so the digits arrive
-				// as their own token; that the spelling must be decimal and
-				// free of `_` is a static rule.
-				x = &ast.TupleIndexExpr{
-					X: x, Dot: dot,
-					IndexPos: p.tok.Pos,
-					Text:     p.tok.Lit,
-				}
-				p.advanceToken()
-				continue
-			}
-			x = &ast.SelectorExpr{X: x, Dot: dot, Sel: p.expectIdent()}
-
-		case token.LBRACK:
-			// Index and TypeArgs are one node. Which reading applies is
-			// settled by what the operand denotes, not by shape, so the parser
-			// records the brackets and stops.
-			ix := &ast.IndexExpr{X: x}
-			ix.Lbrack = p.open(token.LBRACK)
-			p.withLit(func() {
-				for !p.at(token.RBRACK) && !p.at(token.EOF) {
-					before := p.tok.Pos
-					ix.Indices = append(ix.Indices, p.parseExprOrType())
-					if !p.got(token.COMMA) {
-						break
-					}
-					if p.stalled(before) {
-						continue
-					}
-				}
-			})
-			ix.Rbrack = p.close(token.RBRACK)
-			x = ix
-
-		case token.LPAREN:
-			x = p.parseCallSuffix(x)
-
-		case token.LBRACE:
-			// A composite literal. Suppressed inside a control-flow header,
-			// and never begun after a line break at depth zero, since a name
-			// on one line followed by a block on the next is two constructs.
-			if p.noLit || !p.isTypeLike(x) {
-				return x
-			}
-			x = p.parseCompositeLitBody(x)
-
-		default:
-			return x
-		}
-	}
-}
-
-func (p *parser) parseCallSuffix(fun ast.Expr) ast.Expr {
-	c := &ast.CallExpr{Fun: fun}
-	c.Lparen = p.open(token.LPAREN)
-	p.withLit(func() {
-		c.Args = p.parseArgumentList(fun)
-	})
-	c.Rparen = p.close(token.RPAREN)
-	return c
-}
-
-// parseArgumentList parses Arguments.
-//
-// Three reserved builtin names take a Type in argument position: sizeof and
-// alignof take one, reinterpret takes one followed by an expression. The parser
-// recognizes them by name, which is sound only because a reserved builtin name
-// may not be shadowed or declared — without that guarantee this would be a
-// hack. The type argument leaves its own trace in the tree, since `[3]int32`
-// parses as an array type where an expression would have been an array literal.
-func (p *parser) parseArgumentList(fun ast.Expr) []ast.Expr {
-	typeFirst := false
-	if id, ok := fun.(*ast.Ident); ok {
-		typeFirst = token.IsTypeOperator(id.Name)
-	}
-
-	var args []ast.Expr
-	for !p.at(token.RPAREN) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		if typeFirst && len(args) == 0 {
-			args = append(args, p.parseType())
-		} else {
-			args = append(args, p.parseArgument())
-		}
-		if !p.got(token.COMMA) {
-			break
-		}
-		if p.stalled(before) {
-			continue
-		}
-	}
-	return args
-}
-
-// parseArgument parses one Argument: an owning expression, or `name: value`.
-// Mixing named and positional arguments is a static rule, so both shapes land
-// in the same slice.
-func (p *parser) parseArgument() ast.Expr {
-	x := p.parseExpr()
-	if id, ok := x.(*ast.Ident); ok && p.at(token.COLON) {
-		colon := p.tok.Pos
-		p.advanceToken()
-		return &ast.KeyValueExpr{Key: id, Colon: colon, Value: p.parseExpr()}
-	}
-	return x
-}
-
-func (p *parser) parsePrimaryExpr() ast.Expr {
-	pos := p.tok.Pos
-
-	switch p.tok.Kind {
-	case token.IDENT:
-		x := &ast.Ident{NamePos: pos, Name: p.tok.Lit}
-		p.advanceToken()
-		return x
-
-	case token.INT, token.FLOAT, token.CHAR, token.STRING,
-		token.TRUE, token.FALSE, token.NIL:
-		x := &ast.BasicLit{ValuePos: pos, Kind: p.tok.Kind, Value: p.tok.Lit}
-		if x.Value == "" {
-			x.Value = p.tok.Kind.Spelling() // true / false / nil carry no Lit
-		}
-		p.advanceToken()
-		return x
-
-	case token.ASYNC, token.GPU, token.NPU:
-		// A namespace name, which appears only as the operand of a selector.
-		// A launch prefix was already ruled out by tryParseLaunch's lookahead.
-		x := &ast.NamespaceExpr{KwPos: pos, Kw: p.tok.Kind}
-		p.advanceToken()
-		return x
-
-	case token.CHAN:
-		// `chan` is not a namespace: its expression form is the constructor,
-		// and its type form writes no brackets, so the two never compete.
-		return p.parseChanConstructor()
-
-	case token.UNIQUE, token.SHARED, token.WEAK:
-		// A heap constructor is spelled with a keyword and so cannot be an
-		// ordinary call over a reserved name. Without its own node the shape
-		// would collide: `unique (T)` is an ownership type over a
-		// parenthesized type, and once types are expressions that is
-		// indistinguishable from the constructor.
-		if p.peek().Kind == token.LPAREN {
-			return p.parseHeapConstructor()
-		}
-		return p.parseType()
-
-	case token.LPAREN:
-		return p.parseParenOrTuple()
-
-	case token.LBRACK:
-		lit := &ast.ArrayLit{}
-		lit.Lbrack = p.open(token.LBRACK)
-		p.withLit(func() {
-			for !p.at(token.RBRACK) && !p.at(token.EOF) {
-				before := p.tok.Pos
-				lit.Elems = append(lit.Elems, p.parseExpr())
-				if !p.got(token.COMMA) {
-					break
-				}
-				if p.stalled(before) {
-					continue
-				}
-			}
-		})
-		lit.Rbrack = p.close(token.RBRACK)
-		return lit
-
-	case token.LBRACE:
-		if p.noLit {
-			// A map literal reached with an operand expected inside a header.
-			// It is ungrammatical here rather than merely unparsed, so the
-			// diagnostic names the fix and the literal is parsed anyway,
-			// leaving the following brace to open the block.
-			p.reportLiteralInHeader(pos, p.headerKw)
-			var x ast.Expr
-			p.withLit(func() { x = p.parseMapLit() })
-			return x
-		}
-		return p.parseMapLit()
-
-	case token.PERIOD:
-		return p.parseEnumShorthand()
-
-	case token.FUNC:
-		// A function literal begins with all enclosing parse context cleared
-		// and re-establishes it from its own marker; the marker lives on the
-		// signature, and the body's block resets termination state itself.
-		ft := p.parseSignature(p.tok.Pos, false)
-		if p.at(token.LBRACE) {
-			return &ast.FuncLit{Type: ft, Body: p.parseBlockStmt()}
-		}
-		return ft
-
-	case token.MAP, token.TYPED_PTR, token.TENSOR, token.VECTOR,
-		token.ABSTRACT, token.MUT:
-		// A type in expression position. It is grammatical in a few places — a
-		// type argument, a sizeof operand, the callee of a vector call — and a
-		// static error elsewhere; either way the shape is a type.
-		return p.parseType()
-	}
-
-	p.errorHere(diag.ExpectedExpr, p.describe(p.tok))
-	bad := &ast.BadExpr{From: pos, To: p.tok.End()}
-	p.advance(stmtStart)
-	return bad
-}
-
-// parseParenOrTuple resolves `(x)`, `(x,)`, and `(a, b)`.
-//
-// A one-element tuple requires its trailing comma; `(1)` is a parenthesized
-// integer. The same distinction does not exist for the type form, where a
-// parenthesized single type is that type — which falls out, since both produce
-// the same node here. A tuple has at least one element and there is no unit
-// type, so `()` has no production at all.
-func (p *parser) parseParenOrTuple() ast.Expr {
-	lparen := p.open(token.LPAREN)
-
-	if p.at(token.RPAREN) {
-		rparen := p.close(token.RPAREN)
-		p.errorSpan(diag.EmptyTuple, lparen, rparen+1)
-		return &ast.BadExpr{From: lparen, To: rparen + 1}
-	}
-
-	var elems []ast.Expr
-	trailing := false
-	p.withLit(func() {
-		for {
-			elems = append(elems, p.parseTupleElement())
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.at(token.RPAREN) || p.at(token.EOF) {
-				trailing = true
-				break
-			}
-		}
-	})
-	rparen := p.close(token.RPAREN)
-
-	if len(elems) == 1 && !trailing {
-		return &ast.ParenExpr{Lparen: lparen, X: elems[0], Rparen: rparen}
-	}
-	return &ast.TupleExpr{
-		Lparen: lparen, Elems: elems,
-		TrailingComma: trailing, Rparen: rparen,
-	}
-}
-
-// parseTupleElement parses `[ identifier ":" ] Type` and
-// `[ identifier ":" ] OwningExpr` at once — the two are the same shape once
-// types are expressions.
-func (p *parser) parseTupleElement() ast.Expr {
-	x := p.parseExprOrType()
-	if id, ok := x.(*ast.Ident); ok && p.at(token.COLON) {
-		colon := p.tok.Pos
-		p.advanceToken()
-		return &ast.KeyValueExpr{Key: id, Colon: colon, Value: p.parseExprOrType()}
-	}
-	return x
-}
-
-func (p *parser) parseCompositeLitBody(typ ast.Expr) ast.Expr {
-	lit := &ast.CompositeLit{Type: typ}
-	lit.Lbrace = p.open(token.LBRACE)
-	p.withLit(func() {
-		for !p.at(token.RBRACE) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			lit.Elems = append(lit.Elems, p.parseFieldValue())
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.stalled(before) {
-				continue
-			}
-		}
-	})
-	lit.Rbrace = p.close(token.RBRACE)
-	return lit
-}
-
-// parseFieldValue parses `identifier ":" OwningExpr`. That the key must be an
-// identifier is what separates a composite literal from a map literal; a
-// non-identifier key parses and is rejected.
-func (p *parser) parseFieldValue() ast.Expr {
-	key := p.parseExpr()
-	if !p.at(token.COLON) {
-		return key
-	}
-	colon := p.tok.Pos
-	p.advanceToken()
-	return &ast.KeyValueExpr{Key: key, Colon: colon, Value: p.parseExpr()}
-}
-
-// parseMapLit parses a braced literal with no type prefix. Its keys are
-// arbitrary expressions, unlike a composite literal's field names.
-func (p *parser) parseMapLit() ast.Expr {
-	lit := &ast.MapLit{}
-	lit.Lbrace = p.open(token.LBRACE)
-	p.withLit(func() {
-		for !p.at(token.RBRACE) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			key := p.parseExpr()
-			colon := p.expect(token.COLON)
-			val := p.parseExpr()
-			lit.Elems = append(lit.Elems, &ast.KeyValueExpr{Key: key, Colon: colon, Value: val})
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.stalled(before) {
-				continue
-			}
-		}
-	})
-	lit.Rbrace = p.close(token.RBRACE)
-	return lit
-}
-
-// parseEnumShorthand parses `.identifier` or `.identifier(args)` in expression
-// position. That the enum type must be fixed by context is a static rule.
-func (p *parser) parseEnumShorthand() ast.Expr {
-	x := &ast.EnumShorthand{Dot: p.tok.Pos}
-	p.advanceToken()
-	x.Name = p.expectIdent()
-	if p.at(token.LPAREN) {
-		x.Lparen = p.open(token.LPAREN)
-		p.withLit(func() {
-			for !p.at(token.RPAREN) && !p.at(token.EOF) {
-				before := p.tok.Pos
-				x.Args = append(x.Args, p.parseArgument())
-				if !p.got(token.COMMA) {
-					break
-				}
-				if p.stalled(before) {
-					continue
-				}
-			}
-		})
-		x.Rparen = p.close(token.RPAREN)
-	}
-	return x
-}
-
-// parseChanConstructor parses `chan [ Type ] ( [ Expression ] )`, the only
-// expression form of chan. The optional argument is the capacity.
-func (p *parser) parseChanConstructor() ast.Expr {
-	c := &ast.ChanConstructor{Chan: p.expect(token.CHAN)}
-	c.Lbrack = p.open(token.LBRACK)
-	c.Elem = p.parseType()
-	c.Rbrack = p.close(token.RBRACK)
-	c.Lparen = p.open(token.LPAREN)
-	p.withLit(func() {
-		if !p.at(token.RPAREN) && !p.at(token.EOF) {
-			c.Cap = p.parseExpr()
-		}
-	})
-	c.Rparen = p.close(token.RPAREN)
-	return c
-}
-
-// parseHeapConstructor parses `unique(x)`, `shared(x)`, or `weak(x)`.
-func (p *parser) parseHeapConstructor() ast.Expr {
-	h := &ast.HeapConstructor{KwPos: p.tok.Pos, Kw: p.tok.Kind}
-	p.advanceToken()
-	h.Lparen = p.open(token.LPAREN)
-	p.withLit(func() { h.X = p.parseExpr() })
-	h.Rparen = p.close(token.RPAREN)
-	return h
-}
-
-// ------------------------------------------------------------------ types
-
-// startsTypeOnly reports whether the current token can begin a type and cannot
-// begin an expression.
-func (p *parser) startsTypeOnly() bool {
-	switch p.tok.Kind {
-	case token.MAP, token.TYPED_PTR, token.TENSOR, token.VECTOR,
-		token.ABSTRACT, token.MUT, token.UNIQUE, token.SHARED, token.WEAK,
-		token.CHAN, token.FUNC:
-		return true
-	}
-	return false
-}
-
-// startsType reports whether the current token can begin a type at all. It is
-// the one-token decision that separates `[3]int32` from `[3]`.
-func (p *parser) startsType() bool {
-	if p.startsTypeOnly() {
-		return true
-	}
-	switch p.tok.Kind {
-	case token.IDENT, token.LPAREN, token.LBRACK:
-		return true
-	}
-	return false
-}
-
-// parseExprOrType parses an index operand or a type argument, which the grammar
-// makes deliberately ambiguous: `Stack[int32]` and `a[i]` share bracket syntax
-// and are resolved by what the operand denotes, not by shape.
-//
-// `chan` resolves toward the type reading here. Its constructor form writes an
-// argument list after the brackets, but a channel of array type writes brackets
-// too, and a type argument is the far likelier reading in this position.
-func (p *parser) parseExprOrType() ast.Expr {
-	if p.startsTypeOnly() {
-		return p.parseType()
-	}
-	if p.at(token.LBRACK) {
-		return p.parseBracketedTypeOrArray()
-	}
-	if p.at(token.VAR) {
-		// In a type-argument position `var T` is the ownership qualifier, not
-		// the transfer marker: a type argument is not an owning position.
-		return p.parseType()
-	}
-	return p.parseExpr()
-}
-
-// parseBracketedTypeOrArray resolves a `[` in a position admitting both an
-// array literal and an array or slice type.
-//
-// `[]T` is unambiguous. Otherwise the decision is made after the closing
-// bracket: a type following it means the brackets held a length, and anything
-// else means they held elements.
-func (p *parser) parseBracketedTypeOrArray() ast.Expr {
-	lbrack := p.open(token.LBRACK)
-
-	if p.at(token.RBRACK) {
-		rbrack := p.close(token.RBRACK)
-		return &ast.ArrayType{Lbrack: lbrack, Rbrack: rbrack, Elem: p.parseType()}
-	}
-
-	var elems []ast.Expr
-	trailing := false
-	p.withLit(func() {
-		for !p.at(token.RBRACK) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			elems = append(elems, p.parseExpr())
-			if !p.got(token.COMMA) {
-				break
-			}
-			trailing = true
-			if p.stalled(before) {
-				continue
-			}
-		}
-	})
-	rbrack := p.close(token.RBRACK)
-
-	if len(elems) == 1 && !trailing && p.startsType() {
-		return &ast.ArrayType{Lbrack: lbrack, Len: elems[0], Rbrack: rbrack, Elem: p.parseType()}
-	}
-	return &ast.ArrayLit{Lbrack: lbrack, Elems: elems, Rbrack: rbrack}
-}
-
-func (p *parser) parseType() ast.Expr {
-	pos := p.tok.Pos
-
-	switch p.tok.Kind {
-	case token.IDENT:
-		// A type name, qualified or instantiated. Predeclared type names,
-		// tensor element names, and constraint names all arrive here as
-		// ordinary identifiers.
-		var x ast.Expr = &ast.Ident{NamePos: pos, Name: p.tok.Lit}
-		p.advanceToken()
-		if p.at(token.PERIOD) {
-			dot := p.tok.Pos
-			p.advanceToken()
-			x = &ast.SelectorExpr{X: x, Dot: dot, Sel: p.expectIdent()}
-		}
-		if p.at(token.LBRACK) {
-			ix := &ast.IndexExpr{X: x}
-			ix.Lbrack = p.open(token.LBRACK)
-			for !p.at(token.RBRACK) && !p.at(token.EOF) {
-				before := p.tok.Pos
-				ix.Indices = append(ix.Indices, p.parseType())
-				if !p.got(token.COMMA) {
-					break
-				}
-				if p.stalled(before) {
-					continue
-				}
-			}
-			ix.Rbrack = p.close(token.RBRACK)
-			x = ix
-		}
-		return x
-
-	case token.MUT, token.VAR, token.UNIQUE, token.SHARED, token.WEAK:
-		// Qualifiers do not stack, but a stacked form parses and is rejected,
-		// so the recursion is unguarded here.
-		kw := p.tok.Kind
-		p.advanceToken()
-		return &ast.OwnershipType{KwPos: pos, Kw: kw, X: p.parseType()}
-
-	case token.LBRACK:
-		lbrack := p.open(token.LBRACK)
-		if p.at(token.RBRACK) {
-			rbrack := p.close(token.RBRACK)
-			return &ast.ArrayType{Lbrack: lbrack, Rbrack: rbrack, Elem: p.parseType()}
-		}
-		var length ast.Expr
-		p.withLit(func() { length = p.parseExpr() })
-		rbrack := p.close(token.RBRACK)
-		return &ast.ArrayType{Lbrack: lbrack, Len: length, Rbrack: rbrack, Elem: p.parseType()}
-
-	case token.MAP:
-		t := &ast.MapType{Map: pos}
-		p.advanceToken()
-		t.Lbrack = p.open(token.LBRACK)
-		t.Key = p.parseType()
-		t.Rbrack = p.close(token.RBRACK)
-		t.Value = p.parseType()
-		return t
-
-	case token.CHAN:
-		// A channel type carries no direction and writes no brackets.
-		p.advanceToken()
-		return &ast.ChanType{Chan: pos, Elem: p.parseType()}
-
-	case token.TYPED_PTR:
-		// One may not be the direct base of another, so a nested form is
-		// written with parentheses and arrives with a parenthesized element.
-		// The recursion is unguarded so the unparenthesized form still parses.
-		p.advanceToken()
-		return &ast.PointerType{Kw: pos, Elem: p.parseType()}
-
-	case token.TENSOR:
-		return p.parseTensorType()
-
-	case token.VECTOR:
-		return p.parseVectorType()
-
-	case token.ABSTRACT:
-		p.advanceToken()
-		return &ast.AbstractType{Abstract: pos}
-
-	case token.FUNC:
-		return p.parseSignature(pos, false)
-
-	case token.LPAREN:
-		return p.parseParenOrTuple()
-	}
-
-	p.errorHere(diag.ExpectedType, p.describe(p.tok))
-	bad := &ast.BadExpr{From: pos, To: p.tok.End()}
-	p.advanceToken()
-	return bad
-}
-
-// parseTensorType parses `tensor [ ElementType , ShapeList ]`. Legal only
-// inside an npu-marked function; elsewhere it parses and is rejected.
-func (p *parser) parseTensorType() ast.Expr {
-	t := &ast.TensorType{Tensor: p.expect(token.TENSOR)}
-	t.Lbrack = p.open(token.LBRACK)
-	t.Elem = p.parseType()
-	for p.got(token.COMMA) {
-		if p.at(token.RBRACK) || p.at(token.EOF) {
-			break
-		}
-		var dim ast.Expr
-		p.withLit(func() { dim = p.parseExpr() })
-		t.Shape = append(t.Shape, dim)
-	}
-	if len(t.Shape) == 0 {
-		p.errorHere(diag.ExpectedToken, "a shape list", p.describe(p.tok))
-	}
-	t.Rbrack = p.close(token.RBRACK)
-	return t
-}
-
-// parseVectorType parses `vector [ ElementType , int_lit ]`. As the callee of a
-// call it makes that call a vector call; no ordinary call reading applies.
-func (p *parser) parseVectorType() ast.Expr {
-	t := &ast.VectorType{Vector: p.expect(token.VECTOR)}
-	t.Lbrack = p.open(token.LBRACK)
-	t.Elem = p.parseType()
-	t.Comma = p.expect(token.COMMA)
-	p.withLit(func() { t.Len = p.parseExpr() })
-	t.Rbrack = p.close(token.RBRACK)
-	return t
-}
-
-// ------------------------------------------------------------- signatures
-
-// parseSignature parses `Parameters { FunctionMarker } [ Result ]`, sharing one
-// routine across every construct that names a function shape.
-//
-// declResult admits the Expected result form, which reaches the grammar only
-// through a function or method declaration. That is what keeps an Expected
-// result out of a function type or a function literal syntactically.
-//
-// A signature carries at most one marker, but the repetition is written so that
-// more than one parses; all of them are kept and the extras are rejected later.
-func (p *parser) parseSignature(funcPos token.Pos, declResult bool) *ast.FuncType {
-	ft := &ast.FuncType{Func: funcPos}
-	if p.at(token.FUNC) {
-		ft.Func = p.expect(token.FUNC)
-	}
-	ft.Params = p.parseParamList()
-	ft.Markers = p.parseMarkers()
-
-	if p.at(token.ARROW) {
-		ft.Arrow = p.tok.Pos
-		p.advanceToken()
-		if declResult && p.atCtx(token.CtxExpected) && p.peek().Kind == token.LPAREN {
-			ft.Result = p.parseExpectedType()
-		} else {
-			ft.Result = p.parseType()
-		}
-	}
-	return ft
-}
-
-// parseExpectedType parses the test result form. `Expected` and `error` are
-// ordinary identifiers, so this is a call node with an identifier callee; its
-// arity and argument shape are static rules.
-func (p *parser) parseExpectedType() ast.Expr {
-	fun := p.expectIdent()
-	c := &ast.CallExpr{Fun: fun}
-	c.Lparen = p.open(token.LPAREN)
-	p.withLit(func() {
-		for !p.at(token.RPAREN) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			if p.at(token.STRING) {
-				c.Args = append(c.Args, p.parseImportPath())
-			} else {
-				c.Args = append(c.Args, p.parseType())
-			}
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.stalled(before) {
-				continue
-			}
-		}
-	})
-	c.Rparen = p.close(token.RPAREN)
-	return c
-}
-
-// parseMarkers collects every FunctionMarker written. `test` is a contextual
-// keyword and arrives as an identifier, which is why the node records a name
-// alongside a kind.
-func (p *parser) parseMarkers() []*ast.Marker {
-	var out []*ast.Marker
+// parsePostfix applies the postfix operators that bind tighter than any binary
+// operator: `++`, `--`, `!`, `as`, and `satisfies`.
+func (p *parser) parsePostfix(x ast.Expr) ast.Expr {
 	for {
 		switch {
-		case p.at(token.ASYNC), p.at(token.GPU), p.at(token.NPU):
-			out = append(out, &ast.Marker{
-				MarkerPos: p.tok.Pos, Kind: p.tok.Kind, Name: p.tok.Kind.Spelling(),
-			})
-			p.advanceToken()
-		case p.atCtx(token.CtxTest):
-			out = append(out, &ast.Marker{
-				MarkerPos: p.tok.Pos, Kind: token.IDENT, Name: token.CtxTest,
-			})
-			p.advanceToken()
+		case (p.at(token.INC) || p.at(token.DEC)) && !p.nlBefore():
+			// LeftHandSideExpression [no LineTerminator here] ++ / -- (L).
+			t := p.next()
+			x = &ast.UpdateExpr{OpPos: t.Pos, OpEnd: t.End, Op: t.Kind, X: x}
+
+		case p.atCtx(token.CtxAs) && !p.nlBefore():
+			// RelationalExpression [no LineTerminator here] as Type / as const
+			t := p.next()
+			as := &ast.AsExpr{X: x, OpPos: t.Pos, Op: token.CtxAs}
+			if p.at(token.CONST) {
+				c := p.next()
+				as.IsConst = true
+				as.ConstEnd = c.End
+			} else {
+				as.Type = p.parseType()
+			}
+			x = as
+
+		case p.atCtx(token.CtxSatisfies) && !p.nlBefore():
+			t := p.next()
+			x = &ast.AsExpr{X: x, OpPos: t.Pos, Op: token.CtxSatisfies, Type: p.parseType()}
+
 		default:
-			return out
+			return x
 		}
 	}
 }
 
-func (p *parser) parseParamList() *ast.ParamList {
-	l := &ast.ParamList{}
-	l.Lparen = p.open(token.LPAREN)
-	for !p.at(token.RPAREN) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		l.List = append(l.List, p.parseParam())
+// parseLHS is LeftHandSideExpression (B.3): NewExpression, CallExpression, and
+// OptionalExpression, which share a left-recursive suffix loop.
+func (p *parser) parseLHS() ast.Expr {
+	var x ast.Expr
+
+	switch {
+	case p.at(token.NEW):
+		x = p.parseNew()
+	case p.at(token.SUPER):
+		t := p.next()
+		x = &ast.SuperExpr{SuperPos: t.Pos, SuperEnd: t.End}
+	case p.at(token.IMPORT):
+		x = p.parseImportExpr()
+	default:
+		x = p.parsePrimary()
+	}
+	return p.parseSuffixes(x)
+}
+
+// parseSuffixes is the member / call / optional-chain loop (B.3).
+func (p *parser) parseSuffixes(x ast.Expr) ast.Expr {
+	for {
+		switch {
+		case p.at(token.PERIOD):
+			dot := p.next().Pos
+			x = &ast.MemberExpr{X: x, Dot: dot, Sel: p.parseMemberName()}
+
+		case p.at(token.QUESTION_DOT):
+			dot := p.next().Pos
+			switch {
+			case p.at(token.LPAREN):
+				x = p.finishCall(x, nil, true)
+			case p.at(token.LBRACK):
+				x = p.finishIndex(x, true)
+			default:
+				x = &ast.MemberExpr{X: x, Optional: true, Dot: dot, Sel: p.parseMemberName()}
+			}
+
+		case p.at(token.LBRACK):
+			x = p.finishIndex(x, false)
+
+		case p.at(token.LPAREN):
+			x = p.finishCall(x, nil, false)
+
+		case p.at(token.TEMPLATE) || p.at(token.TEMPLATE_HEAD):
+			x = &ast.TaggedTemplateExpr{Tag: x, Template: p.parseTemplate()}
+
+		case p.at(token.NOT) && !p.nlBefore():
+			// MemberExpression / CallExpression / OptionalChain
+			// [no LineTerminator here] ! (B.3, L).
+			t := p.next()
+			x = &ast.NonNullExpr{X: x, Bang: t.Pos, BangEnd: t.End}
+
+		case p.at(token.LT) && !p.nlBefore():
+			// Instantiation expressions (§6.1 site 1). Speculate
+			// TypeArguments; commit only if it closes *and* the next token is
+			// in InstantiationFollowSet. This stands in for a cover
+			// nonterminal — the grammar states the rule declaratively and the
+			// parser pays for it here.
+			var args *ast.TypeArgList
+			ok := p.speculate(func() bool {
+				args = p.parseTypeArgs()
+				if args == nil || args.Rangle == token.NoPos {
+					return false
+				}
+				return p.at(token.LPAREN) || p.at(token.TEMPLATE) ||
+					p.at(token.TEMPLATE_HEAD) || p.inInstantiationFollowSet()
+			})
+			if !ok {
+				return x
+			}
+			switch {
+			case p.at(token.LPAREN):
+				x = p.finishCall(x, args, false)
+			case p.at(token.TEMPLATE) || p.at(token.TEMPLATE_HEAD):
+				x = &ast.TaggedTemplateExpr{Tag: x, TypeArgs: args, Template: p.parseTemplate()}
+			default:
+				x = &ast.InstantiationExpr{X: x, TypeArgs: args}
+			}
+
+		default:
+			return x
+		}
+	}
+}
+
+// inInstantiationFollowSet implements the named set in B.3.
+//
+// The `>` entries are single GT tokens here, since the scanner never merges
+// them — a `>>` in the source is two members of this set in a row, and neither
+// is in it.
+func (p *parser) inInstantiationFollowSet() bool {
+	switch p.kind() {
+	case token.LPAREN, token.TEMPLATE, token.TEMPLATE_HEAD, token.RPAREN,
+		token.RBRACK, token.RBRACE, token.COLON, token.SEMI, token.COMMA,
+		token.QUESTION, token.ASSIGN, token.EQL, token.STRICT_EQL, token.NEQ,
+		token.STRICT_NEQ, token.OR, token.AND, token.LOR, token.LAND,
+		token.COALESCE, token.EOF:
+		return true
+	}
+	return false
+}
+
+func (p *parser) parseMemberName() ast.Node {
+	if p.at(token.PRIVATE_IDENT) {
+		t := p.next()
+		return &ast.PrivateIdent{HashPos: t.Pos, NameEnd: t.End}
+	}
+	return p.parseIdentName()
+}
+
+func (p *parser) finishIndex(x ast.Expr, optional bool) ast.Expr {
+	lb := p.next().Pos
+	idx := p.parseExpr(allowIn)
+	return &ast.IndexExpr{X: x, Optional: optional, Lbrack: lb, Index: idx, Rbrack: p.expect(token.RBRACK)}
+}
+
+func (p *parser) finishCall(fun ast.Expr, args *ast.TypeArgList, optional bool) ast.Expr {
+	lp := p.next().Pos
+	call := &ast.CallExpr{Fun: fun, Optional: optional, TypeArgs: args, Lparen: lp}
+	call.Args = p.parseArgs()
+	call.Rparen = p.expect(token.RPAREN)
+	return call
+}
+
+// parseArgs is ArgumentList (B.3), including the trailing comma, which leaves
+// no trace (§5.4).
+func (p *parser) parseArgs() []ast.Expr {
+	var out []ast.Expr
+	for !p.at(token.RPAREN) && !p.atEOF() {
+		before := p.i
+		if p.at(token.ELLIPSIS) {
+			t := p.next()
+			out = append(out, &ast.SpreadElem{Ellipsis: t.Pos, X: p.parseAssign(allowIn)})
+		} else {
+			out = append(out, p.parseAssign(allowIn))
+		}
 		if !p.got(token.COMMA) {
 			break
 		}
-		if p.stalled(before) {
-			continue
-		}
+		p.advanced(before)
 	}
-	l.Rparen = p.close(token.RPAREN)
-	return l
+	return out
 }
 
-// parseParam parses `[ identifier ":" ] [ "..." ] Type`. The bare-type form is
-// what a function type's parameter list produces; that names must be either all
-// present or all absent within one list is a static rule, so a mixed list
-// parses.
-func (p *parser) parseParam() *ast.Param {
-	prm := &ast.Param{Doc: p.leadComment}
+func (p *parser) parseNew() ast.Expr {
+	newPos := p.next().Pos
 
-	if p.at(token.IDENT) && p.peek().Kind == token.COLON {
-		prm.Name = p.expectIdent()
-		prm.Colon = p.expect(token.COLON)
+	// NewTarget: `new . target` (B.3).
+	if p.at(token.PERIOD) {
+		p.next()
+		return &ast.MetaProp{MetaPos: newPos, Meta: token.NEW, Prop: p.parseIdentName()}
 	}
+
+	// `new NewExpression` with no arguments is its own production, so the
+	// callee is parsed without the call suffix and Lparen stays NoPos.
+	callee := p.parseMemberOnly()
+	n := &ast.NewExpr{NewPos: newPos, Callee: callee}
+
+	if p.at(token.LT) {
+		p.speculate(func() bool {
+			args := p.parseTypeArgs()
+			if args == nil || args.Rangle == token.NoPos || !p.at(token.LPAREN) {
+				return false
+			}
+			n.TypeArgs = args
+			return true
+		})
+	}
+	if p.at(token.LPAREN) {
+		n.Lparen = p.next().Pos
+		n.Args = p.parseArgs()
+		n.Rparen = p.expect(token.RPAREN)
+	}
+	return n
+}
+
+// parseMemberOnly parses a MemberExpression without consuming a call, for the
+// callee of `new`.
+func (p *parser) parseMemberOnly() ast.Expr {
+	var x ast.Expr
+	if p.at(token.NEW) {
+		x = p.parseNew()
+	} else {
+		x = p.parsePrimary()
+	}
+	for {
+		switch {
+		case p.at(token.PERIOD):
+			dot := p.next().Pos
+			x = &ast.MemberExpr{X: x, Dot: dot, Sel: p.parseMemberName()}
+		case p.at(token.LBRACK):
+			x = p.finishIndex(x, false)
+		default:
+			return x
+		}
+	}
+}
+
+// parseImportExpr covers ImportCall and ImportMeta (B.3).
+func (p *parser) parseImportExpr() ast.Expr {
+	importPos := p.next().Pos
+
+	if p.at(token.PERIOD) {
+		p.next()
+		switch {
+		case p.atCtx(token.CtxDefer), p.atCtx(token.CtxSource):
+			t := p.next()
+			phase := ast.PhaseDefer
+			if t.Ctx == token.CtxSource {
+				phase = ast.PhaseSource
+			}
+			c := &ast.ImportCall{ImportPos: importPos, Phase: phase, PhasePos: t.Pos}
+			c.Lparen = p.expect(token.LPAREN)
+			c.Args = p.parseArgs()
+			c.Rparen = p.expect(token.RPAREN)
+			return c
+		default:
+			return &ast.MetaProp{MetaPos: importPos, Meta: token.IMPORT, Prop: p.parseIdentName()}
+		}
+	}
+
+	c := &ast.ImportCall{ImportPos: importPos, Phase: ast.PhaseEval}
+	c.Lparen = p.expect(token.LPAREN)
+	c.Args = p.parseArgs()
+	c.Rparen = p.expect(token.RPAREN)
+	return c
+}
+
+// parsePrimary is PrimaryExpression (B.1).
+func (p *parser) parsePrimary() ast.Expr {
+	defer p.trace("PrimaryExpression")()
+
+	t := p.cur()
+	switch t.Kind {
+	case token.THIS:
+		p.next()
+		return &ast.ThisExpr{ThisPos: t.Pos, ThisEnd: t.End}
+
+	case token.NUMBER, token.BIGINT, token.STRING, token.REGEX:
+		p.next()
+		return &ast.BasicLit{Kind: t.Kind, ValuePos: t.Pos, ValueEnd: t.End, HasEscape: t.HasEscape()}
+
+	case token.TRUE, token.FALSE, token.NULL:
+		p.next()
+		return &ast.BasicLit{Kind: t.Kind, ValuePos: t.Pos, ValueEnd: t.End}
+
+	case token.TEMPLATE, token.TEMPLATE_HEAD:
+		return p.parseTemplate()
+
+	case token.LBRACK:
+		return p.parseArrayLit()
+
+	case token.LBRACE:
+		return p.parseObjectLit()
+
+	case token.LPAREN:
+		lp := p.next().Pos
+		x := p.parseExpr(allowIn)
+		return &ast.ParenExpr{Lparen: lp, X: x, Rparen: p.expect(token.RPAREN)}
+
+	case token.FUNCTION:
+		return &ast.FuncExpr{Fn: p.parseFunction(nil, token.NoPos, ast.AccelNone, false)}
+
+	case token.CLASS:
+		return &ast.ClassExpr{Class: p.parseClass(nil, token.NoPos)}
+
+	case token.IDENT:
+		switch t.Ctx {
+		case token.CtxAsync:
+			// `async function` — the [no LineTerminator here] restriction (L)
+			// means a break forces the identifier reading.
+			if p.peek(1).Kind == token.FUNCTION && !p.peek(1).NLBefore() {
+				asyncPos := p.next().Pos
+				return &ast.FuncExpr{Fn: p.parseFunction(nil, asyncPos, ast.AccelNone, true)}
+			}
+		case token.CtxAbstract:
+			if p.peek(1).Kind == token.CLASS {
+				abstractPos := p.next().Pos
+				return &ast.ClassExpr{Class: p.parseClass(nil, abstractPos)}
+			}
+		}
+		return p.parseIdent()
+
+	case token.PRIVATE_IDENT:
+		// Only legal as `#x in obj` (B.4). Parsed here and rejected by name
+		// later if it appears anywhere else.
+		p.next()
+		return &ast.PrivateIdent{HashPos: t.Pos, NameEnd: t.End}
+	}
+
+	p.errorf(t, "expected an expression, found %s", p.describe(t))
+	return p.badExpr()
+}
+
+func (p *parser) parseIdent() *ast.Ident {
+	t := p.cur()
+	if t.Kind != token.IDENT {
+		p.errorf(t, "expected an identifier, found %s", p.describe(t))
+		return &ast.Ident{NamePos: t.Pos, NameEnd: t.Pos + 1}
+	}
+	p.next()
+	id := p.arena.newIdent()
+	*id = ast.Ident{NamePos: t.Pos, NameEnd: t.End, Ctx: t.Ctx, Escaped: t.HasEscape()}
+	return id
+}
+
+// parseIdentName accepts any IdentifierName, including reserved words, for
+// positions where A.2 says IdentifierName rather than Identifier: after a dot,
+// as a LiteralPropertyName, as an ImportSpecifier name.
+func (p *parser) parseIdentName() *ast.Ident {
+	t := p.cur()
+	if t.Kind != token.IDENT && !t.Kind.IsReserved() {
+		p.errorf(t, "expected a property name, found %s", p.describe(t))
+		return &ast.Ident{NamePos: t.Pos, NameEnd: t.Pos + 1}
+	}
+	p.next()
+	id := p.arena.newIdent()
+	*id = ast.Ident{NamePos: t.Pos, NameEnd: t.End, Ctx: t.Ctx, Escaped: t.HasEscape()}
+	return id
+}
+
+func (p *parser) parseTemplate() *ast.TemplateLit {
+	lit := &ast.TemplateLit{}
+	t := p.next()
+	lit.Quasis = append(lit.Quasis, &ast.TemplateElem{Kind: t.Kind, Start: t.Pos, Stop: t.End})
+	if t.Kind == token.TEMPLATE {
+		return lit
+	}
+	for {
+		lit.Exprs = append(lit.Exprs, p.parseExpr(allowIn))
+		q := p.cur()
+		if q.Kind != token.TEMPLATE_MIDDLE && q.Kind != token.TEMPLATE_TAIL {
+			p.errorf(q, "expected a template continuation, found %s", p.describe(q))
+			// Keep the quasi/expr invariant: len(Quasis) == len(Exprs)+1.
+			lit.Quasis = append(lit.Quasis, &ast.TemplateElem{
+				Kind: token.TEMPLATE_TAIL, Start: q.Pos, Stop: q.Pos + 1})
+			return lit
+		}
+		p.next()
+		lit.Quasis = append(lit.Quasis, &ast.TemplateElem{Kind: q.Kind, Start: q.Pos, Stop: q.End})
+		if q.Kind == token.TEMPLATE_TAIL {
+			return lit
+		}
+	}
+}
+
+func (p *parser) parseArrayLit() ast.Expr {
+	lb := p.next().Pos
+	a := &ast.ArrayLit{Lbrack: lb}
+	for !p.at(token.RBRACK) && !p.atEOF() {
+		before := p.i
+		switch {
+		case p.at(token.COMMA):
+			// An Elision is a real node, not a nil slot: a hole is meaningful.
+			a.Elts = append(a.Elts, &ast.Elision{Comma: p.next().Pos})
+			continue
+		case p.at(token.ELLIPSIS):
+			t := p.next()
+			a.Elts = append(a.Elts, &ast.SpreadElem{Ellipsis: t.Pos, X: p.parseAssign(allowIn)})
+		default:
+			a.Elts = append(a.Elts, p.parseAssign(allowIn))
+		}
+		if !p.got(token.COMMA) {
+			break
+		}
+		p.advanced(before)
+	}
+	a.Rbrack = p.expect(token.RBRACK)
+	return a
+}
+
+func (p *parser) parseObjectLit() ast.Expr {
+	lb := p.next().Pos
+	o := &ast.ObjectLit{Lbrace: lb}
+	for !p.at(token.RBRACE) && !p.atEOF() {
+		before := p.i
+		o.Props = append(o.Props, p.parseObjectProp(o))
+		if !p.got(token.COMMA) {
+			break
+		}
+		p.advanced(before)
+	}
+	o.Rbrace = p.expect(token.RBRACE)
+	return o
+}
+
+func (p *parser) parseObjectProp(o *ast.ObjectLit) ast.Expr {
 	if p.at(token.ELLIPSIS) {
-		prm.Ellipsis = p.tok.Pos
-		p.advanceToken()
+		t := p.next()
+		return &ast.SpreadElem{Ellipsis: t.Pos, X: p.parseAssign(allowIn)}
 	}
-	prm.Type = p.parseType()
-	return prm
+
+	// A method definition in an object literal (B.2 → D.3).
+	if m := p.tryObjectMethod(); m != nil {
+		return m
+	}
+
+	key := p.parsePropertyName()
+
+	switch {
+	case p.at(token.COLON):
+		colon := p.next().Pos
+		return &ast.PropertyDef{Key: key, Colon: colon, Value: p.parseAssign(allowIn)}
+
+	case p.at(token.ASSIGN):
+		// CoverInitializedName (K). Legal only after reinterpretation to an
+		// ObjectAssignmentPattern; the flag rides along so a node that was
+		// never reinterpreted can be rejected by name.
+		p.next()
+		o.CoverInit = true
+		return &ast.PropertyDef{Key: key, Colon: token.NoPos, IsCover: true, Value: p.parseAssign(allowIn)}
+
+	default:
+		// Shorthand. Must be an Identifier, not any IdentifierName.
+		if id, ok := key.(*ast.Ident); ok {
+			return id
+		}
+		p.errorAt(key.Pos(), key.End(), "expected `:` after this property name")
+		return key
+	}
 }
 
-// parseTypeParamList parses TypeParameters.
-//
-// A constraint is attached only to the entry it follows. The rule that it also
-// applies to every immediately preceding unconstrained entry is distribution
-// over an already-parsed list; performing it here would erase the written form
-// a formatter needs to reproduce.
-func (p *parser) parseTypeParamList() *ast.TypeParamList {
-	l := &ast.TypeParamList{}
-	l.Lbrack = p.open(token.LBRACK)
-	for !p.at(token.RBRACK) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		tp := &ast.TypeParam{Name: p.expectIdent()}
-		if p.at(token.COLON) {
-			tp.Colon = p.tok.Pos
-			p.advanceToken()
-			tp.Constraint = p.parseConstraintExpr()
-		}
-		l.List = append(l.List, tp)
-		if !p.got(token.COMMA) {
-			break
-		}
-		if p.stalled(before) {
-			continue
-		}
+func (p *parser) parsePropertyName() ast.Expr {
+	switch {
+	case p.at(token.LBRACK):
+		lb := p.next().Pos
+		x := p.parseAssign(allowIn)
+		return &ast.ComputedKey{Lbrack: lb, X: x, Rbrack: p.expect(token.RBRACK)}
+	case p.at(token.STRING), p.at(token.NUMBER), p.at(token.BIGINT):
+		t := p.next()
+		return &ast.BasicLit{Kind: t.Kind, ValuePos: t.Pos, ValueEnd: t.End, HasEscape: t.HasEscape()}
+	default:
+		return p.parseIdentName()
 	}
-	l.Rbrack = p.close(token.RBRACK)
-	return l
 }
 
-// parseConstraintExpr parses a TypeSet: one or more terms joined by `|`.
-func (p *parser) parseConstraintExpr() ast.Expr {
-	x := p.parseTypeSetTerm()
-	for p.at(token.OR) {
-		opPos := p.tok.Pos
-		p.advanceToken()
-		x = &ast.BinaryExpr{X: x, OpPos: opPos, Op: token.OR, Y: p.parseTypeSetTerm()}
+// startsExpr reports whether the current token can begin an expression. Used
+// where the grammar has an optional expression (`return`, `yield`) and ASI
+// decides.
+func (p *parser) startsExpr() bool {
+	switch k := p.kind(); k {
+	case token.IDENT, token.PRIVATE_IDENT, token.NUMBER, token.BIGINT, token.STRING,
+		token.REGEX, token.TEMPLATE, token.TEMPLATE_HEAD, token.LPAREN, token.LBRACK,
+		token.LBRACE, token.LT, token.NOT, token.TILDE, token.ADD, token.SUB,
+		token.INC, token.DEC, token.THIS, token.SUPER, token.NEW, token.IMPORT,
+		token.FUNCTION, token.CLASS, token.TRUE, token.FALSE, token.NULL,
+		token.TYPEOF, token.VOID, token.DELETE, token.AWAIT, token.YIELD:
+		return true
 	}
-	return x
+	return false
 }
 
-// parseTypeSetTerm parses `Type` or `"~" Type`.
-//
-// `~` here is underlying-type, never bitwise-NOT. It is the same node as the
-// operator, because a type-set element is not an expression position and the
-// two never collide; `~` outside a type set is a static rejection.
-func (p *parser) parseTypeSetTerm() ast.Expr {
-	if p.at(token.TILDE) {
-		pos := p.tok.Pos
-		p.advanceToken()
-		return &ast.UnaryExpr{OpPos: pos, Op: token.TILDE, X: p.parseType()}
+func (p *parser) badExpr() ast.Expr {
+	t := p.cur()
+	// A Bad node holds a slot and must still have a non-zero span (§1, §5.4).
+	end := t.End
+	if end == t.Pos {
+		end = t.Pos + 1
 	}
-	return p.parseType()
+	return &ast.BadExpr{From: t.Pos, To: end}
 }

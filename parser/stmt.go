@@ -2,419 +2,375 @@ package parser
 
 import (
 	"github.com/vertex-language/vertex/ast"
-	"github.com/vertex-language/vertex/diag"
 	"github.com/vertex-language/vertex/token"
 )
 
-// parseBlockStmt parses `{ StatementList }`.
+// Statements — vertex_grammar.md section C.
+
+// parseStmt is Statement | Declaration (C StatementListItem).
+func (p *parser) parseStmt() ast.Stmt {
+	defer p.trace("Statement")()
+	if !p.enter() {
+		return &ast.BadStmt{From: p.pos(), To: p.end()}
+	}
+	defer p.leave()
+
+	switch p.kind() {
+	case token.LBRACE:
+		return p.parseBlock()
+	case token.SEMI:
+		return &ast.EmptyStmt{Semi: p.next().Pos}
+	case token.VAR:
+		return p.parseVarDecl()
+	case token.IF:
+		return p.parseIf()
+	case token.DO:
+		return p.parseDoWhile()
+	case token.WHILE:
+		return p.parseWhile()
+	case token.FOR:
+		return p.parseFor()
+	case token.SWITCH:
+		return p.parseSwitch()
+	case token.CONTINUE, token.BREAK:
+		return p.parseBranch()
+	case token.RETURN:
+		return p.parseReturn()
+	case token.THROW:
+		return p.parseThrow()
+	case token.TRY:
+		return p.parseTry()
+	case token.DEBUGGER:
+		t := p.next()
+		return &ast.DebuggerStmt{Debugger: t.Pos, DebuggerEnd: t.End, Semi: p.expectSemi()}
+	case token.FUNCTION, token.CLASS, token.CONST, token.IMPORT, token.EXPORT, token.AT:
+		return p.parseDeclStmt()
+	case token.IDENT:
+		if d := p.tryContextualDecl(); d != nil {
+			return d
+		}
+		// A labelled statement: `LabelIdentifier : LabelledItem` (C.4).
+		if p.peek(1).Kind == token.COLON {
+			label := p.parseIdent()
+			colon := p.next().Pos
+			return &ast.LabeledStmt{Label: label, Colon: colon, Stmt: p.parseStmt()}
+		}
+	}
+	return p.parseExprStmt()
+}
+
+// parseExprStmt is ExpressionStatement (C).
 //
-// The depth reset is the crux of the terminator rule. Every brace that holds a
-// comma-separated list treats a line break as white space; this one holds
-// statements, which do end at line terminators. Saving and zeroing depth is
-// what lets one counter serve both.
-func (p *parser) parseBlockStmt() *ast.BlockStmt {
-	b := &ast.BlockStmt{}
-	saved := p.enterTerminated()
+// The grammar's lookahead restriction is `∉ { {, function, async function,
+// class, let [ }`. Every one of those is dispatched above, so reaching here
+// means the restriction is satisfied — except for `let [`, which is checked
+// here because `let` is an IDENT (see ctx.go) and could be an expression.
+func (p *parser) parseExprStmt() ast.Stmt {
+	if p.atCtx(token.CtxLet) && p.peek(1).Kind == token.LBRACK {
+		p.errorf(p.cur(), "an expression statement cannot begin with `let [`")
+	}
+	x := p.parseExpr(allowIn)
+	return &ast.ExprStmt{X: x, Semi: p.expectSemi()}
+}
 
-	b.Lbrace = p.expect(token.LBRACE)
-	b.List = p.parseStmtList(func() bool { return p.at(token.RBRACE) })
+func (p *parser) parseBlock() *ast.BlockStmt {
+	b := &ast.BlockStmt{Lbrace: p.expect(token.LBRACE)}
+	b.List = p.parseStmtList(token.RBRACE)
 	b.Rbrace = p.expect(token.RBRACE)
-
-	p.leave(saved)
 	return b
 }
 
-// parseStmtList parses `[ terminator ] { Statement terminator }`. The leading
-// optional terminator needs no code: a run of line terminators is one
-// terminator, and it reaches the parser as a flag on the token that follows.
-func (p *parser) parseStmtList(stop func() bool) []ast.Stmt {
-	var list []ast.Stmt
-	for !stop() && !p.at(token.EOF) {
-		before := p.tok.Pos
-		list = append(list, p.parseStmt())
-		p.expectTerminator()
-		if p.stalled(before) {
-			continue
+func (p *parser) parseStmtList(stop token.Kind) []ast.Stmt {
+	var out []ast.Stmt
+	for !p.at(stop) && !p.atEOF() {
+		before := p.i
+		s := p.parseStmt()
+		if s != nil {
+			out = append(out, s)
+		}
+		if !p.advanced(before) {
+			if !p.advanceTo(syncStmt) {
+				break
+			}
 		}
 	}
-	return list
+	return out
 }
 
-func (p *parser) parseStmt() ast.Stmt {
-	switch p.tok.Kind {
-	case token.LBRACE:
-		return p.parseBlockStmt()
+func (p *parser) parseIf() ast.Stmt {
+	s := &ast.IfStmt{If: p.next().Pos}
+	s.Lparen = p.expect(token.LPAREN)
+	s.Cond = p.parseExpr(allowIn)
+	s.Rparen = p.expect(token.RPAREN)
+	s.Body = p.parseStmt()
+	// `if (...) Statement [lookahead ≠ else]` versus the else form (C.3).
+	if p.at(token.ELSE) {
+		s.ElsePos = p.next().Pos
+		s.Else = p.parseStmt()
+	}
+	return s
+}
 
-	case token.LET, token.VAR:
-		return &ast.DeclStmt{Decl: p.parseVarDecl(p.leadComment)}
+func (p *parser) parseDoWhile() ast.Stmt {
+	s := &ast.DoWhileStmt{Do: p.next().Pos}
+	s.Body = p.parseStmt()
+	s.While = p.expect(token.WHILE)
+	p.expect(token.LPAREN)
+	s.Cond = p.parseExpr(allowIn)
+	s.Rparen = p.expect(token.RPAREN)
+	// DoWhileStatement is in TerminatedByASI (L).
+	s.Semi = p.expectSemi()
+	return s
+}
 
-	case token.IF:
-		return p.parseIfStmt()
-	case token.WHILE:
-		return p.parseWhileStmt()
-	case token.FOR:
-		return p.parseForStmt()
-	case token.SWITCH:
-		return p.parseSwitchStmt()
-	case token.SELECT:
-		return p.parseSelectStmt()
+func (p *parser) parseWhile() ast.Stmt {
+	s := &ast.WhileStmt{While: p.next().Pos}
+	p.expect(token.LPAREN)
+	s.Cond = p.parseExpr(allowIn)
+	s.Rparen = p.expect(token.RPAREN)
+	s.Body = p.parseStmt()
+	return s
+}
 
-	case token.RETURN:
-		return p.parseReturnStmt()
-	case token.DEFER:
-		return p.parseDeferStmt()
+// parseFor handles ForStatement and ForInOfStatement (C.3), which share a head
+// up to the token after the initializer.
+func (p *parser) parseFor() ast.Stmt {
+	forPos := p.next().Pos
 
-	case token.BREAK, token.CONTINUE, token.FALLTHROUGH:
-		s := &ast.BranchStmt{TokPos: p.tok.Pos, Tok: p.tok.Kind}
-		p.advanceToken()
+	awaitPos := token.NoPos
+	if p.at(token.AWAIT) {
+		awaitPos = p.next().Pos
+	}
+	p.expect(token.LPAREN)
+
+	// Empty initializer: only the three-clause form.
+	if p.at(token.SEMI) {
+		return p.finishForStmt(forPos, nil)
+	}
+
+	var left ast.Node
+	if p.atForDeclaration() {
+		// ForDeclaration and `var ForBinding` (C.3). Parsed with [~In] so that
+		// `in` is the loop keyword rather than an operator.
+		left = p.parseForDeclaration()
+	} else {
+		left = p.parseExpr(noIn)
+	}
+
+	switch {
+	case p.at(token.IN) && awaitPos == token.NoPos:
+		s := &ast.ForInStmt{For: forPos, Left: left, In: p.next().Pos}
+		s.Right = p.parseExpr(allowIn)
+		s.Rparen = p.expect(token.RPAREN)
+		s.Body = p.parseStmt()
 		return s
 
-	case token.ELSE:
-		// An `else` reached as a statement start means a line terminator
-		// already ended the if statement it belonged to.
-		p.errorHere(diag.ExpectedToken, "a statement", p.describe(p.tok))
-		bad := &ast.BadStmt{From: p.tok.Pos, To: p.tok.End()}
-		p.advance(stmtStart)
-		return bad
-
-	case token.RBRACE, token.EOF:
-		return &ast.BadStmt{From: p.tok.Pos, To: p.tok.Pos}
+	case p.atCtx(token.CtxOf):
+		s := &ast.ForOfStmt{For: forPos, AwaitPos: awaitPos, Left: left, OfPos: p.next().Pos}
+		s.Right = p.parseAssign(allowIn)
+		s.Rparen = p.expect(token.RPAREN)
+		s.Body = p.parseStmt()
+		return s
 	}
 
-	return p.parseSimpleStmt()
+	if awaitPos != token.NoPos {
+		p.errorAt(awaitPos, awaitPos+5, "`for await` requires an `of` clause")
+	}
+	return p.finishForStmt(forPos, left)
 }
 
-// parseSimpleStmt parses an assignment or an expression statement.
+// finishForStmt completes the three-clause form.
 //
-// Assignment is a statement and never an expression, so the decision is made
-// after the target list is parsed rather than by lookahead — and there is no
-// `=` inside any condition for it to be confused with. An assignment target is
-// a bare PrimaryExpr, so a dereference-write and the blank identifier both
-// arrive as ordinary nodes; which shapes are assignable is a static rule.
-func (p *parser) parseSimpleStmt() ast.Stmt {
-	first := p.parseExpr()
-
-	if p.continues() && p.tok.Kind.IsCompoundAssign() {
-		op, opPos := p.tok.Kind, p.tok.Pos
-		p.advanceToken()
-		val := p.parseExpr()
-		return &ast.AssignStmt{
-			Targets: []ast.Expr{first},
-			OpPos:   opPos, Op: op,
-			Values: []ast.Expr{val},
+// The initializer already consumed its own `;` when it was a
+// LexicalDeclaration or VariableStatement — C.3's third production writes only
+// two semicolons for that reason.
+func (p *parser) finishForStmt(forPos token.Pos, init ast.Node) ast.Stmt {
+	s := &ast.ForStmt{For: forPos}
+	switch init := init.(type) {
+	case nil:
+		p.expect(token.SEMI)
+	case *ast.VarDecl:
+		s.Init = init
+		if init.Semi == token.NoPos {
+			p.expect(token.SEMI)
 		}
+	case ast.Expr:
+		s.Init = &ast.ExprStmt{X: init, Semi: p.expect(token.SEMI)}
 	}
-
-	targets := []ast.Expr{first}
-	for p.continues() && p.got(token.COMMA) {
-		targets = append(targets, p.parseExpr())
+	if !p.at(token.SEMI) {
+		s.Cond = p.parseExpr(allowIn)
 	}
+	p.expect(token.SEMI)
+	if !p.at(token.RPAREN) {
+		s.Post = p.parseExpr(allowIn)
+	}
+	s.Rparen = p.expect(token.RPAREN)
+	s.Body = p.parseStmt()
+	return s
+}
 
-	if p.continues() && p.at(token.ASSIGN) {
-		opPos := p.tok.Pos
-		p.advanceToken()
-		var values []ast.Expr
-		for {
-			values = append(values, p.parseExpr())
-			if !p.got(token.COMMA) {
-				break
+func (p *parser) atForDeclaration() bool {
+	switch p.kind() {
+	case token.VAR, token.CONST:
+		return true
+	case token.AWAIT:
+		return p.peek(1).Kind == token.IDENT && p.peek(1).Ctx == token.CtxUsing
+	case token.IDENT:
+		switch p.cur().Ctx {
+		case token.CtxLet:
+			// `let` is only a declaration keyword when a binding follows.
+			switch p.peek(1).Kind {
+			case token.IDENT, token.LBRACK, token.LBRACE:
+				return true
 			}
-		}
-		return &ast.AssignStmt{Targets: targets, OpPos: opPos, Op: token.ASSIGN, Values: values}
-	}
-
-	if len(targets) > 1 {
-		p.errorAt(diag.ExpectedToken, targets[1].Pos(), "'='", "a comma-separated expression list")
-	}
-	// An ExpressionStatement may not be a bare composite or map literal. A
-	// statement that opens with `{` is already a Block by dispatch above; the
-	// remaining case is a typed literal, which needs no parse decision and is
-	// left to the analyzer.
-	return &ast.ExprStmt{X: first}
-}
-
-// parseIfStmt parses an if statement. There is no initializer clause: the
-// two-statement error-checking idiom is intentional.
-//
-// The else clause is attached only when no line terminator precedes it, since
-// inside a block a line terminator ends the statement.
-func (p *parser) parseIfStmt() *ast.IfStmt {
-	s := &ast.IfStmt{If: p.expect(token.IF)}
-	s.Cond = p.parseHeaderExpr("if")
-	s.Body = p.parseBlockStmt()
-
-	if p.continues() && p.at(token.ELSE) {
-		p.advanceToken()
-		switch {
-		case p.at(token.IF):
-			s.Else = p.parseIfStmt()
-		case p.at(token.LBRACE):
-			s.Else = p.parseBlockStmt()
-		default:
-			p.errorHere(diag.ExpectedToken, "'{' or 'if'", p.describe(p.tok))
-			s.Else = &ast.BadStmt{From: p.tok.Pos, To: p.tok.End()}
-			p.advance(stmtStart)
+		case token.CtxUsing:
+			// `using [no LineTerminator here] [lookahead ≠ await]` (C.3).
+			return !p.peek(1).NLBefore() && p.peek(1).Kind == token.IDENT &&
+				p.peek(1).Ctx != token.CtxAwait
 		}
 	}
-	return s
+	return false
 }
 
-// parseWhileStmt parses the only loop primitive.
-func (p *parser) parseWhileStmt() *ast.WhileStmt {
-	s := &ast.WhileStmt{While: p.expect(token.WHILE)}
-	s.Cond = p.parseHeaderExpr("while")
-	s.Body = p.parseBlockStmt()
-	return s
-}
-
-// parseForStmt parses `for IterationBinding in Expression Block`.
-//
-// The mode marker sits on the binding rather than on the iterable, because what
-// transfers is each element, one per iteration. The marker and the two-name
-// form do not combine, but both are parsed together here so the combination is
-// diagnosed as itself rather than as a syntax error at the comma.
-func (p *parser) parseForStmt() *ast.ForStmt {
-	s := &ast.ForStmt{For: p.expect(token.FOR)}
-
-	if p.at(token.MUT) || p.at(token.VAR) {
-		s.ModePos, s.Mode = p.tok.Pos, p.tok.Kind
-		p.advanceToken()
-	}
-
-	s.Names = append(s.Names, p.expectIdent())
-	if p.got(token.COMMA) {
-		s.Names = append(s.Names, p.expectIdent())
-	}
-
-	s.In = p.expect(token.IN)
-	s.X = p.parseHeaderExpr("for")
-	s.Body = p.parseBlockStmt()
-	return s
-}
-
-// parseSwitchStmt parses a switch. Its body and each clause's statement list
-// are terminator-significant.
-func (p *parser) parseSwitchStmt() *ast.SwitchStmt {
-	s := &ast.SwitchStmt{Switch: p.expect(token.SWITCH)}
-	s.Tag = p.parseHeaderExpr("switch")
-
-	saved := p.enterTerminated()
-	s.Lbrace = p.expect(token.LBRACE)
-
-	seenDefault := false
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		isDefault := p.at(token.DEFAULT)
-		if isDefault && seenDefault {
-			p.errorHere(diag.DuplicateDefault, "switch")
-		}
-		seenDefault = seenDefault || isDefault
-		s.Cases = append(s.Cases, p.parseCaseClause())
-		if p.stalled(before) {
-			continue
-		}
-	}
-	s.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return s
-}
-
-func (p *parser) parseCaseClause() *ast.CaseClause {
-	c := &ast.CaseClause{Case: p.tok.Pos}
-
+func (p *parser) parseForDeclaration() ast.Node {
+	d := &ast.VarDecl{}
 	switch {
-	case p.at(token.CASE):
-		p.advanceToken()
-		for {
-			c.Patterns = append(c.Patterns, p.parsePattern())
-			if !p.got(token.COMMA) {
-				break
-			}
-		}
-	case p.at(token.DEFAULT):
-		// Patterns stays nil, which is what marks the default clause.
-		p.advanceToken()
+	case p.at(token.VAR):
+		d.Kind, d.KindPos = ast.VarVar, p.next().Pos
+	case p.at(token.CONST):
+		d.Kind, d.KindPos = ast.VarConst, p.next().Pos
+	case p.at(token.AWAIT):
+		d.AwaitPos = p.next().Pos
+		p.noLineTerminator("`using`")
+		d.Kind, d.KindPos = ast.VarAwaitUsing, p.expectCtx(token.CtxUsing)
+	case p.atCtx(token.CtxUsing):
+		d.Kind, d.KindPos = ast.VarUsing, p.next().Pos
 	default:
-		p.errorHere(diag.ExpectedCase, p.describe(p.tok))
-		p.advance(clauseStart)
-		return c
+		d.Kind, d.KindPos = ast.VarLet, p.next().Pos
 	}
-
-	c.Colon = p.expect(token.COLON)
-	c.Body = p.parseStmtList(func() bool {
-		return p.at(token.CASE) || p.at(token.DEFAULT) || p.at(token.RBRACE)
-	})
-	return c
+	d.List = append(d.List, p.parseBinding(noIn, false))
+	// No `;` here: the caller decides whether this was a for-in/of head.
+	d.Semi = token.NoPos
+	return d
 }
 
-// parsePattern parses one Pattern. In pattern position a leading `.` is always
-// an enum pattern, never an enum shorthand reached through Expression: the
-// payload entries are binding names rather than expressions, and they are views
-// into the payload rather than copies.
-func (p *parser) parsePattern() ast.Expr {
-	if !p.at(token.PERIOD) {
-		saved := p.noLit
-		p.noLit = true
-		x := p.parseExpr()
-		p.noLit = saved
-		return x
-	}
-
-	pat := &ast.EnumPattern{Dot: p.tok.Pos}
-	p.advanceToken()
-	pat.Name = p.expectIdent()
-
-	if p.at(token.LPAREN) {
-		pat.Lparen = p.open(token.LPAREN)
-		for !p.at(token.RPAREN) && !p.at(token.EOF) {
-			before := p.tok.Pos
-			pat.Binds = append(pat.Binds, p.expectIdent())
-			if !p.got(token.COMMA) {
-				break
-			}
-			if p.stalled(before) {
-				continue
-			}
-		}
-		pat.Rparen = p.close(token.RPAREN)
-	}
-	return pat
-}
-
-// parseSelectStmt parses a select. Its body and each clause's statement list
-// are terminator-significant.
-func (p *parser) parseSelectStmt() *ast.SelectStmt {
-	s := &ast.SelectStmt{Select: p.expect(token.SELECT)}
-
-	saved := p.enterTerminated()
+func (p *parser) parseSwitch() ast.Stmt {
+	s := &ast.SwitchStmt{Switch: p.next().Pos}
+	p.expect(token.LPAREN)
+	s.Tag = p.parseExpr(allowIn)
+	p.expect(token.RPAREN)
 	s.Lbrace = p.expect(token.LBRACE)
 
-	seenDefault := false
-	for !p.at(token.RBRACE) && !p.at(token.EOF) {
-		before := p.tok.Pos
-		isDefault := p.at(token.DEFAULT)
-		if isDefault && seenDefault {
-			p.errorHere(diag.DuplicateDefault, "select")
-		}
-		seenDefault = seenDefault || isDefault
-		s.Cases = append(s.Cases, p.parseSelectClause())
-		if p.stalled(before) {
+	for !p.at(token.RBRACE) && !p.atEOF() {
+		before := p.i
+		c := &ast.CaseClause{}
+		switch {
+		case p.at(token.CASE):
+			c.Case = p.next().Pos
+			c.Cond = p.parseExpr(allowIn)
+		case p.at(token.DEFAULT):
+			// More than one default parses and is rejected by name later
+			// (§6.3), so the message can point at the duplicate.
+			c.Case = p.next().Pos
+		default:
+			p.errorf(p.cur(), "expected `case` or `default`, found %s", p.describe(p.cur()))
+			if !p.advanceTo(syncStmt) {
+				break
+			}
 			continue
 		}
-	}
-	s.Rbrace = p.expect(token.RBRACE)
-	p.leave(saved)
-	return s
-}
-
-// parseSelectClause parses one clause, covering all three channel-case forms.
-//
-// The declaring form introduces bindings scoped to this clause's body; the
-// assigning form writes to pre-declared targets; the bare form has neither.
-// Which calls are admissible in this position, and the rule that one select is
-// entirely bare or entirely awaited, are static rules — the shape checked here
-// is only "a call, optionally awaited".
-func (p *parser) parseSelectClause() *ast.SelectClause {
-	c := &ast.SelectClause{Case: p.tok.Pos}
-
-	switch {
-	case p.at(token.DEFAULT):
-		p.advanceToken()
-
-	case p.at(token.CASE):
-		p.advanceToken()
-
-		switch {
-		case p.at(token.LET), p.at(token.VAR):
-			c.KwPos, c.Kw = p.tok.Pos, p.tok.Kind
-			p.advanceToken()
-			for {
-				c.Bindings = append(c.Bindings, p.parseBinding())
-				if !p.got(token.COMMA) {
+		c.Colon = p.expect(token.COLON)
+		for !p.at(token.CASE) && !p.at(token.DEFAULT) && !p.at(token.RBRACE) && !p.atEOF() {
+			inner := p.i
+			c.Body = append(c.Body, p.parseStmt())
+			if !p.advanced(inner) {
+				if !p.advanceTo(syncStmt) {
 					break
 				}
 			}
-			c.Assign = p.expect(token.ASSIGN)
-			c.Op = p.parseChannelOp()
-
-		default:
-			x := p.parseExpr()
-			switch {
-			case p.at(token.ASSIGN):
-				c.Targets = append(c.Targets, x)
-				c.Assign = p.tok.Pos
-				p.advanceToken()
-				c.Op = p.parseChannelOp()
-			case p.at(token.COMMA):
-				c.Targets = append(c.Targets, x)
-				for p.got(token.COMMA) {
-					c.Targets = append(c.Targets, p.parseExpr())
-				}
-				c.Assign = p.expect(token.ASSIGN)
-				c.Op = p.parseChannelOp()
-			default:
-				c.Op = p.requireCall(x, "select")
-			}
 		}
-
-	default:
-		p.errorHere(diag.ExpectedCase, p.describe(p.tok))
-		p.advance(clauseStart)
-		return c
+		s.Cases = append(s.Cases, c)
+		p.advanced(before)
 	}
-
-	c.Colon = p.expect(token.COLON)
-	c.Body = p.parseStmtList(func() bool {
-		return p.at(token.CASE) || p.at(token.DEFAULT) || p.at(token.RBRACE)
-	})
-	return c
+	s.Rbrace = p.expect(token.RBRACE)
+	return s
 }
 
-// parseChannelOp parses `CallExpr` or `"await" CallExpr`.
-func (p *parser) parseChannelOp() ast.Expr {
-	return p.requireCall(p.parseExpr(), "select")
+func (p *parser) parseBranch() ast.Stmt {
+	t := p.next()
+	s := &ast.BranchStmt{TokPos: t.Pos, TokEnd: t.End, Tok: t.Kind}
+	// `continue / break [no LineTerminator here] LabelIdentifier` (C.4, L).
+	if p.at(token.IDENT) && !p.nlBefore() {
+		s.Label = p.parseIdent()
+	}
+	s.Semi = p.expectSemi()
+	return s
 }
 
-// requireCall enforces the named "a call and nothing else" restriction shared
-// by a launch prefix, `defer`, and a channel operation. An awaited call
-// satisfies it where the position admits one.
-func (p *parser) requireCall(x ast.Expr, kw string) ast.Expr {
-	inner := x
-	if a, ok := inner.(*ast.AwaitExpr); ok {
-		inner = a.X
+func (p *parser) parseReturn() ast.Stmt {
+	t := p.next()
+	s := &ast.ReturnStmt{Return: t.Pos, ReturnEnd: t.End}
+	// `return [no LineTerminator here] Expression` (C.4, L). A break makes it
+	// a bare return, which is the classic ASI hazard and why the restriction
+	// exists.
+	if !p.nlBefore() && p.startsExpr() {
+		s.Result = p.parseExpr(allowIn)
 	}
-	if _, ok := inner.(*ast.CallExpr); !ok {
-		p.errorSpan(diag.ExpectedCall, x.Pos(), x.End(), kw)
-	}
-	return x
+	s.Semi = p.expectSemi()
+	return s
 }
 
-// parseReturnStmt parses a return. A multi-value return is a bare comma list,
-// never parenthesized: parentheses construct a tuple, bare commas unbuild one.
-func (p *parser) parseReturnStmt() *ast.ReturnStmt {
-	s := &ast.ReturnStmt{Return: p.expect(token.RETURN)}
+func (p *parser) parseThrow() ast.Stmt {
+	throwPos := p.next().Pos
+	// `throw [no LineTerminator here] Expression` — unlike return, the
+	// expression is required, so a break is an error rather than a shorter
+	// statement.
+	if p.nlBefore() {
+		p.errorf(p.cur(), "no line break allowed between `throw` and its expression")
+	}
+	s := &ast.ThrowStmt{Throw: throwPos, X: p.parseExpr(allowIn)}
+	s.Semi = p.expectSemi()
+	return s
+}
 
-	if p.continues() && !p.at(token.RBRACE) && !p.at(token.EOF) {
-		for {
-			s.Results = append(s.Results, p.parseExpr())
-			if !p.got(token.COMMA) {
-				break
+func (p *parser) parseTry() ast.Stmt {
+	s := &ast.TryStmt{Try: p.next().Pos}
+	s.Body = p.parseBlock()
+
+	if p.at(token.CATCH) {
+		c := &ast.CatchClause{Catch: p.next().Pos}
+		if p.at(token.LPAREN) {
+			c.Lparen = p.next().Pos
+			c.Param = p.parseBindingTarget()
+			if p.at(token.COLON) {
+				// CatchTypeAnnotation is `: any` or `: unknown` only (C.4).
+				// Anything else parses and is rejected by name, so the message
+				// can say which annotations are allowed.
+				p.next()
+				c.CatchType = p.parseType()
+				p.checkCatchType(c.CatchType)
 			}
+			c.Rparen = p.expect(token.RPAREN)
 		}
+		c.Body = p.parseBlock()
+		s.Catch = c
+	}
+	if p.at(token.FINALLY) {
+		f := &ast.FinallyClause{Finally: p.next().Pos}
+		f.Body = p.parseBlock()
+		s.Finally = f
+	}
+	// try with neither catch nor finally parses, per §6.3.
+	if s.Catch == nil && s.Finally == nil {
+		p.errorAt(s.Try, s.Body.End(), "`try` requires a `catch` or `finally` clause")
 	}
 	return s
 }
 
-// parseDeferStmt parses `defer CallExpr`. Arguments are evaluated at
-// registration; only the call is postponed.
-func (p *parser) parseDeferStmt() ast.Stmt {
-	pos := p.expect(token.DEFER)
-	x := p.parseExpr()
-
-	call, ok := x.(*ast.CallExpr)
-	if !ok {
-		p.errorSpan(diag.ExpectedCall, x.Pos(), x.End(), "defer")
-		return &ast.BadStmt{From: pos, To: x.End()}
+func (p *parser) checkCatchType(t ast.TypeExpr) {
+	pt, ok := ast.UnparenType(t).(*ast.PredefinedType)
+	if ok && (pt.Ctx == token.CtxAny || pt.Ctx == token.CtxUnknown) {
+		return
 	}
-	return &ast.DeferStmt{Defer: pos, Call: call}
+	p.errorAt(t.Pos(), t.End(), "a catch parameter may only be annotated `any` or `unknown`")
 }
