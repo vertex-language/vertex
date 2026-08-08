@@ -128,8 +128,14 @@ func (p *parser) tryContextualDecl() ast.Stmt {
 
 	case token.CtxUsing:
 		// `using [no LineTerminator here] [lookahead ≠ await]` (C.1).
-		if p.peek(1).Kind == token.IDENT && !p.peek(1).NLBefore() &&
-			p.peek(1).Ctx != token.CtxAwait {
+		//
+		// The `≠ await` half of the restriction needs no explicit check:
+		// `await` is a ReservedWord (token.AWAIT), never an IDENT, so the
+		// Kind == IDENT test below already excludes it. There is no
+		// token.CtxAwait — `await` never scans as a contextual identifier,
+		// so no Ctx value for it exists (see ctx.go, and stmt.go's
+		// atForDeclaration for the matching `for` case).
+		if p.peek(1).Kind == token.IDENT && !p.peek(1).NLBefore() {
 			return p.parseVarDecl()
 		}
 	}
