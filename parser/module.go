@@ -189,7 +189,11 @@ func (p *parser) parseModuleExportName() ast.Node {
 }
 
 func (p *parser) tryWithClause() *ast.WithClause {
-	if !p.atCtx(token.CtxWith) && !p.at(token.WITH) {
+	// `with` is a ReservedWord (A.2, see the note on parseWithClause below),
+	// so it always scans as token.WITH and never as an IDENT carrying a Ctx.
+	// There is no token.CtxWith — checking atCtx here would be dead code and
+	// referencing the constant doesn't compile, since it was never defined.
+	if !p.at(token.WITH) {
 		return nil
 	}
 	return p.parseWithClause()
