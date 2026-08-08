@@ -79,6 +79,12 @@ func (f *File) Name() string { return f.name }
 // Size is the length of the source in bytes.
 func (f *File) Size() int { return len(f.src) }
 
+// Bytes returns the file's raw source bytes. It is the same retained-not-
+// copied slice NewFile was given: callers such as the scanner, which drive
+// their own byte cursor rather than going through Slice/Between, must not
+// mutate the result (§4.1).
+func (f *File) Bytes() []byte { return f.src }
+
 // PosAt converts a byte offset into a Pos. offset == Size() is valid and is
 // where EOF sits. Panics on an out-of-range offset, which is always a bug in
 // the caller rather than bad input.
