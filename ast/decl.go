@@ -128,6 +128,13 @@ type (
 
 	// MethodDecl is MethodDefinition (D.3) in a class, struct, or object
 	// literal: plain, generator, async, async generator, get, and set.
+	//
+	// It implements both Decl and Expr: as a class or struct member it is a
+	// Decl, and inside an object literal it lives in ObjectLit.Props, which is
+	// typed []Expr (see the comment on that field in expr.go) — one node
+	// shape covers MethodDefinition wherever the grammar allows it, matching
+	// how a class/struct member and an object-literal method share this
+	// exact production (D.3).
 	MethodDecl struct {
 		Decorators []*Decorator
 		Mods       Modifiers
@@ -647,5 +654,6 @@ func (*ExportDecl) stmtNode()       {}
 
 func (*FieldDecl) declNode()       {}
 func (*MethodDecl) declNode()      {}
+func (*MethodDecl) exprNode()      {} // also usable as ObjectLit.Props[i] (D.3)
 func (*CtorDecl) declNode()        {}
 func (*StaticBlockDecl) declNode() {}
