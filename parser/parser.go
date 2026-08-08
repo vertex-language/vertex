@@ -46,9 +46,18 @@ const (
 // The returned tree is never nil. A caller that checks for nil is writing dead
 // code; a caller that discards the tree because diags is non-empty is throwing
 // away the recovery work in §6.4.
+//
+// Scan diagnostics (a bad escape, an unterminated string) and parse
+// diagnostics are merged here, sorted together, since ParseFile is the one
+// entry point that owns both halves of the pipeline. ParseFileTokens does not
+// do this merge itself — see its doc comment — because a caller that scanned
+// separately already has the scan diagnostics and would see them twice.
 func ParseFile(file *token.File, mode Mode) (*ast.File, []token.Diagnostic) {
 	toks, diags := scanner.Scan(file)
-	return ParseFileTokens(file, toks, mode)
+	f, pdiags := ParseFileTokens(file, toks, mode)
+	all := append(diags, pdiags...)
+	token.SortDiagnostics(all)
+	return f, all
 }
 
 // ParseFileTokens parses an already-scanned buffer, for tools that scanned for
