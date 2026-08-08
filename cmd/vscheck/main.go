@@ -79,7 +79,7 @@ func checkFile(path string, mode parser.Mode, dump bool) error {
 		token.SortDiagnostics(diags)
 		for _, d := range diags {
 			pos := file.Position(d.Pos)
-			log.Printf("%s:%d:%d: %s", path, pos.Line, pos.Column, d.Msg)
+			log.Printf("%s:%d:%d: %s", path, pos.Line, pos.Col, d.Msg)
 		}
 		log.Printf("%s: %d diagnostic(s)", path, len(diags))
 	}
