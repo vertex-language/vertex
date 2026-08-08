@@ -225,8 +225,13 @@ func (p *parser) atForDeclaration() bool {
 			}
 		case token.CtxUsing:
 			// `using [no LineTerminator here] [lookahead ≠ await]` (C.3).
-			return !p.peek(1).NLBefore() && p.peek(1).Kind == token.IDENT &&
-				p.peek(1).Ctx != token.CtxAwait
+			//
+			// The lookahead restriction needs no explicit check against
+			// `await`: `await` is a ReservedWord (token.AWAIT), never an
+			// IDENT, so the Kind == IDENT test below already excludes it.
+			// There is no token.CtxAwait — `await` never scans as a
+			// contextual identifier, so no Ctx value for it exists.
+			return !p.peek(1).NLBefore() && p.peek(1).Kind == token.IDENT
 		}
 	}
 	return false
