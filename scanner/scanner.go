@@ -21,7 +21,7 @@ import (
 func Scan(file *token.File) ([]token.Token, []token.Diagnostic) {
 	s := &scanner{
 		file: file,
-		src:  file.Size2Bytes(),
+		src:  file.Bytes(),
 	}
 	s.run()
 	token.SortDiagnostics(s.diags)
@@ -53,6 +53,12 @@ type scanner struct {
 	// can ask what the matching opener was.
 	prevParenWasControl bool
 	prevBraceWasBlock   bool
+
+	// hadExponent is set by scanExponent (number.go) so that scanNumber can
+	// catch `1e5n` — a bigint suffix on a literal that already had an
+	// exponent. Reset on entry to scanExponent; the scanner is single-threaded
+	// per file, so a plain bool is enough.
+	hadExponent bool
 }
 
 func (s *scanner) run() {
