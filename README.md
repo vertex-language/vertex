@@ -1,8 +1,15 @@
-# Vertex
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Vertex" width="100%">
+</p>
 
-**Language Spec 2.2 · Compiler 0.4.0**
+<p align="center">
+  <img src="https://img.shields.io/badge/Spec-2.2-141B3D?style=flat-square&labelColor=4DD9EC&logoColor=141B3D" alt="Spec 2.2">
+  <img src="https://img.shields.io/badge/Compiler-0.4.0-4DD9EC?style=flat-square&labelColor=141B3D" alt="Compiler 0.4.0">
+  <img src="https://img.shields.io/badge/Go-1.23%2B-141B3D?style=flat-square&labelColor=F2D9E3" alt="Go 1.23+">
+  <img src="https://img.shields.io/badge/License-MIT-141B3D?style=flat-square&labelColor=E8F7F5" alt="MIT License">
+</p>
 
-Vertex is a statically-typed, compiled, multi-platform programming language built
+Statically-typed, compiled, multi-platform programming language built
 for explicit control and zero-overhead interop. Nothing crosses a boundary
 implicitly: absence is a union you spell, failure is a return type you declare,
 every change of numeric representation is a call you write, and a condition is a
