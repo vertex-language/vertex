@@ -2,18 +2,25 @@
 
 **Language Spec 2.2 · Compiler 0.4.0**
 
-Vertex is a statically-typed systems and application programming language built
-for explicit control, zero-overhead interop, and first-class concurrency. Every
-value has a statically known layout and every cost is decided at compile time:
-no garbage collector, no unwinder, no vtables, no runtime type information, and
-no hidden allocation.
+Vertex is a statically-typed, compiled, multi-platform programming language built
+for explicit control and zero-overhead interop. Nothing crosses a boundary
+implicitly: absence is a union you spell, failure is a return type you declare,
+every change of numeric representation is a call you write, and a condition is a
+`bool` or it is an error.
 
-Its syntax draws from Swift and Go. Its distinguishing features are a layered
-ownership model with a single visible copy/move marker, and execution substrates
-(`async`, `gpu`, `npu`) declared as function markers and spelled again at the
-call site.
+One grammar spans seven platforms, and a single `use` line at the top of a file
+states which one it expects — who owns memory, which numerics resolve, how a
+foreign name is looked up. The build checks the claim. A file that makes no claim
+is portable by construction and compiles everywhere unchanged. Four native targets
+add machine access: the full pointer family, layout control, deterministic
+destructors, and foreign declarations taken on trust rather than parsed from a
+header. Two host targets hand memory to a runtime and drop the pointer family in
+exchange for reach into a foreign object graph.
 
-The normative reference is **Annex A — Grammar Summary**. This README is a tour.
+Its distinguishing feature is that the target is a property of the file rather
+than of the build system, stated in one line and checked rather than inferred.
+
+The normative reference is the **Grammar Summary**. This README is a tour.
 
 ---
 
@@ -23,23 +30,25 @@ The normative reference is **Annex A — Grammar Summary**. This README is a tou
 - [Quick Start](#quick-start)
 - [Language Tour](#language-tour)
   - [Source File Layout](#source-file-layout)
+  - [The `use` Line](#the-use-line)
   - [Variables and Types](#variables-and-types)
+  - [Numerics and Conversion](#numerics-and-conversion)
   - [Literals](#literals)
   - [Control Flow](#control-flow)
-  - [Ownership and Functions](#ownership-and-functions)
+  - [Functions and Passing Modes](#functions-and-passing-modes)
   - [Structs and Classes](#structs-and-classes)
   - [Generics](#generics)
-  - [Arrays, Slices, and Maps](#arrays-slices-and-maps)
+  - [Contiguous Storage](#contiguous-storage)
   - [Tuples](#tuples)
   - [Enums](#enums)
-  - [Error Handling](#error-handling)
-  - [Raw Pointers and Builtins](#raw-pointers-and-builtins)
-  - [Concurrency](#concurrency)
-  - [Device Offload](#device-offload)
-  - [Abstract Interfaces](#abstract-interfaces)
-  - [Testing](#testing)
+  - [Absence and Failure](#absence-and-failure)
+  - [Pointers and Manual Memory](#pointers-and-manual-memory)
+  - [Foreign Declarations](#foreign-declarations)
+  - [Host Targets](#host-targets)
+  - [Kernel and Graph Functions](#kernel-and-graph-functions)
 - [Operator Precedence](#operator-precedence)
 - [What Is Absent](#what-is-absent)
+- [Open Questions](#open-questions)
 - [Compiler Reference](#compiler-reference)
 - [Platform Support](#platform-support)
 
@@ -64,55 +73,97 @@ vertex version
 
 ## Quick Start
 
+A portable file makes no claim about its target, so it needs no `use` line at all
+and compiles under every build:
+
 ```vertex
-package main
-build linux
+namespace math
 
-declare module "c" {
-    func printf(fmt: string, args: ... int32) -> int32
-}
+export func fib(n: int): int {
+  if n <= 1 {
+    return n
+  }
 
-func fibRecursive(n: int32) -> int32 {
-    if n <= 1 {
-        return n
-    }
-    return fibRecursive(n - 1) + fibRecursive(n - 2)
-}
-
-func fibIterative(n: int32) -> int32 {
-    if n <= 1 {
-        return n
-    }
-    var a: int32 = 0
-    var b: int32 = 1
-    var i: int32 = 2
-    while i <= n {
-        var tmp: int32 = a + b
-        a = b
-        b = tmp
-        i += 1
-    }
-    return b
-}
-
-func main() {
-    printf("--- recursive ---\n")
-    for i in 0..10 {
-        printf("fib(%d) = %d\n", i, fibRecursive(i))
-    }
-
-    printf("--- iterative ---\n")
-    for i in 0..10 {
-        printf("fib(%d) = %d\n", i, fibIterative(i))
-    }
+  var a = 0
+  var b = 1
+  var i = 2
+  while i <= n {
+    let next = a + b
+    a = b
+    b = next
+    i += 1
+  }
+  return b
 }
 ```
 
-`declare module` is a **linkage boundary, not a namespace** — `printf` is
-injected into this file's package and called unqualified. See
-[Abstract Interfaces](#abstract-interfaces).
+A file that wants machine access says so, and gets sized numerics, pointers, and
+a foreign surface in exchange:
 
-`main` takes no parameters and returns nothing.
+```vertex
+namespace main
+
+use native
+use linux
+
+declare module "c" {
+  export func write(fd: int32, buf: const_ptr<byte>, n: usize): int64
+}
+
+func fib(n: int32): int32 {
+  var a: int32 = 0
+  var b: int32 = 1
+  var i: int32 = 0
+
+  while i < n {
+    let next = a + b
+    a = b
+    b = next
+    i += 1
+  }
+  return a
+}
+
+// There is no bridge from `string` to `const_ptr<byte>`, so anything crossing to
+// a C API is bytes assembled by hand. ASCII codes are spelled numerically —
+// Vertex has no character literal, since `'A'` is a string.
+func putLine(v: int32): void {
+  var digits: array<byte, 12> = array<byte, 12>()
+  var n: usize = 0
+  var x = v
+
+  if x === 0 {
+    digits[0] = 48
+    n = 1
+  }
+
+  while x > 0 {
+    digits[n] = uint8(48 + (x % 10))
+    x /= 10
+    n += 1
+  }
+
+  var out: array<byte, 13> = array<byte, 13>()
+  for i in 0..n {
+    out[i] = digits[n - 1 - i]
+  }
+  out[n] = 10                    // '\n'
+
+  write(1, addressof(out[0]) as const_ptr<byte>, n + 1)
+}
+
+func main(): int32 {
+  for i in 0..10 {
+    putLine(fib(i))
+  }
+  return 0
+}
+```
+
+`declare module` is **both the declaration and the binder** — `write` enters this
+file's scope directly and is called unqualified. There is no named-binding import
+form anywhere in the language, which is what makes a `declare module` block the
+only route by which a foreign name can enter a file.
 
 ```sh
 vertex fib.vs
@@ -128,1337 +179,709 @@ vertex -o fib fib.vs
 
 ### Source File Layout
 
-A source file is a package clause, an optional build clause, imports, then
-declarations — in that order.
+A compilation unit is a namespace header, then `use` directives, then top-level
+items — in that order, fixed by the grammar rather than by a directive-region rule.
 
 ```vertex
-package net
+namespace app.net
 
-build linux
+use native
+use linux
 
 import "core/io"
 import (
-    "core/time"
     "app/config"
+    sysio "std/io"
+    _     "app/drivers/sqlite"
 )
 ```
 
-- `package` is mandatory and must be the first non-comment token sequence.
-- `build` selects the target platform and, with it, the ABI family used by every
-  `declare` block in the file. It is not a preprocessor directive: a file whose
-  tag doesn't match the target is excluded whole, never partially. Tags are
-  `linux`, `windows`, `darwin`, `js`, `wasm`, `test`.
-- Imports name a *locator*. The qualifier you write in code is the imported
-  package's own declared name — `time.now()`, not something derived from the
-  path. There is no aliasing, no dot-import, and no blank import.
-- Top-level declarations are order-independent. There is no forward-declaration
-  form because none is needed.
-- A top-level `var` must have a compile-time-evaluable initializer. There is no
-  static initialization order and no initialization-time code.
+- `namespace` is mandatory and file-scoped. It is not a declaration: it cannot
+  nest, cannot be re-opened, and a dotted name names one namespace rather than a
+  chain of implicitly exported ones.
+- Imports are Go-form and bind **Vertex modules by path only**. An `ImportSpec` is
+  an optional alias followed by a string; `_` is the blank alias. There is no
+  `from` clause, no named bindings, no default import, no `import =`.
+- `export Declaration` is the only export form. `export default`, `export =`, and
+  named export lists are gone, because only the deleted import forms could have
+  consumed them.
 
-**Statement termination.** There is no terminator token and no semicolon. A
-statement ends at a line break or at the `}` closing its block. There is no
-automatic-semicolon-insertion machinery and no continuation rule: a line break
-inside `(…)`, `[…]`, or `{…}` is ordinary whitespace, and a line break outside
-one ends the statement. Every multi-line construct is bracket-delimited by
-construction.
+**Statement termination.** There is no ASI. A line break inserts a terminator when
+two things hold: the preceding token can end a statement, and the innermost
+unclosed bracket is a statement-or-member container (a block, class body, struct
+body, enum body, object type, ambient module body, or the top level). A `(` or `[`
+is not such a container, so a line inside an argument list or an array literal
+continues freely, and a *new* line beginning with `(` or `[` can never silently
+glue itself to the previous statement. `;` remains legal everywhere and is
+required nowhere.
+
+---
+
+### The `use` Line
+
+Four slots, in order. Every one is optional; every one present is a claim the
+build checks.
+
+| Slot | Values | Optional because | Meaningful under |
+|---|---|---|---|
+| Memory model | `native`, `host` | implied by the platform | any platform but `any` |
+| Platform | `any`, `windows`, `linux`, `darwin`, `wasm`, `android`, `js` | absent means `any` | — |
+| Runtime | `nostd`, `noentry` | — | native platforms only |
+| Accelerated backend | `cuda`, `msl`, `stablehlo` | — | native platforms only |
+
+```vertex
+use android                 // platform alone — host ownership is implied
+
+use host
+use android                 // identical, and says so
+
+use native
+use linux
+use nostd
+use noentry                 // a kernel module or bootloader
+
+use linux
+use cuda                    // gates kernel func
+
+use any                     // states portability explicitly
+```
+
+The platform line is the load-bearing one: it fixes the numeric table and decides
+how a bare `declare module` specifier resolves. Every platform name is unique
+across the set — `android` is only ever host-owned, `windows` only ever manual — so
+the memory model is already known by the time you've read the platform line. The
+memory model line never changes what compiles; it exists so a file can *say* what
+it is, and so the type system's two independent questions get two places to be
+written.
+
+| | `any` | `android` | `js` | `windows` | `linux` | `darwin` | `wasm` |
+|---|---|---|---|---|---|---|---|
+| Implies | — | `host` | `host` | `native` | `native` | `native` | `native` |
+| `int` | only numeric | boundary-restricted¹ | only numeric | valid | valid | valid | valid |
+| Sized numerics | invalid | mandatory | invalid | valid | valid | valid | valid |
+| Pointer family | no | `weak_ptr` only | no | full | full | full | full |
+| `destructor` | invalid | invalid | invalid | valid | valid | valid | valid |
+| Foreign surface | none | classpath | host bundler | library path | library path, `dynamic:` | library + `framework:` | import namespace |
+
+¹ Open — see [Open Questions](#open-questions).
+
+Three errors are internal to a file and checkable before the build's target is
+known: a memory model line with no platform, a memory model line contradicting its
+platform, and `noentry` without `nostd`. Everything else is checked against the
+build: a line that matches passes, a line that contradicts errors. `use any` is
+the one line that always passes, since "this file asserts no target-specific
+types" is true under every target.
 
 ---
 
 ### Variables and Types
 
-`let` declares an immutable binding; `var` declares a mutable one. Neither says
-anything about heap versus stack.
+`var` and `let` split on **mutability, not scope** — Swift's rule, not
+JavaScript's. Both are block-scoped; neither hoists. `const` is reserved for
+compile-time-only values, which is why three heads survive where two would do.
 
 ```vertex
-let x: int32     = 42
-var y: float32   = 1.5
-let name: string = "vertex"
-let flag: bool   = true
+var x = 10
+x = 20                  // fine
 
-var count: int32          // no initializer — zero value; annotation required
+let y = 10
+// y = 20               // error — let is immutable
+
+const LIMIT: int32 = 4096
 ```
 
-`let` is immutable and **not guaranteed to be addressable** — it may live in a
-register, be an SSA value, or fold away entirely. `var` is mutable and owns a
-real stack slot for its whole lifetime. This is why only a `var` binding can be
-passed to a `mut` parameter: a `let` may not physically exist anywhere to point
-at.
+`number` and `boolean` are renamed `int` and `bool`. Both are `PredefinedType`
+entries; every sized numeric name is an ordinary type identifier, which is exactly
+what lets `int32(a)` parse as a call rather than requiring a conversion production.
 
-Multi-binding forms destructure or declare in parallel:
+---
+
+### Numerics and Conversion
+
+Numerics are the one part of the type system that is not uniform across platforms.
+The grammar for writing `int32` is identical everywhere; whether it *resolves*
+depends on the platform line. The two host targets sit at opposite ends for the
+same underlying reason — the target's own representation decides. A JS engine has
+one numeric representation, so a sized type would assert a width nothing
+distinguishes. A JVM descriptor demands an exact width, so an unsized type is a
+claim it cannot encode.
 
 ```vertex
-let q, r = divmod(10, 3)        // one initializer → tuple destructure
-var a, b = 0, 1                 // matching counts → parallel declaration
-let _, err = parseInt(s: "42")  // `_` discards
+int  int8  int16  int32  int64
+     uint8 uint16 uint32 uint64
+     usize float32 float64
+     byte          // alias for uint8 — says "raw storage", not "small number"
+     bool
 ```
 
-Scalar types map directly to C:
+`usize` is pointer-width: 64-bit on `windows`/`linux`/`darwin`, **32-bit on
+`wasm`**, and `long` on `android`. Code that treats `usize` and `uint64` as
+interchangeable is correct on three platforms and wrong on two.
 
-| Vertex | C type |
-| --- | --- |
-| `int` / `int32` | `int32_t` |
-| `int8` | `int8_t` |
-| `int16` | `int16_t` |
-| `int64` | `int64_t` |
-| `uint` / `uint32` | `uint32_t` |
-| `uint8` / `byte` | `uint8_t` |
-| `uint16` | `uint16_t` |
-| `uint64` | `uint64_t` |
-| `float32` | `float` |
-| `float64` | `double` |
-| `bool` | `bool` |
-| `string` | UTF-8 bytes + length, **no NUL terminator** |
-
-`int` is `int32`; `uint` is `uint32`; `byte` and `uint8` are the *same type* —
-no conversion is required or permitted between them in either direction.
-`char` is a 4-byte Unicode scalar, not a C byte.
-
-Every scalar has a statically known width, copies by register move, and has an
-all-zero zero value. There is no boxed form of any of them.
-
-**Conversions are explicit and written with `as`:**
+**No truthiness, in either direction.** `bool` is one byte with two valid patterns,
+is not a numeric type, and has no conversion call. An integer becomes a boolean
+through a comparison; a boolean becomes an integer through a conditional.
 
 ```vertex
-let wide = x as int64          // sign-extended
-let big  = x as uint64         // zero-extended
-
-let f: float64 = 3.99
-let i = f as int32             // truncates toward zero → 3
-
-let chain = value as int32 as int64   // left-associative, two conversions
+let a: int32 = 0
+let b: bool  = a !== 0
+let c: int32 = b ? 1 : 0
 ```
 
-`as` never touches memory. Between pointer types it is a static
-reinterpretation; between numeric types it is a width-selected
-truncate/extend/int↔float instruction; on an enum it is a tag read. There is no
-dynamic cast, because there is no runtime type information for one to consult.
+**Every change of numeric representation is an explicit call** — no implicit
+narrowing and no implicit widening either, because a rule with an exception is
+harder to hold than a rule without one.
 
-`as` binds tighter than every binary operator, so
-`count as float64 / total as float64` divides two already-converted values.
+```vertex
+let wide = int64(a)         // conversion call — may change the bits
+let same = a as uint8       // type assertion — static only, never changes bits
+```
 
-Predeclared type names are ordinary identifiers, not keywords — they can be
-shadowed. Reserved builtin names (`new`, `addr`, `delete`, `copy`, `zero`,
-`sizeof`, `alignof`, `reinterpret`, `resize`, `drop`, `upgrade`, `transfer`)
-cannot be, and may not be declared as a member, method, or field name.
-
-`_` is legal only as a type-parameter name, an enum-payload binding, or a
-discarded destructuring target. It never introduces a usable binding. `$` is not
-an identifier character.
+For reinterpretation that *is* a representation change, `bit_cast<T>` is the
+native-only route.
 
 ---
 
 ### Literals
 
 ```vertex
-let dec = 1_000_000
-let hex = 0xDEAD_BEEF
-let oct = 0o755
-let bin = 0b1010_0101
-
-let f1 = 1.5e-3
-let f2 = 0x1.8p3        // hex float — the binary exponent is required
+let a = 3_000_000_000
+let b = 0xffff_ffff
+let c = 0b1010_0101
+let d = 0o755
+let e = 0.0                 // `1.` is not a literal — fractional digits are mandatory
+let f = -9_000_000_000
+let s = "vertex"
+let t = `multi
+line`
 ```
 
-`_` is a digit separator with no value; it may not lead or trail a digit run and
-may not be doubled. There is **no negative literal** — `-1000` is unary minus
-applied to `1000`, folded at compile time.
+The mandatory fractional digit is the one lexical cost of the range operator:
+without it `0..10` would lex as the two literals `0.` and `.10`. Underscores are
+separators with no grouping convention, so `1_000_000` and `10_00_000` are the same
+literal.
 
-An integer literal is untyped until it reaches a typed position, where it takes
-that position's type. A literal that does not fit the destination is a compile
-error, never a silent truncation.
-
-```vertex
-let s   = "hello\tworld\u{1F600}"
-let raw = `
-  Vertex 2.2
-  raw and multi-line: no escapes, every line break is part of the value
-`
-let c: char = 'A'
-```
-
-`'A'` and `"A"` are different types and never interconvert implicitly. A string
-carries no NUL terminator; one is manufactured only where a `string` crosses an
-abstract-interface boundary.
-
-Arithmetic traps on overflow. The `&`-prefixed forms wrap:
-
-```vertex
-let t = a + b     // traps
-let w = a &+ b    // wraps; also &- and &*
-```
+There is **no character literal**. `'A'` is a single-quoted string, as in
+TypeScript; byte values crossing to a C API are spelled numerically.
 
 ---
 
 ### Control Flow
 
+Parens are dropped from every head and the body is a mandatory block. `if x doA()`
+is not derivable, and the dangling-`else` ambiguity disappears with it.
+
 ```vertex
-if err != "" {
-    return
-} else if n > 0 {
-    // ...
+if x > 10 {
+  doA()
+} else if x > 0 {
+  doB()
 } else {
-    // ...
+  doC()
+}
+
+while x < 10 {
+  x += 1
 }
 ```
 
-The condition must be `bool` — there is no truthiness conversion anywhere in the
-language. There is **no initializer clause** in the header; the error-checking
-idiom is two statements, and its verbosity is intentional.
-
-`while` is the only loop primitive besides `for`-in. There is no C-style `for`
-and no do/while:
+`if let` binds one identifier — no patterns — and is the ordinary unwrap for every
+nullable union in the language:
 
 ```vertex
-while i < n {
-    i += 1
+if let value = maybeValue {
+  use(value)
+} else {
+  return
 }
 ```
 
-`for` has exactly one shape and consumes an iterable — ranges, fixed arrays,
-dynamic arrays, maps, and strings:
+`for` has one shape. `for`-`in`, `for`-`of`, `for await`, and the C-style triple all
+collapse into it; the iterated expression may be a range, which is the whole reason
+`..` exists:
 
 ```vertex
-for x in 0..10 { }              // ranges are half-open; there is no inclusive form
-for item in items { }           // shared access
-for i, v in items { }           // index and value
-for k, v in scores { }          // key and value; map order is unspecified
+for i in 0..10 { }                 // half-open range
+for item in items { }
+for (name, score) in scores { }    // the binding reaches TupleBindingPattern
 ```
 
-The consuming marker sits on the **binding**, not the iterable: what moves is
-each element, one per iteration, and the marker names what moves.
-
-String iteration decodes UTF-8 into `char` scalars at variable stride; byte-level
-iteration is a separate method and strides raw `uint8`. Neither allocates.
+`switch` takes comma lists instead of grouped fallthrough, and `default` is
+structurally last rather than positionally free:
 
 ```vertex
-switch d {
-case .North, .South:
-    // ...
-case .East:
-    fallthrough
-case .West:
-    // ...
-default:
+switch code {
+  case 0 {
+    doZero()
+  }
+  case 1, 2, 3 {
+    doSmall()
+  }
+  default {
+    doOther()
+  }
 }
 ```
 
-Cases do not fall through implicitly; `fallthrough` is explicit and must be the
-last statement in its clause. At most one `default` per switch. A switch over a
-unit-only enum with no `default` must be exhaustive. The discriminant is read
-once — dense tags lower to a jump table, sparse ones to a compare chain.
-
-```vertex
-defer delete(buf)
-```
-
-`defer` takes a call and nothing else. Its arguments are evaluated at
-registration; only the call is postponed. Deferred calls run in reverse
-registration order on **every** exit edge — fall-through, `return`, `break`,
-`continue`. Because there is no unwinder, "every exit edge" is a finite,
-statically known set, and a `defer` costs exactly the call it defers.
-
-There are no loop labels. A multi-level exit is written with an explicit flag or
-an extracted function.
-
-**Control-flow headers reject bare composite and map literals.** Parenthesize:
-
-```vertex
-if (Vec2{x: 1.0, y: 2.0}).isUnit() { }
-```
-
-Assignment is a statement, never an expression — there is no assignment inside a
-condition and therefore no `=`/`==` confusion class.
+Heads are `ConditionExpression` — an expression with no unparenthesized object
+literal at depth 0. That is the price of paren-free heads, and it is the same price
+Go and Rust pay.
 
 ---
 
-### Ownership and Functions
+### Functions and Passing Modes
 
 ```vertex
-func add(a: int32, b: int32) -> int32 {
-    return a + b
+func add(a: int32, b: int32): int32 {
+  return a + b
 }
 
-add(1, 2)
-add(a: 1, b: 2)
-```
-
-Named and positional arguments may not be mixed in one call. Named arguments
-resolve to positional order at compile time and leave no trace in the binary.
-
-A parameter's convention is picked in the **signature**. The caller writes at
-most one thing, and only for the owning case:
-
-```vertex
-func inspect(w: Widget)      // shared   — read-only view, always bare
-func rename(w: mut Widget)   // exclusive — mutates the caller's binding
-func archive(w: var Widget)  // owning    — copy or move, chosen at the call site
-```
-
-`mut` lowers to a pointer to the caller's slot, but the address is never written
-by the caller:
-
-```vertex
-func increment(n: mut int32) {
-    n += 1
+func divide(a: int, b: int): (int, int) {
+  return (a / b, a % b)
 }
 
-var count: int32 = 0
-increment(count)     // bare — the argument must be an addressable `var` binding
+let (quotient, remainder) = divide(17, 5)
 ```
 
-**The ownership marker.** In an owning position, a `var` prefix means *move* and
-its absence means *copy*. One marker, two meanings, read by presence:
+A body-less function signature — a terminator where the block would be — is an
+overload declaration. Decorators are admitted on function declarations as well as
+the inherited class positions.
+
+**Passing modes** are prefix type operators that pass a value type without copying
+it. An unannotated parameter copies.
 
 ```vertex
-var w = Widget{id: 1}
+func scale(v: mutating Vec2, k: float32): void {
+  v.x *= k
+}
 
-archive(w)         // COPY — deep copy, O(data); w survives
-inspect(w)         // fine
-
-archive(var w)     // TRANSFER — header only, O(1); w is dead after this line
+func length(v: readonly Vec2): float32 {
+  return v.x
+}
 ```
 
-The same pair governs ordinary bindings:
+`readonly` and an unannotated parameter mean the same thing, minus the memcpy;
+`mutating` is the only mode that changes what the program means, and the only route
+to mutating a caller's value type. Both bind in parameter, return, and
+`this`-parameter position — never a local, never a field, never a type argument.
 
-```vertex
-let a = w          // COPY
-let b = var w      // TRANSFER
-```
-
-There is no `.clone()` and no copy operator. Copying is what happens when you do
-not write `var`. The marker takes a binding or a field path and nothing else —
-it does not compose through arbitrary expressions:
-
-```vertex
-var w                       // ✗ transfer outside an owning position
-if var w { }                // ✗ a control-flow header is not an owning position
-let y = var pick(a, b)      // ✗ transfer requires a binding or field path
-```
-
-`mut` is unrelated to this rule: `mut` never takes ownership, so the
-copy/transfer question never arises and its call sites are always bare.
-
-**Owning positions** — where `var` is legal — are exactly:
-
-- the right-hand side of a variable declaration or assignment;
-- an argument to a `var`-typed parameter;
-- an element of a tuple, array, map, or composite literal;
-- a returned expression;
-- the binding of a consuming `for` loop.
-
-Anywhere else a `var` prefix is a compile error naming the position.
-
-**Liveness** is tracked statically through control flow. Use after transfer is a
-compile error — and so is use after a transfer that *may* have happened on some
-path. A conditional transfer is rejected outright rather than resolved at
-runtime, because the moment "was it transferred?" becomes a runtime question the
-language would need drop flags. It forbids the question instead. A transfer
-inside a loop body is rejected for the same reason.
-
-**The Law of Exclusivity** — aliasing *or* mutation, never both — is enforced at
-every call site by reading the callee's signature. Passing one binding as two
-exclusive arguments is a compile error, as is reading a binding in the same call
-that exclusively accesses it, as is overlap through a field path.
-
-**Cost, at a glance:**
-
-| Operation | Copies | Cost |
-| --- | --- | --- |
-| bare copy of an owning fat type | header + payload | O(data) |
-| `var` transfer | header only | O(1) |
-| non-owning view | two words | O(1) |
-| bare copy of `unique T` | **deep** — walks the pointee | O(data) |
-| copy of `shared T` | atomic increment | O(1) |
-
-`unique T` is one word but its bare copy is deep. This is the language's one
-cost cliff hidden behind a thin type, and it's exactly why the marker is visible
-rather than inferred.
-
-**Closures** capture by value at creation. Assigning to a captured binding inside
-the body is a compile error — the write would land on a private copy, and the
-language declines to compile the lie. Writeback is spelled by taking a `mut`
-parameter and letting the caller thread the pointer.
-
-```vertex
-let double = func(x: int32) -> int32 { return x * 2 }
-```
-
-A non-capturing function value is one word — a bare code pointer. A capturing
-closure is two, `{code, env}`.
+- **Value types only.** A `class` binding is already a reference. Pointer types never
+  take a mode; they pass a handle by copy.
+- **Shallow.** `readonly Vec` freezes the struct's own fields; a `mutable_ptr<T>`
+  member stays writable through.
+- **Non-escaping.** A borrow may be passed downward, never stored.
+  `constructor(private x: mutating T)` is an error.
+- **No exclusivity guarantee, no call-site marker.** Two `mutating` parameters may
+  alias; `f(a)` does not signal that `a` is rewritten.
 
 ---
 
 ### Structs and Classes
 
-Structs and classes are **byte-for-byte identical in layout**. Both are
-stack-resident value types by default. A `class` differs only in its
-member/method model — initializers, teardown, receiver conventions, identity
-comparison. Declaring something a `class` does not, by itself, put it on the
-heap.
+A `struct` is a value type with fixed layout, copied by default, constructed by
+direct call. Its body is a deliberate subset of a class body: no `extends`, no
+static blocks, no accessors, no initializers, and a **mandatory type annotation**
+on every field — a value type with a fixed layout has no inferred field types.
 
 ```vertex
 struct Vec2 {
-    x: float32
-    y: float32
-}
+  x: float32
+  y: float32
 
-func (v: Vec2) length() -> float32 { }             // shared receiver
-func (v: mut Vec2) scale(factor: float32) {        // exclusive receiver
-    v.x *= factor
-    v.y *= factor
-}
+  constructor(x: float32, y: float32) {
+    this.x = x
+    this.y = y
+  }
 
-var pos = Vec2{x: 1.0, y: 2.0}
-pos.scale(factor: 2.0)      // bare — no `&`; `mut` is a signature fact
+  scaled(this: readonly Vec2, k: float32): Vec2 {
+    return Vec2(this.x * k, this.y * k)
+  }
+}
 ```
 
-A struct or class body is a **comma-free, newline-separated** list of fields —
-each field sits on its own line, with no comma between them and none trailing
-the last one. This applies only to the *declaration*; a struct literal like
-`Vec2{x: 1.0, y: 2.0}` above is constructing a value, not declaring fields, and
-still uses commas between labeled values. Struct literals require field labels.
-
-Field defaults are evaluated at construction for any field the literal omits:
+Layout control is spelled with decorators, which the language needs for function
+attributes and bitfields regardless:
 
 ```vertex
-struct Config {
-    workers: int32 = 4
-    verbose: bool  = false
+@packed struct Address {
+  ull: uint64
 }
 
-let c = Config{}
+@align(64) struct CacheLine {
+  storage: array<byte, 64>
+}
+
+struct ClassOfDevice {
+  @bits(2)  format: uint32
+  @bits(6)  minor: uint32
+  @bits(5)  major: uint32
+  @bits(11) service: uint32
+  @bits(8)  reserved: uint32
+}
 ```
 
-Classes are constructed by calling the type name with the initializer's
-arguments — **never** with a brace literal. The punctuation alone tells the
-reader which storage discipline is in play:
+Bitfields require an unsigned sized type and are valid only inside a struct; the
+packed word is reached with `bit_cast` rather than by shifting at every site.
+
+A `class` is a reference type, heap-allocated with an inline refcount header, and
+ARC'd invisibly under the native model. Its distinguishing feature is deterministic
+teardown:
 
 ```vertex
-class Animal {
-    name:   string
-    health: int32
-}
+class Socket {
+  readonly fd: int32
 
-func (a: Animal) init(name: string, health: int32) {
-    a.name   = name
-    a.health = health
-}
+  constructor(fd: int32) {
+    this.fd = fd
+  }
 
-func (a: Animal) deinit() { }
-
-let dog = Animal(name: "Rex", health: 100)
-// dog.deinit() is emitted where dog's liveness ends — no defer needed
-```
-
-Class methods are declared outside the class body, as ordinary functions with a
-receiver. The body holds fields only. There is no inheritance, no vtable, no
-dynamic dispatch, and therefore no class header of any kind — every call is
-direct.
-
-A **transferred** binding simply has its teardown not emitted. No flag is set and
-none is checked.
-
-A receiver typed `var` consumes its receiver **unconditionally**: the receiver
-position has no argument slot to carry a marker, so there is no bare form that
-copies. Copy first into a fresh binding to call one non-destructively. This is
-the single exception to the bare-means-copy rule.
-
-`===` and `!==` compare storage identity and are legal on classes only. They
-answer "same allocation?", never "same bytes?" — that's `==`'s question.
-
-**The heap has exactly two doors:**
-
-```vertex
-var u  = unique(Animal(name: "Rex", health: 100))    // sole ownership, no refcount
-var s  = shared(Animal(name: "Luna", health: 100))   // refcounted handle
-var s2 = s                                            // cheap increment, not a deep copy
-var wk = weak(s)                                      // observes without keeping alive
-
-let observer, err = upgrade(wk)
-if err != "" {
-    // the shared value is gone
+  destructor() {
+    close(this.fd)
+  }
 }
 ```
 
-Both still tear down automatically — `unique` at the end of its owner's liveness,
-`shared` once the strong count reaches zero. Neither needs a delete call.
+That destructor is why an error path is a bare `return` instead of ten lines of
+cleanup: every exit past the constructor closes the descriptor at a known point.
+`destructor` takes no parameters, no modifiers, no overloads, and a mandatory
+block — there is nothing to overload, so there is no signature-only form.
 
-`weak T` observes only a `shared` allocation. There is no `unique T` → `weak T`
-path, because a `unique` block carries no control word for a weak reference to
-inspect.
-
-Qualifiers do not stack: `mut var T`, `mut mut T`, and `shared unique T` are
-errors. `mut shared T` and `var shared T` are fine — the qualifier applies to the
-handle, which is itself an ordinary value.
+**Classes have no inheritance.** `implements` is the sole route to polymorphism.
+The one exemption is extending a *foreign* class, which exists because `Activity`,
+`Service`, `View`, and `NSWindow` are subclass-or-nothing APIs.
 
 ---
 
 ### Generics
 
-Type parameters use square brackets, matching type-argument position:
-
 ```vertex
-func identity[T](value: T) -> T {
-    return value
+func clamp<T extends Ordered>(a: T): T {
+  return a
 }
 
-struct Box[T] {
-    value: T
+struct Buffer<T, const N: usize> {
+  private storage: array<T, N>
 }
-
-func (b: Box[T]) get() -> T {
-    return b.value
-}
-
-let b = Box[int32]{value: 42}
-let r = identity(value: "hello")     // T inferred from the argument
 ```
 
-A bare name is constraint `any` — `[T]` means `[T: any]`. Under `any`, only
-assignment, argument passing, and the ownership operations are available: no
-comparison, no arithmetic, no field access.
+A const generic parameter binds a compile-time value as a type parameter, usable
+directly in value position inside the body. It is distinguished from TypeScript's
+`<const T>` modifier by the presence of `:` — one token of lookahead.
 
-A constraint written after a name applies to that name **and to every
-immediately preceding unconstrained name**, so `[A, B: Number]` constrains both.
-A type parameter's scope begins after its own name, so a later parameter may be
-constrained by an earlier one.
-
-**Constraints are their own declaration form** — a compile-time type set,
-optionally paired with required methods. Vertex has no interfaces. A constraint
-is never a value type and is legal only in a `[...]` position.
-
-```vertex
-constraint Ordered {
-    ~int8 | ~int16 | ~int32 | ~int64 | ~float32 | ~float64 | ~string
-}
-
-constraint Renderable {
-    func render() -> string
-}
-
-func min[T: Ordered](a: T, b: T) -> T {
-    if a < b { return a }
-    return b
-}
-
-let m = min[float64](3.14, 2.71)
-```
-
-`~T` admits `T` and every type whose underlying type is `T`, so an alias to
-`float32` still satisfies `~float32`. A bare `T` admits only `T` exactly. `~`
-here is underlying-type, never bitwise-NOT — the two never collide, because a
-type-set element is not an expression position.
-
-Multiple elements in a constraint body form an **intersection**: a type argument
-must satisfy all of them.
-
-Every instantiation is monomorphized into a separate concrete body, so a
-method-constraint call lowers to a direct call on the concrete type. No
-interface value, no vtable.
-
-A method may **not** declare a type parameter of its own — everything a method is
-generic over comes from its receiver type. The receiver's `[T]` *binds* the
-name; it does not introduce a fresh one.
-
-Type arguments may be omitted when every parameter is determined by a value
-argument; inference reaches through composite arguments. A parameter appearing
-only in the return type cannot be inferred and must be supplied explicitly.
-Inference either succeeds or fails — on failure the compiler asks for explicit
-arguments rather than guessing.
-
-Predeclared constraints are `any` (every type) and `comparable` (every type
-supporting `==`/`!=`).
+Instantiation is written `make_shared<Sample>(0, 0)`, `sizeof<Header>()`,
+`bit_cast<uint32>(x)`. Note that `>>` is not a token anywhere in Vertex, precisely
+so `block<span<int32>>` and `alignof<mutable_ptr<T>>()` are ordinary.
 
 ---
 
-### Arrays, Slices, and Maps
+### Contiguous Storage
 
-**Fixed arrays** are inline storage — `N × sizeof(T)` bytes, no header, no
-pointer. They live wherever the binding lives. The length is part of the type and
-must be a compile-time constant.
+Postfix `T[]` is removed. There are four forms, and each says something different:
 
 ```vertex
-var buf:  [1024]uint8            // zero-filled, no initializer needed
-let coords: [3]int32 = [10, 20, 30]
-
-let matrix: [2][2]float32 = [
-    [0.0, 1.0],
-    [1.0, 0.0],
-]
+let a: span<int32>                        // non-owning view
+let b: array<byte, 16>                    // inline, fixed-length
+var c: vector<byte> = vector<byte>()      // heap-backed, growable, owned
+let d: block<int32> = alloc<int32>(usize(256))   // heap-sized-once, move-only, owned
 ```
 
-**Dynamic arrays** are a three-word `{ptr, len, cap}` header over an implicitly
-heap-allocated block — the sole implicit-allocation exception in the language,
-justified by the impossibility of fitting a growable buffer into a fixed frame.
-The block is still owned and torn down normally through whatever binding holds
-the array.
+Owned forms release at scope exit of the owner. Growth and allocation come in
+panicking and fallible pairs throughout:
 
 ```vertex
-var items: []int32 = []
+a.push(1)
+let ok: bool = a.try_push(1)
 
-items.push(42)
-items.reserve(64)
-let last = items.pop()
+let e: block<int32> | null = try_alloc<int32>(usize(256))
 ```
 
-Subscripting with a range produces a **slice view**: two words, `{ptr, len}`,
-owning nothing. While a view is live it counts as a shared borrow, so the buffer
-may be neither mutated nor transferred:
-
-```vertex
-let view = items[1..3]
-```
-
-Interior pointers into a `[]T` do not exist, because `push` may reallocate. Only
-lifetime-checked views do.
-
-| Form | Storage | Growable |
-| --- | --- | --- |
-| `var buf: [N]T` | inline | no |
-| `let arr = [...]` | inline / rodata | no |
-| `var x: []T = []` | heap | yes |
-
-**Maps** use brace literals and require `comparable` keys. Assigning `nil` to a
-key erases it — the load-bearing appearance of `nil` outside `typed_ptr`.
-
-```vertex
-let scores = {"alice": 42, "bob": 7}
-let val    = scores["alice"]
-
-var config: map[string]int32 = {}
-config["workers"] = 4
-config["workers"] = nil          // erase
-```
-
-`nil` is not a general value and has no type of its own.
+`vector<T>` and anything depending on `block<T>`'s heap allocation is invalid or
+conditional under `nostd`.
 
 ---
 
 ### Tuples
 
-**Parens build, bare commas unbuild.** Parentheses appear when a tuple is
-*constructed* — a literal or a type annotation, where they are part of the type's
-shape and never optional. The moment a tuple is *pulled apart* — a `let`
-destructure or a `return` handing several values back — it is written bare.
+Two spellings exist for a tuple type, `[A, B]` and `(A, B)`; the parenthesized form
+is the one the corpus uses. It takes two or more elements, which keeps it disjoint
+from a parenthesized type.
 
 ```vertex
-let pair   = (1, true)
-let point  = (x: 10, y: 20)
-let single = (42,)          // one-element literal: the trailing comma is required
-let plain  = (42)           // just a parenthesized integer
+func listenOn(port: uint16): (Socket | null, int32) { }
 
-func divmod(a: int32, b: int32) -> (int32, int32) {
-    return a / b, a % b
-}
-let quotient, remainder = divmod(10, 3)
-
-func minMax(values: []int32) -> (min: int32, max: int32) {
-    return 0, 100
-}
-let lo, hi = minMax(values: [3, 1, 4])
+let (server, err) = listenOn(uint16(8080))
 ```
 
-Positional access uses `.0`, and chains compose: `t.0.0`.
-
-`()` is the unit type: zero bytes, one value, used where a fallible function has
-nothing to hand back but an error string. It is not spelled `void`, and there is
-no `void` type name — omitting `-> Type` *is* the void form.
-
-Channels can carry tuples:
-
-```vertex
-let stream = chan[(int32, bool)](64)
-```
+Declaration-position destructuring matches the type element for element.
+Assignment-position tuple destructuring is not derivable — `(a, b) = f()` is the
+parenthesized comma expression, and assigning to it is not a form.
 
 ---
 
 ### Enums
 
-Enums support unit variants, tuple variants, or a mix. `case` appears only inside
-`switch`, never in the declaration.
+Enums extend TypeScript's rather than replacing them: the backing type arrives
+through the same `:` annotation used everywhere else, and an associated-value case
+reuses a parameter list verbatim.
 
 ```vertex
-enum Direction {
-    North,
-    South,
-    East,
-    West,
+enum StatusCode: int32 {
+  OK = 200
+  NotFound = 404
+  ServerError = 500
 }
 
-let d: Direction = .South
-
-switch d {
-case .North:
-case .South:
-case .East:
-case .West:
-}
-```
-
-The `.Name` shorthand is legal only where the enum type is inferable from
-context: a typed binding, an argument position, a `return`, or a `case` label.
-
-A unit-only enum **is** its discriminant integer — a switch over one with no
-`default` must be exhaustive.
-
-```vertex
 enum Shape {
-    Point,
-    Circle(float32),
-    Rectangle(float32, float32),
+  Circle(radius: float64)
+  Rectangle(width: float64, height: float64)
+  Point
 }
 
-let s = Shape.Circle(1.5)
-
-switch s {
-case .Point:
-case .Circle(r):
-case .Rectangle(w, _):
+enum Result<T, E> {
+  Ok(value: T)
+  Err(error: E)
 }
 ```
 
-A payload enum is a tagged union sized to the largest variant plus the tag. A
-pattern's payload binding is a **view** into the payload, not a copy; its arity
-must match the variant's declared arity exactly, and `_` discards a position
-without naming it.
+Members are terminator-separated rather than comma-separated. `const enum` is gone —
+`const` is compile-time-only and an enum is already a compile-time construct.
 
-When two positional fields share a type and the distinction matters, carry a
-named struct as the payload:
+---
+
+### Absence and Failure
+
+Vertex has no unwinder and does not throw. Two rules cover every boundary in the
+language, and both are *told* rather than inferred.
+
+**Absence is an explicit union**, unwrapped with `if let`. Bindings are
+non-nullable by default even though C, C++, Objective-C, Java, and JS references
+are all nullable by default on their own side:
 
 ```vertex
-struct MousePos {
-    x: int32
-    y: int32
+declare module "dynamic:c" {
+  export func find(a: const_ptr<byte>): mutable_ptr<Entry> | null
 }
 
-enum Event {
-    Quit,
-    KeyPress(uint8),
-    MouseClick(MousePos),
+if let e = find(name) {
+  use(e)
 }
 ```
 
-**Explicit discriminants** require a backing integer type and are legal only on
-unit variants. Unassigned variants continue from the previous value:
+**Failure is a return union.** A foreign method that unwinds is declared with its
+failure in the return type; a checked failure left out of the union that fires
+anyway panics rather than silently dropping. `instanceof` narrows the union —
+deliberately not `if let`, since one is a value of another type and the other is
+absence.
 
 ```vertex
-enum Status : int32 {
-    Inactive = 0,
-    Active,      // 1
-    Pending,     // 2
+declare module "java.io" {
+  export declare class Reader {
+    read(a: string): Buffer | IOException
+  }
 }
-
-let raw = Status.Active as int32    // a tag read, not a conversion
 ```
 
-Integer-to-enum conversion is an ordinary `switch` with a fallback — there's no
-optional type to lean on:
+C has no exceptions to model, so a C-shaped failure is a sentinel plus a tuple, not
+a union — there is nothing unwinding for a union to describe:
 
 ```vertex
-func statusFromInt(n: int32) -> Status {
-    switch n {
-    case 0: return .Inactive
-    case 1: return .Active
-    case 2: return .Pending
-    default: return .Inactive
-    }
+func listenOn(port: uint16): (Socket | null, int32) {
+  let fd = socket(AF_INET, SOCK_STREAM, 0)
+  if fd < 0 {
+    return (null, errno())
+  }
+
+  let s = Socket(fd)
+  // ...every return past this point closes fd via the destructor
+  return (s, 0)
 }
 ```
 
 ---
 
-### Error Handling
+### Pointers and Manual Memory
 
-There is no optional type, no exception unwinder, and no propagation operator.
-Every fallible or possibly-absent value is a plain tuple: the value, and a string
-that is empty on success.
-
-```vertex
-func parseInt(s: string) -> (int32, string) {
-    if s == "" { return 0, "empty string" }
-    return 42, ""
-}
-
-func findUser(id: int32) -> (User, string) {
-    if id < 0 { return User{}, "invalid id" }
-    return User(id), ""
-}
-
-func removeFile(path: string) -> ((), string) { }
-```
-
-Checking the error is the only pattern; the happy path continues directly below:
+Under `native`, ordinary construction is still ARC'd — `var a = Sample()` allocates
+and refcounts invisibly. Native is *optionally* manual, not unmanaged; reaching for
+the pointer family is a decision, not the price of admission.
 
 ```vertex
-let n, err = parseInt(s: "42")
-if err != "" {
-    log.printf("failed: %s\n", err)
-    return
-}
-// n is usable past this point
+let a: shared_ptr<Sample>       let d: mutable_ptr<Sample>
+let b: unique_ptr<Sample>       let e: const_ptr<Sample>
+let c: weak_ptr<Sample>         let f: void_ptr
+
+var g = make_unique<Sample>(0, 0)
+var h = make_shared<Sample>(0, 0)
+var i = weak_ptr(h)
+if let live = i.lock() { }
 ```
 
-The shape repeats at every step and does not get shorter as call depth grows.
-Every branch stays visible in the text:
+`weak_ptr<T>` is only ever derived from an existing `shared_ptr<T>` and never
+allocates. Raw pointers are non-nullable by default; absence is an explicit union.
 
-```vertex
-func loadModel(path: string) -> (Model, string) {
-    let text, err = readFile(path)
-    if err != "" {
-        return Model{}, err
-    }
-
-    let config, err2 = parseConfig(text)
-    if err2 != "" {
-        return Model{}, err2
-    }
-
-    return Model(config), ""
-}
-```
-
-A function that may simply find nothing uses the same shape as one that can fail
-outright — absence is not a special case. On the error path the value half must
-be the type's zero value, never a partially constructed one. The compiler does
-not enforce this, matching the model's explicit-over-automatic philosophy.
+| Category | Operations |
+|---|---|
+| Address | `addressof(a)` |
+| Arithmetic | `offset` · `byte_offset` · `distance` · `byte_distance` · `align_up` · `align_down` · `is_aligned` |
+| Access | `a[0]` is the dereference — pointer methods are not shadowed by pointee ones |
+| Allocation | `alloc<T>` · `try_alloc<T>` · `alloc_uninit<T>` |
+| Placement | `construct_at(p, …)` · `destroy_at(p)` — the only sanctioned hand-call of a destructor |
+| Casts | `bit_cast<T>` · `pointer_cast<T>` · `pointer_from_address<T>` |
+| Explicit access | `unaligned_load/store<T>` · `volatile_load/store<T>` |
+| Layout | `sizeof<T>()` · `alignof<T>()` · `offsetof<T>("x")` |
 
 ---
 
-### Raw Pointers and Builtins
+### Foreign Declarations
 
-`typed_ptr T` is the raw, last-resort pointer: no ownership tracking, no
-refcount, no teardown ever emitted. It is the one type in the language where
-exclusivity is a convention rather than a proof. Reach for it only when `mut T`
-or `[]T` genuinely can't express what's needed.
-
-```vertex
-var x: int32 = 42
-var p = &x            // address-of  — int32 → typed_ptr int32
-let v = &p            // dereference — typed_ptr int32 → int32
-&p = 99               // write through p
-
-var q: typed_ptr int32 = nil
-if q == nil { }
-```
-
-Unary `&` is address-of on an ordinary value and dereference on a `typed_ptr T`.
-The direction keys on the operand's *statically written* type, so the meaning of
-a source line never flips between instantiations of a generic.
-
-Taking the address *of* a `typed_ptr` binding is therefore unspellable with `&`,
-and is the sole purpose of `addr`:
+One grammar covers C, C++, Objective-C, JVM packages, wasm imports, and JS modules.
+`declare struct` introduces a layout-free type whose definition lives outside
+Vertex, valid only behind a pointer; `declare module` is both the declaration and
+the binder.
 
 ```vertex
-let pp = addr(p)      // typed_ptr (typed_ptr int32) — nesting needs parentheses
+declare struct llama_model
+
+declare module "llama" {
+  export func llama_model_get_vocab(m: const_ptr<llama_model>): const_ptr<llama_vocab>
+  export func llama_decode(c: mutable_ptr<llama_context>, b: llama_batch): int32
+}
 ```
 
-`&` binds **tighter** than member access. `&p.add(1)` parses as `(&p).add(1)`;
-write `&(p.add(1))` when a dereferenced read of a computed address is meant. The
-parenthesis is the visible mark that an address was computed before it was read.
+**Trust, not verification.** The compiler never reads a header, class file, or
+framework definition. A signature that disagrees with the real symbol fails at link
+time, at instantiation, at first use, or at the call site — and *which* is a
+property of the platform, not of the declaration:
+
+| Platform | Specifier means | Bound at | Schemes |
+|---|---|---|---|
+| `windows` | library search path | link time | `dynamic:` |
+| `linux` | library search path | link time | `dynamic:`, `cpp:` |
+| `darwin` | library **or** framework path | link time | `framework:`, `dynamic:`, `cpp:` |
+| `wasm` | import module name | instantiation | none |
+| `android` | classpath package | first use | none |
+| `js` | whatever the host resolver does | build/bundle time | none |
+
+Scheme prefixes live inside the string literal and cost zero grammar; an unknown
+scheme is a resolution error, not a parse error.
+
+**`darwin` is the one platform where a bare specifier is genuinely ambiguous**, so
+the specifier names the resolver directly. A library-resolved block may contain only
+flat function declarations; a framework-resolved block may contain
+`class`/`interface` for Objective-C dispatch, or boundary C structs. Mixing is
+disallowed by construction rather than by a rule to remember — one block resolves
+through exactly one path.
 
 ```vertex
-let buf, err = new[uint8](1024)         // zeroed by default
-if err != "" { return }
-defer delete(buf)
+declare module "System" {              // bare = library path, -lSystem
+  func sample(): int32
+}
 
-let raw, err2 = new[float32](n, align: 64, zero: false)
+declare module "framework:WebKit" {    // framework path, -framework WebKit
+  class WKWebView { }
+}
 ```
 
-`new[T]` allocates `count × sizeof(T)` bytes and returns `(typed_ptr T, string)`.
-`zero: false` is a *claim* that every byte is written before it's read — nothing
-checks the claim. `align` must be a power of two; a violation is an allocation
-failure, not a distinct diagnostic. A count whose byte extent overflows `uint64`
-is likewise an allocation failure.
+The `.framework` extension is never spelled; the resolver appends it.
 
-| Builtin | Shape |
-| --- | --- |
-| `sizeof(T)` / `alignof(T)` | compile-time constants |
-| `new[T](n, align:, zero:)` | `(typed_ptr T, string)` |
-| `delete(p)` | free |
-| `resize(p, n)` / `resize(p, n, zero:)` | invalidates `p` on success, leaves it valid on failure |
-| `copy(dst, src, n)` | always overlap-safe; there is deliberately no unsafe variant |
-| `zero(p, n)` | bulk zero |
-| `addr(p)` | address of an addressable `typed_ptr` binding |
-| `reinterpret(T, x)` | bit-cast between value types of identical size; never casts pointers |
-| `unique(v)` / `shared(v)` | the two heap doors |
-| `weak(s)` / `upgrade(w)` | `upgrade` returns `(shared T, string)` |
-| `drop(x)` | ends a transferred binding's lifetime without emitting teardown |
+**C++** rides in on `cpp:`, which answers *how a name is spelled* at the ABI rather
+than *when* it resolves. Mangling is platform-owned — Itanium on `linux`/`darwin`,
+MSVC decoration on `windows` — and a C++ namespace rides in the specifier string.
+Templates monomorphize, matching Vertex generics, so there is no erasure tax;
+`unique_ptr<T>`/`shared_ptr<T>` are the same layout rather than an analogy, and
+`T&`/`const T&` map onto `mutating`/`readonly`.
 
-`unique(...)` and `shared(...)` *construct* a wrapper, so the copy/transfer rule
-does not apply to the operand — it is moved in unconditionally, exactly as into
-any constructor.
+**Rest parameters are call-shape, not a collection.** C varargs land in registers or
+on the stack per the ABI; nothing inside an extern declaration can index or iterate
+them.
 
-**Undefined rather than rejected** — this is the whole tradeoff of reaching for
-the raw tier: out-of-bounds pointer arithmetic beyond one-past-the-end,
-dereferencing an out-of-bounds pointer, ordering pointers into unrelated blocks,
-deleting a non-`new` address, reading an unzeroed block before writing it, a bulk
-`copy`/`zero` past either extent, and using a `typed_ptr` after a successful
-`resize`.
+```vertex
+declare module "c" {
+  export func printf(fmt: const_ptr<byte>, ...args: CVarArg): int32
+}
+```
+
+**Selectors and descriptors are ordinary string literals.** An Objective-C selector
+send and a JVM overload disambiguated by descriptor are the same grammar — the
+string-literal arm of a property name, plus a computed member call. No production
+distinguishes a selector from a descriptor from an ordinary name; the resolver does,
+from the enclosing block's scheme.
+
+```vertex
+a["sample002(Ljava/lang/String;)V"](b)
+a["webView:didFinishNavigation:"](c, d)
+```
 
 ---
 
-### Concurrency
+### Host Targets
 
-`chan T` is the single currency for moving values between execution contexts.
-It's an implicitly heap-resident refcounted handle — copying it bumps the count,
-never deep-copies buffered contents.
+`android` and `js` both imply `host`: a runtime owns memory, so there is no pointer
+family, no manual allocation, no layout control, no `bit_cast`, no `sizeof`, and no
+`destructor`. Teardown in Vertex is deterministic and scope-bound, while ART's
+`Cleaner` and JS's `FinalizationRegistry` both run at an unspecified time relative
+to collection — the two cannot be reconciled by declaring one in terms of the other.
+Cleanup for foreign resources is written by hand on every exit path.
 
-```vertex
-let ch1 = chan[float32]()          // unbuffered rendezvous
-let ch2 = chan[int32](64)          // buffered
-let ch3: chan float32 = chan[float32]()
-```
+The two targets are mirror images on numerics: `android` **mandates** sized types
+because descriptors are exact; `js` **forbids** them because a JS engine has one
+numeric representation.
 
-Construction is ordinary generic instantiation with an optional capacity
-argument. Allocation failure panics rather than returning a boundary tuple,
-matching native array allocation.
-
-| Method | Waits? | Result |
-| --- | --- | --- |
-| `.send(v)` | yes | *(void)* |
-| `.receive()` | yes | `T` |
-| `.trySend(v)` | no | `bool` |
-| `.tryReceive()` | no | `(T, string)` |
-| `.close()` | no | *(void)* |
-
-**Two spawn prefixes, one handle.** Both `thread` and `async` are call-expression
-prefixes — they modify how a call is scheduled, never the callee's signature —
-and both evaluate to a receive-only `chan T` carrying the callee's single return
-value. Because both terminate in the identical handle, a value produced on an OS
-thread and consumed by a reactor task needs no adapter.
+One pointer-family name survives, and only under `android`:
 
 ```vertex
-let worker = thread crunchNumbers(seed: 105)
-let result = worker.receive()
-```
+var strong: Activity = Activity()
+var weak: weak_ptr<Activity> = weak_ptr(strong)
 
-`thread` runs a call on a real OS thread. The callee is an ordinary function —
-nothing about a declaration changes because some call site spawns it.
-
-**`async` is a function marker**, not just a sigil. It declares that the body
-contains a real poll point — a place the kernel may answer "not yet" — and sets
-`[+Await]` inside:
-
-```vertex
-func fetchBody(id: int32) async -> string {
-    let conn = await dial(id)
-    return await conn.readAll()
-}
-
-func main() {
-    let body = await fetchBody(1)     // main is [+Await]
-    let ch   = async fetchBody(2)     // spawn → chan string
-    let other = ch.receive()
+if let live = weak.lock() {
+  live.doSomething()
 }
 ```
 
-`await` is licensed only under `[+Await]`, which is set by an `async`-marked body
-and by `main`. Propagation stops at a function boundary: an anonymous closure
-written inside an `async` body may not `await` unless it is itself marked
-`async`.
+That is not a memory-model feature. A long-lived callback or static holder capturing
+`this` is a real root, not a cycle, and a tracing collector is correct to keep the
+object alive — so the problem is visibility, not ownership. `js` has no equivalent
+binding today, because the event loop's long-lived roots are usually fixed by
+unregistering rather than by weakening.
 
-`.receive()` is the one method whose waiting mechanism is not fixed. Called bare
-it blocks the calling OS thread; called as `await ch.receive()` it suspends the
-task on the reactor. There is no third form and no per-call-site ambiguity — the
-mode is fully determined by whether `await` is written. A bare `.receive()`
-inside an `async` body would block the underlying thread and starve the reactor,
-so it is rejected.
-
-For many values, construct a channel and hand it to the worker as an ordinary
-argument:
-
-```vertex
-func produce(data: []float32, out: chan float32) {
-    for chunk in data {
-        out.send(process(chunk))
-    }
-    out.close()
-}
-
-let stream = chan[float32](64)
-thread produce(dataset, stream)
-
-while true {
-    let chunk, err = stream.tryReceive()
-    if err != "" { break }
-}
-```
-
-**`select`** multiplexes channels. Every case must be a channel receive
-operation — not a bare async call, not an arbitrary function, nothing else. To
-race a standalone async call, spawn it with the `async` prefix first, which hands
-back a `chan T`, and put the receive on that.
-
-```vertex
-select {
-case a = task1.receive():
-    // ...
-case b = task2.receive():
-    // ...
-default:
-    // makes the whole statement non-blocking
-}
-```
-
-`select` introduces **no waiting behavior of its own** — each case waits exactly
-the way its receive would wait in that context. A single `select` must therefore
-be entirely bare or entirely `await`-prefixed: one mode blocks a thread and the
-other suspends a task, and there is no "first ready wins" across two different
-wait primitives.
-
-```vertex
-select {
-case a = await task1.receive():
-case b = await task2.receive():
-}
-```
-
-Function coloring is accepted deliberately. Keeping the state machine explicit is
-what lets a custom reactor be written against platform primitives, and what keeps
-foreign blocking calls from silently breaking a hidden scheduler. Putting a
-blocking call inside an `async` body starves the event loop; the language does
-not detect this, and the marker discipline is what makes it visible in the source.
+On `android`, every class is a class file, which is why there is no decorator to
+mark one dispatchable from the host runtime — `use android` already says it, one
+line earlier and once per file. `darwin`'s `@objc` survives for the opposite reason:
+there are genuinely two lowerings there, and the platform line cannot pick.
 
 ---
 
-### Device Offload
+### Kernel and Graph Functions
 
-`gpu` and `npu` are device-offload markers built into the core language. They
-differ by **programming model, not by vendor** — no vendor name appears anywhere
-in Vertex source, and the specific device is selected by the toolchain.
-
-|  | `gpu` | `npu` |
-| --- | --- | --- |
-| Model | per-thread execution over an index space | whole-array operations over tensors |
-| Launch shape | optional `(blocks:, threads:)` | none — shape is carried by the types |
-| Body language | unrestricted Vertex | restricted |
-| Element access | ordinary subscripting | elementwise operators and namespace calls only |
-| Divergent branching | permitted | rejected — the selector must be scalar |
-
-A marker sitting at the vendor level would force source targeting one vendor's
-silicon to be written using another vendor's product name, which is why no such
-spelling exists.
+A `kernel func` or `graph func` body is valid only in a file that names an
+accelerated backend, and the backend decides which intrinsics resolve inside it.
 
 ```vertex
-func matmul(a: []float32, b: []float32) gpu -> []float32 {
-    // ordinary Vertex
-}
+namespace kernels
 
-let d = gpu(blocks: 16, threads: 256) matmul(x, y)
-```
+use linux
+use cuda
 
-```vertex
-func vecAdd(a: tensor[float32, 1024], b: tensor[float32, 1024]) npu
-        -> tensor[float32, 1024] {
-    return a + b
-}
-
-var ha: [1024]float32
-var hb: [1024]float32
-
-let sum = npu vecAdd(ha, hb)     // sum: [1024]float32
-```
-
-`gpu` and `npu` launches are ordinary **synchronous** calls: host-typed arguments
-in, a host-typed result directly out. They do not produce channels. A launch is
-legal only when the callee carries the matching marker, and a marked function is
-not callable without its prefix — the marker must agree at both ends. A function
-carries at most one marker; the markers name mutually exclusive execution
-substrates and no combination of two is meaningful.
-
-`LaunchConfig` is legal only on `gpu`; omitting it dispatches with a
-compiler-chosen shape.
-
-**Inside an `npu` body:**
-
-- `tensor[...]` types and the `npu.` namespace become grammatical, and are
-  grammatical nowhere else.
-- Subscripting a tensor is a compile error. Element access is available only
-  through elementwise operators and namespace calls.
-- Elementwise `+ - * /` and unary `-` require operands sharing element type and
-  shape. Comparisons yield a `bool` tensor of the same shape.
-- A branch selector must be scalar `bool` or `int32`. Per-element branching is
-  expressed with `npu.Select`.
-- Loop-carried bindings must keep identical type, shape, and element type across
-  iterations. `break` and `continue` are compile errors.
-- Plain casts saturate on overflow into the narrow integer types.
-
-Signature-eligible tensor element types are `float32` and `int8`. `bf16`,
-`fp8e4m3`, `fp8e5m2`, and `int4` are body-only — legal on a local binding, never
-on the function's own signature.
-
-The `npu.` member set is **closed**: not declarable, not shadowable, not
-extensible.
-
-| Category | Members |
-| --- | --- |
-| Math | `Abs Sign Floor Ceil Round Sqrt Rsqrt Exp Expm1 Log Log1p Sin Cos Tan Tanh Sigmoid IsFinite Max Min Mod Pow Atan2` |
-| Contraction | `Dot` — accumulates in `float32` regardless of input precision |
-| Selection | `Select` |
-| Shape | `Reshape Transpose Broadcast Concat Slice Reverse Pad` |
-| Reduction | `Sum MaxReduce MinReduce Product` |
-| Constants | `Splat Iota` |
-| Quantization | `Quantize Dequantize` |
-
-`npu.Quantize[T]` and `npu.Dequantize[T]` take a type argument and a scalar
-scale, and are the only members that do.
-
----
-
-### Abstract Interfaces
-
-Foreign interop is a structural contract: you describe the *call shape* of the
-external library using native Vertex types, and the backend emits the correct
-calling convention for the target.
-
-A foreign resource is an opaque handle:
-
-```vertex
-type SDL_Window = abstract
-type NSView     = abstract
-```
-
-`abstract` says "structure exists, but Vertex declines to model it" — no
-arithmetic, no dereference, no stride. Each alias is a distinct **nominal** type;
-two abstract aliases never unify however identically they were minted. An
-abstract handle has no `nil` and never participates in a null comparison; its
-zeroed representation is legal only as the value half of an error-path tuple.
-Copy does not exist for one — it may be accessed or moved.
-
-**Two block forms.** Both require the file to carry a build tag, which picks the
-ABI family:
-
-```vertex
-package app
-build linux
-
-type SDL_Window = abstract
-
-declare module "sdl2" {
-    func SDL_CreateWindow(title: string, x: int32, y: int32,
-                          w: int32, h: int32, flags: uint32) -> (SDL_Window, string)
-    func SDL_DestroyWindow(window: SDL_Window)
-    func SDL_GetWindowSize(window: SDL_Window, w: mut int32, h: mut int32)
-    func SDL_SetEventFilter(filter: func(int32) -> int32)
-}
-
-let window, err = SDL_CreateWindow("game", 0, 0, 800, 600, 2)
-```
-
-A declare block is a **linkage boundary, not a namespace** — symbols declared
-inside are injected into the file's current package and called unqualified. The
-string names the module or framework the linker or bundler resolves; it is never
-a path and never contains slashes.
-
-`declare framework` names a platform-bundled, versioned library and is legal only
-where the target platform has a first-class notion of one:
-
-```vertex
-build darwin
-
-declare framework "AppKit" {
-    class NSWindow {
-        init func() -> NSWindow
-        init func initWithContentRect(contentRect: Rect, styleMask: uint64,
-                                      backing: uint64, deferred: bool) -> NSWindow
-        func center()
-    }
+export kernel func saxpy(a: device_ptr<float32>, n: int32): void {
+  let i = threadIdx.x
 }
 ```
 
-`init` is a **prefix modifier** on `func`, not a function name. The unnamed form
-is what bare `Type(...)` construction resolves to; the named form is what
-`Type.someName(...)` resolves to. At most one unnamed initializer per foreign
-class, and an initializer must return its enclosing type.
-
-`declare module` is the everything-else bucket — flat C libraries, C++ shared
-objects, Windows DLLs, JS modules. It optionally takes a **variant tag**, a
-fixed, closed set of strings checked against the file's build tag:
+- **Kernel** — SIMT, side-effecting, lowers to PTX or MSL. `device_ptr<T>` and the
+  thread-context intrinsics (`threadIdx`, `blockIdx`, `blockDim`, `gridDim`) are
+  valid only inside one. Kernels are nameable but not callable by host code; they go
+  through `compile` and `launch`.
+- **Graph** — pure dataflow over whole tensors, no thread context, lowers to a
+  StableHLO string. Callable directly once compiled, no launch configuration.
 
 ```vertex
-declare module ["<variant>"] "engine" { }
+let compiled = compile(saxpy)
+launch(config, compiled, a, b, n)
 ```
 
-The bracket exists to *narrow* a default convention, never to introduce a
-capability unavailable without it. Omitting it means "use the default for this
-build tag". `declare framework` never takes one — bundled message-passing linkage
-has exactly one convention by design, and unlike a C++ ABI it does not fork by
-compiler, standard library, or flag.
-
-**Exactly what is written is what is linked.** A declare block contains only
-declarations corresponding to real entry points: no bodies, no visibility
-modifiers, no marker declarations, no remapping clauses, and **no fields** — it
-describes call shape only, never foreign-side layout. That is what keeps "which
-C++ ABI, exactly?" out of the type system and confined to the linker, where the
-variant tag answers it. Ownership keywords are banned too: ownership is a fact
-about a wrapper's field, decided in the wrapper.
-
-**The boundary tuple.** Foreign functions do not throw into Vertex. A call that
-can fail — a nullable pointer return, a JS call that may throw or yield
-`undefined` — is declared as returning the standard error tuple `-> (T, string)`.
-A status-plus-out-param shape is `-> (int32, T, string)`. Interop adopts the
-native convention, not the reverse.
-
-| Foreign shape | Vertex form |
-| --- | --- |
-| `const char*` | `string` — marshalled NUL-terminated at the boundary |
-| writable scalar out-param | `mut T` — literally the pointer parameter |
-| pointer plus length | `[]T` for read, `mut []T` for write |
-| pointer held and strided manually | `typed_ptr T` — the last resort |
-| property read or foreign static field | ordinary bodyless `func` returning the field's type |
-
-**Ownership lives in the wrapper**, whose `deinit` releases the resource:
-
-```vertex
-class Window {
-    handle: SDL_Window
-}
-
-func (w: Window) init(title: string) {
-    let handle, err = SDL_CreateWindow(title, 0, 0, 800, 600, 2)
-    if err != "" {
-        // report and bail
-    }
-    w.handle = handle
-}
-
-func (w: Window) deinit() {
-    SDL_DestroyWindow(w.handle)
-}
-
-func (w: Window) size() -> (int32, int32) {
-    var width:  int32 = 0
-    var height: int32 = 0
-    SDL_GetWindowSize(w.handle, width, height)
-    return width, height
-}
-```
-
-**Callbacks.** A boundary `func(...)` parameter is a bare function pointer: one
-word, no environment. Only a non-capturing function converts:
-
-```vertex
-func onEvent(code: int32) -> int32 { return 0 }
-
-SDL_SetEventFilter(onEvent)     // legal
-```
-
-```vertex
-var count: int32 = 0
-
-SDL_SetEventFilter(func(code: int32) -> int32 {
-    count += 1     // rejected twice over: assignment to a captured binding,
-    return 0       // and a capturing closure cannot cross the boundary
-})
-```
-
-The rejection is arithmetic rather than stylistic: the closure is two words, the
-foreign slot holds one, and nothing on the foreign side will own the environment.
-
-If a foreign signature requires a non-opaque, layout-dependent foreign type to
-cross directly, that is out of scope for this layer — wrap it behind an opaque
-handle and expose accessors.
-
----
-
-### Testing
-
-`test` is a function marker, legal only in a file tagged `build test`. It sits
-between the parameter list and `->`. A test function takes no parameters and is
-auto-discovered by the runner.
-
-```vertex
-package arithmetic_test
-build test
-
-import "arithmetic"
-
-func test_add()        test -> Expected(int32, "15") { return arithmetic.add(a: 10, b: 5) }
-func test_comparison() test -> Expected(bool, "1")   { return 5 > 3 }
-func test_no_crash()   test                          { arithmetic.add(a: 0, b: 0) }
-```
-
-`Expected(Type, "string")` names the result type and the exact **rendered** value,
-compared against the auto-emitted format. Omitting the result type means the test
-passes as long as it compiles and runs without crashing.
-
-| Type | Format | `Expected` for value `5` |
-| --- | --- | --- |
-| signed integers | `%d` | `Expected(int32, "5")` |
-| unsigned integers | `%u` | `Expected(uint32, "5")` |
-| floats | `%f` | `Expected(float32, "5.000000")` |
-| `bool` | `%d` over `1`/`0` | `Expected(bool, "1")` |
-| `string` | `%s` | `Expected(string, "hello")` |
-
-A test can also assert that a line **fails to compile**. The two-argument form
-additionally requires the diagnostic text to match, which is how the language
-pins its own error messages as part of its specification rather than as an
-implementation detail:
-
-```vertex
-func test_bad_add() test -> Expected(error) {
-    return arithmetic.add(a: 10, b: "5")
-}
-
-func test_bad_cast() test -> Expected(error, "cannot convert string to int32") {
-    let x: int32 = "hello" as int32
-}
-```
-
-`build test` is the only build tag that changes what is *grammatical* rather than
-only what is linkable.
-
----
-
-## Operator Precedence
-
-Highest binding first. Every level except `..` is left-associative.
-
-| Level | Operators |
-| --- | --- |
-| 0 | `&` address-of / dereference (prefix — binds tighter than `.`) |
-| 1 | `.` member and tuple access, `(...)` call, `[...]` index/slice/instantiate, launch prefixes |
-| 2 | `-` `!` `~` (prefix), `await` |
-| 3 | `as` |
-| 4 | `<<` `>>` |
-| 5 | `*` `/` `%` `&` `&*` |
-| 6 | `+` `-` `\|` `^` `&+` `&-` |
-| 7 | `..` (non-associative) |
-| 8 | `==` `!=` `<` `>` `<=` `>=` `===` `!==` |
-| 9 | `&&` |
-| 10 | `\|\|` |
-| — | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` — statements, not operators |
-
-**Shifts sit above multiplication.** This is a deliberate departure from C: a
-shift is a scaling operation and reads as one, and the C precedence is the single
-most common source of parenthesis-omission bugs in bit-manipulation code.
-
-`..` is non-associative — `a..b..c` is a compile error. Every range is half-open;
-to cover the full domain of a narrow integer type, iterate a wider one and
-convert.
-
-`&&` and `||` short-circuit and their operands must be `bool`.
-
----
-
-## What Is Absent
-
-Every construction in the language serves one invariant: **every value has a
-statically known layout, and every cost is decided at compile time.**
-
-| Absent from every Vertex binary | Replaced by |
-| --- | --- |
-| Garbage collector | static liveness and scope teardown; refcounts only where `shared` is written |
-| Exception unwinder | the `(T, string)` tuple and ordinary control flow |
-| Vtables and dynamic dispatch | no inheritance; every call direct; generics monomorphized |
-| Drop flags | conditional transfer is a compile error |
-| Null-pointer discipline | no general `nil`; absence is an error tuple |
-| Runtime type information | every cast resolved statically |
-| Hidden allocation | the heap is reachable only through `unique`, `shared`, and the container exception — all spelled in source |
-
-Each row is the same trade in the same direction: a runtime question converted
-into a compile-time proof or a visible piece of syntax.
+`simd<T, N>` is trivially copyable and needs no modifier; `tensor<T, ...dims>` is
+shape-encoded and used exclusively on the graph route. No backend applies under
+`android`, `js`, or `wasm`.
 
 ---
 
@@ -1500,8 +923,8 @@ Usage:
       Anything after -- is passed to the compiled program, not to vertex.
 
   vertex test [-dir <path> | -file <path>] [-run <substr>]
-      Discover 'test'-marked functions in a `build test` package and run
-      them, comparing each against its Expected(...) result.
+      Discover 'test'-marked functions in a test package and run them,
+      comparing each against its expected result.
 
   vertex targets
       List every target this toolchain can actually build for.
@@ -1521,19 +944,19 @@ Build flags:
                           holding main)
   -packages-dir <path>  packages root; overrides $VERTEX_PATH
   -emit-vir             emit Vertex IR text (.vir), one file per package
-  -emit-vbyte             emit Vertex IR binary (.vbyte), one file per package
+  -emit-vbyte           emit Vertex IR binary (.vbyte), one file per package
   -v                    report each pipeline stage on stderr
 
 Run flags:
   -packages-dir <path>  packages root; overrides $VERTEX_PATH
-  -v                     report each pipeline stage on stderr
+  -v                    report each pipeline stage on stderr
 
 Test flags:
-  -dir <path>            directory holding `build test` files (default: .)
-  -file <path>           a single test file
-  -run <substr>          only run tests whose name contains this substring
-  -packages-dir <path>   packages root; overrides $VERTEX_PATH
-  -v                      print every test, not just failures
+  -dir <path>           directory holding test files (default: .)
+  -file <path>          a single test file
+  -run <substr>         only run tests whose name contains this substring
+  -packages-dir <path>  packages root; overrides $VERTEX_PATH
+  -v                    print every test, not just failures
 ```
 
 **Examples:**
@@ -1556,15 +979,19 @@ vertex version
 | `vertex build -emit-vir` | `.vir` per package | human-readable Vertex IR; inspect lowering |
 | `vertex build -emit-vbyte` | `.vbyte` per package | binary Vertex IR |
 | `vertex run` | *(runs immediately)* | build for the host and execute in one step |
-| `vertex test` | *console* | discover and run `test`-marked functions |
+| `vertex test` | *console* | discover and run test functions |
 | `vertex targets` | *console* | list every buildable target, marking the host |
 
 `$VERTEX_PATH` sets the packages root; `-packages-dir` overrides it. When
 neither is set, the compiler defaults to `~/.vertex/packages`.
 
-A `-target` must be compatible with a file's `build` tag; a file whose tag does
-not match is excluded from the build whole, never partially. An unrecognized
-target name is a compile error naming the known set, not a silent fallback.
+A `-target` must agree with every `use` line in the files it builds. A platform line
+that contradicts the resolved target is a compile error, not a filter — and a file
+carrying *any* `use` line cannot compile at all until the build has a resolved
+target, since there is nothing to check the claim against. A file with no `use` line
+made no claim and rides along under whatever profile the build resolves. An
+unrecognized target name is a compile error naming the known set, not a silent
+fallback.
 
 ---
 
@@ -1585,18 +1012,16 @@ list at runtime, marking the host with `*`.
 | `freestanding-amd64` | flat image only; single package, entry must be `_start` | no — flat has no loader | yes |
 | `freestanding-arm64` | flat image only; single package, entry must be `_start` | no — flat has no loader | yes |
 
+The freestanding targets are the `use native` + `use nostd` + `use noentry` case: a
+kernel module and a bootloader are both spelled that way, neither needs its own
+platform name, and both inherit native's pointer and sizing rules unchanged.
+
 `linux-riscv64` and every powerpc/mips/loongarch/s390x spelling are valid
 `.vir` target triples per the language spec but have no `cpu/lower`, object,
 or linker implementation in vvm, so they don't appear above. `linux-386` and
 `windows-386` are similarly absent: vvm emits x86 ELF object bytes but
-registers no ELF linker backend for x86. `browser/wasm`, `browser/js`, and
-`android` have no backend at all yet.
-
----
-
-## Documentation
-
-- [Annex A — Grammar Summary](https://github.com/vertex-language/spec/README.md) — normative grammar, static rules, and the index of rejected forms
+registers no ELF linker backend for x86. The `wasm`, `js`, and `android` platform
+lines are specified in full but have no backend yet.
 
 ---
 
